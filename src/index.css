@@ -1,0 +1,247 @@
+@import "tailwindcss";
+
+:root {
+  --color-seal: #DBF2FC;
+  --color-seal-mist: #F4F8FB;
+  --color-navy: #072D59;
+  --color-navy-hover: #0A3D7A;
+  --color-crimson: #FD6E88;
+  --color-crimson-hover: #F95573;
+
+  --font-sans: "Plus Jakarta Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter, sans-serif;
+  --font-display: "Newsreader", Georgia, Cambria, "Times New Roman", serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+
+  --color-seal-tint: rgba(219, 242, 252, 0.35);
+  --color-seal-soft: rgba(219, 242, 252, 0.55);
+  --color-navy-border: rgba(7, 45, 89, 0.12);
+  --color-navy-border-strong: rgba(7, 45, 89, 0.18);
+  --color-navy-muted: rgba(7, 45, 89, 0.68);
+  --color-crimson-tint: rgba(253, 110, 136, 0.15);
+  --color-crimson-ring: rgba(253, 110, 136, 0.28);
+  --folio-transition: 150ms cubic-bezier(0.2, 0.8, 0.2, 1);
+  --folio-spring: 260ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+:root[data-contrast="high"] {
+  --color-navy-border: rgba(7, 45, 89, 0.24);
+  --color-navy-border-strong: rgba(7, 45, 89, 0.36);
+  --color-navy-muted: rgba(7, 45, 89, 0.86);
+  --color-seal-mist: #E7F2F9;
+}
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+    margin: 0;
+    padding: 0;
+  }
+
+  body {
+    font-family: var(--font-sans);
+    color: var(--color-navy);
+    background-color: var(--color-seal-mist);
+    overscroll-behavior: none;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  button:focus-visible,
+  a:focus-visible,
+  select:focus-visible {
+    outline: 2px solid var(--color-crimson);
+    outline-offset: 2px;
+  }
+
+  h1,
+  h2,
+  h3 {
+    letter-spacing: -0.025em;
+  }
+}
+
+.canvas-drawing-surface {
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* Seal & Crimson Surface Ladder & Editorial Typography */
+.folio-shelf-canvas {
+  background-color: #F4F8FB;
+}
+
+.folio-hero-banner {
+  background:
+    radial-gradient(52% 95% at 86% 6%, rgba(253, 110, 136, 0.16) 0%, rgba(253, 110, 136, 0) 70%),
+    linear-gradient(180deg, rgba(212, 238, 252, 0.85) 0%, rgba(244, 248, 251, 0) 100%);
+}
+
+.folio-display-heading {
+  font-family: var(--font-display);
+  letter-spacing: -0.025em;
+}
+
+.folio-section-label {
+  letter-spacing: 0.08em;
+}
+
+.folio-mono,
+kbd {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.folio-cover-lift {
+  transition: transform var(--folio-spring), filter var(--folio-spring);
+}
+
+.folio-desk-dotmat {
+  background-color: #E4EDF4;
+  background-image: radial-gradient(rgba(7, 45, 89, 0.09) 1px, transparent 1px);
+  background-size: 20px 20px;
+}
+
+.folio-modal-backdrop {
+  background-color: rgba(7, 45, 89, 0.4);
+  backdrop-filter: blur(4px);
+}
+
+.folio-modal-card {
+  background-color: #ffffff;
+  border: 1px solid var(--color-navy-border);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.9),
+    0 24px 60px -12px rgba(7, 45, 89, 0.24),
+    0 8px 24px -8px rgba(7, 45, 89, 0.12);
+}
+
+.folio-modal-header {
+  border-bottom: 1px solid var(--color-navy-border);
+  background: linear-gradient(90deg, rgba(219, 242, 252, 0.48) 0%, rgba(255, 255, 255, 0.96) 65%);
+}
+
+.folio-modal-footer {
+  border-top: 1px solid var(--color-navy-border);
+  background-color: rgba(219, 242, 252, 0.25);
+}
+
+.folio-input {
+  border: 1px solid var(--color-navy-border-strong);
+  background-color: #ffffff;
+  color: var(--color-navy);
+  transition:
+    border-color var(--folio-transition),
+    box-shadow var(--folio-transition),
+    background-color var(--folio-transition);
+}
+
+.folio-input::placeholder {
+  color: rgba(7, 45, 89, 0.42);
+}
+
+.folio-input:focus {
+  outline: none;
+  border-color: var(--color-crimson);
+  box-shadow: 0 0 0 3px var(--color-crimson-ring);
+}
+
+.folio-btn-crimson {
+  background-color: var(--color-crimson);
+  color: #ffffff;
+  transition:
+    background-color var(--folio-transition),
+    transform var(--folio-transition),
+    box-shadow var(--folio-transition);
+}
+
+.folio-btn-crimson:hover:not(:disabled) {
+  background-color: var(--color-crimson-hover);
+}
+
+.folio-btn-navy {
+  background-color: var(--color-navy);
+  color: #ffffff;
+  transition:
+    background-color var(--folio-transition),
+    transform var(--folio-transition),
+    box-shadow var(--folio-transition);
+}
+
+.folio-btn-navy:hover:not(:disabled) {
+  background-color: var(--color-navy-hover);
+}
+
+.folio-btn-secondary {
+  border: 1px solid var(--color-navy-border-strong);
+  background-color: #ffffff;
+  color: var(--color-navy);
+  transition:
+    background-color var(--folio-transition),
+    border-color var(--folio-transition);
+}
+
+.folio-btn-secondary:hover:not(:disabled) {
+  background-color: var(--color-seal-tint);
+}
+
+.folio-editor-header {
+  border-bottom: 1px solid var(--color-navy-border);
+  background: linear-gradient(
+    90deg,
+    rgba(219, 242, 252, 0.42) 0%,
+    rgba(255, 255, 255, 0.96) 45%,
+    rgba(219, 242, 252, 0.3) 100%
+  );
+  backdrop-filter: blur(8px);
+}
+
+.folio-editor-subbar {
+  border-bottom: 1px solid var(--color-navy-border);
+  background-color: rgba(219, 242, 252, 0.38);
+  backdrop-filter: blur(8px);
+}
+
+/* Subtle custom scrollbar for workspace & drawers */
+.custom-scrollbar::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: rgba(7, 45, 89, 0.22);
+  border-radius: 9999px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: rgba(7, 45, 89, 0.4);
+}
+
+@media print {
+  [data-testid="top-header-bar"],
+  [data-testid="contextual-subbar"],
+  [data-testid="bottom-tool-dock"],
+  [data-testid="bottom-zoom-pill"],
+  [data-testid="zen-mode-pill"],
+  aside {
+    display: none !important;
+  }
+
+  main {
+    overflow: visible !important;
+    padding: 0 !important;
+    background: white !important;
+  }
+
+  [data-page-id] {
+    box-shadow: none !important;
+    margin: 0 auto !important;
+    break-after: page;
+    page-break-after: always;
+  }
+}

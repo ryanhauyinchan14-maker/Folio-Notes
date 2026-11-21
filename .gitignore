@@ -1,0 +1,19 @@
+# Dependencies
+node_modules/
+
+# Build & Electron packaging outputs
+dist/
+dist-electron/
+release/
+*.tsbuildinfo
+
+# Environment & secrets
+.env
+.env.*
+!.env.example
+
+# Logs & OS files
+*.log
+npm-debug.log*
+.DS_Store
+Thumbs.db
