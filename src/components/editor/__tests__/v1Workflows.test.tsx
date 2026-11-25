@@ -422,7 +422,10 @@ describe('v1.0 Universal Select, Grouping, Locking, Alignment, Shortcuts & Tabbe
     };
 
     await switchTab('appearance');
-    expect(container.querySelector('[data-testid="settings-high-contrast-toggle"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="settings-dark-paper-toggle"]')).toBeNull();
+    expect(container.querySelector('[data-testid="settings-high-contrast-toggle"]')).toBeNull();
+    expect(container.querySelector('[data-testid="settings-ui-scale-slider"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="settings-ui-sounds-toggle"]')).not.toBeNull();
 
     await switchTab('ai');
     expect(container.querySelector('[data-testid="gemini-model-select"]')).not.toBeNull();

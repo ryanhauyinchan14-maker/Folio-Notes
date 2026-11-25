@@ -54,15 +54,15 @@ export const FolderModal: React.FC<FolderModalProps> = ({
         role="dialog"
         aria-modal="true"
         aria-labelledby="folder-modal-title"
-        className="folio-modal-card w-full max-w-sm overflow-hidden rounded-2xl text-[#072D59]"
+        className="folio-modal-card w-full max-w-sm overflow-hidden rounded-2xl text-[var(--navy-900)]"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="folio-modal-header flex items-center justify-between px-5 py-4">
           <div className="flex items-center gap-2.5">
-            <div className="flex h-8 w-8 items-center justify-center rounded-xl bg-[#DBF2FC] text-[#072D59]">
+            <div className="flex h-8 w-8 items-center justify-center rounded-xl bg-[var(--surface-seal)] text-[var(--navy-900)]">
               <FolderPlus className="h-4 w-4" />
             </div>
-            <h2 id="folder-modal-title" className="text-base font-bold text-[#072D59]">
+            <h2 id="folder-modal-title" className="text-base font-bold text-[var(--navy-900)]">
               {editingFolder ? 'Edit Folder' : 'New Folder'}
             </h2>
           </div>
@@ -70,7 +70,7 @@ export const FolderModal: React.FC<FolderModalProps> = ({
             type="button"
             aria-label="Close folder modal"
             onClick={onClose}
-            className="rounded-lg p-1 text-[#072D59]/55 transition duration-150 hover:bg-[#DBF2FC]/70 hover:text-[#072D59]"
+            className="folio-press rounded-lg p-1 text-[var(--navy-600)] hover:bg-[var(--surface-seal)] hover:text-[var(--navy-900)]"
           >
             <X className="h-4 w-4" />
           </button>
@@ -80,7 +80,7 @@ export const FolderModal: React.FC<FolderModalProps> = ({
           <div>
             <label
               htmlFor="folder-name-input"
-              className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-[#072D59]/65"
+              className="folio-section-label mb-1.5 block"
             >
               Folder Name
             </label>
@@ -96,7 +96,7 @@ export const FolderModal: React.FC<FolderModalProps> = ({
           </div>
 
           <div>
-            <label className="mb-2 block text-xs font-bold uppercase tracking-wide text-[#072D59]/65">
+            <label className="folio-section-label mb-2 block">
               Folder Color
             </label>
             <div className="flex items-center gap-2.5">
@@ -106,9 +106,9 @@ export const FolderModal: React.FC<FolderModalProps> = ({
                   type="button"
                   aria-label={`Folder color ${c}`}
                   onClick={() => setColor(c)}
-                  className={`h-7 w-7 rounded-full transition-transform duration-150 ${
+                  className={`folio-press h-7 w-7 rounded-full ${
                     color === c
-                      ? 'scale-110 ring-2 ring-[#072D59] ring-offset-2'
+                      ? 'scale-110 ring-2 ring-[var(--navy-900)] ring-offset-2'
                       : 'hover:scale-105'
                   }`}
                   style={{ backgroundColor: c }}
@@ -121,13 +121,13 @@ export const FolderModal: React.FC<FolderModalProps> = ({
             <button
               type="button"
               onClick={onClose}
-              className="folio-btn-secondary rounded-xl px-4 py-2 text-sm font-semibold"
+              className="folio-btn-secondary folio-press rounded-xl px-4 py-2 text-sm font-semibold"
             >
               Cancel
             </button>
             <button
               type="submit"
-              className="folio-btn-crimson rounded-xl px-4 py-2 text-sm font-semibold shadow-xs"
+              className="folio-btn-crimson folio-press rounded-xl px-4 py-2 text-sm font-semibold"
             >
               {editingFolder ? 'Save' : 'Create Folder'}
             </button>

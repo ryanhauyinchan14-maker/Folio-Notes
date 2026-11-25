@@ -14,6 +14,7 @@ import {
 } from '../../canvas/imageRenderer';
 import {
   expandSelectionWithGroups,
+  isBoundsOffPage,
   type PageElementSelection,
 } from '../../canvas/selection';
 import { useAppStore } from '../../store/useAppStore';
@@ -24,9 +25,11 @@ interface ImageOverlayProps {
   page: Page;
   zoom: number;
   spacePressed?: boolean;
+  isWhiteboard?: boolean;
   hiddenImageIds?: ReadonlySet<string>;
   onActiveOverlayImageChange?: (imageId: string | null) => void;
   onGuidesChange?: (guides: AlignmentGuide[]) => void;
+  onOffPageDragChange?: (pos: { clientX: number; clientY: number } | null) => void;
   onStartMultiDrag?: (
     e: React.PointerEvent<HTMLElement>,
     sel: PageElementSelection,
@@ -41,9 +44,11 @@ export const ImageOverlay: React.FC<ImageOverlayProps> = ({
   page,
   zoom,
   spacePressed = false,
+  isWhiteboard = false,
   hiddenImageIds,
   onActiveOverlayImageChange,
   onGuidesChange,
+  onOffPageDragChange,
   onStartMultiDrag,
   onContextMenuRequest,
 }) => {
@@ -59,10 +64,12 @@ export const ImageOverlay: React.FC<ImageOverlayProps> = ({
   const commitImageMutation = useAppStore((s) => s.commitImageMutation);
   const altCloneImage = useAppStore((s) => s.altCloneImage);
   const commitAltImageDrag = useAppStore((s) => s.commitAltImageDrag);
+  const deleteElementsOffPage = useAppStore((s) => s.deleteElementsOffPage);
+  const revertAltCloneSnapshot = useAppStore((s) => s.revertAltCloneSnapshot);
 
   const [hoveredId, setHoveredId] = useState<string | null>(null);
 
-  const [liveTransform, setLiveTransform] = useState<{
+  type LiveImageTransform = {
     id: string;
     x: number;
     y: number;
@@ -71,7 +78,15 @@ export const ImageOverlay: React.FC<ImageOverlayProps> = ({
     crop: ImageCropRect;
     pillText: string;
     showGhostBackdrop: boolean;
-  } | null>(null);
+    isOffPage?: boolean;
+  };
+  const [liveTransform, setLiveTransform] = useState<LiveImageTransform | null>(null);
+  const latestTransformRef = useRef<LiveImageTransform | null>(null);
+
+  const updateLiveTransform = (next: LiveImageTransform | null) => {
+    latestTransformRef.current = next;
+    setLiveTransform(next);
+  };
 
   const dragRef = useRef<{
     kind: 'move' | 'resize' | 'crop' | 'crop-pan';
@@ -176,7 +191,7 @@ export const ImageOverlay: React.FC<ImageOverlayProps> = ({
           ? `Crop ${Math.round(targetImg.width)} × ${Math.round(targetImg.height)}`
           : `${Math.round(targetImg.width)} × ${Math.round(targetImg.height)} px`;
 
-    setLiveTransform({
+    updateLiveTransform({
       id: targetImg.id,
       x: targetImg.x,
       y: targetImg.y,
@@ -185,6 +200,7 @@ export const ImageOverlay: React.FC<ImageOverlayProps> = ({
       crop: targetImg.crop ?? { x: 0, y: 0, width: 1, height: 1 },
       pillText,
       showGhostBackdrop: kind === 'crop' || kind === 'crop-pan',
+      isOffPage: false,
     });
   };
 
@@ -227,26 +243,36 @@ export const ImageOverlay: React.FC<ImageOverlayProps> = ({
         axisLock: e.shiftKey,
         bypassSnap: e.ctrlKey || e.metaKey,
         snapThreshold: 5,
+        isWhiteboard,
       });
 
-      const nextX = Math.max(
-        -drag.image.width + 20,
-        Math.min(page.paper.width - 20, drag.image.x + dx),
-      );
-      const nextY = Math.max(
-        -drag.image.height + 20,
-        Math.min(page.paper.height - 20, drag.image.y + dy),
-      );
-      onGuidesChange?.(guides);
-      setLiveTransform({
+      const candX = drag.image.x + dx;
+      const candY = drag.image.y + dy;
+      const offPage = isWhiteboard
+        ? false
+        : isBoundsOffPage(
+            {
+              minX: candX,
+              minY: candY,
+              maxX: candX + drag.image.width,
+              maxY: candY + drag.image.height,
+            },
+            page.paper,
+          );
+
+      onGuidesChange?.(offPage ? [] : guides);
+      onOffPageDragChange?.(offPage ? { clientX: e.clientX, clientY: e.clientY } : null);
+
+      updateLiveTransform({
         id: drag.image.id,
-        x: nextX,
-        y: nextY,
+        x: candX,
+        y: candY,
         width: drag.image.width,
         height: drag.image.height,
         crop: drag.image.crop,
-        pillText: `X: ${Math.round(nextX)}, Y: ${Math.round(nextY)}`,
+        pillText: `X: ${Math.round(candX)}, Y: ${Math.round(candY)}`,
         showGhostBackdrop: false,
+        isOffPage: offPage,
       });
     } else if (drag.kind === 'resize' && drag.corner) {
       const next = resizeImageFromCorner(
@@ -256,7 +282,7 @@ export const ImageOverlay: React.FC<ImageOverlayProps> = ({
         rawDy,
         20,
       );
-      setLiveTransform({
+      updateLiveTransform({
         id: drag.image.id,
         x: next.x,
         y: next.y,
@@ -265,10 +291,11 @@ export const ImageOverlay: React.FC<ImageOverlayProps> = ({
         crop: drag.image.crop,
         pillText: `${Math.round(next.width)} × ${Math.round(next.height)} px`,
         showGhostBackdrop: false,
+        isOffPage: false,
       });
     } else if (drag.kind === 'crop' && drag.side) {
       const next = cropImageFromSide(drag.image, drag.side, rawDx, rawDy, 24);
-      setLiveTransform({
+      updateLiveTransform({
         id: drag.image.id,
         x: next.x,
         y: next.y,
@@ -277,10 +304,11 @@ export const ImageOverlay: React.FC<ImageOverlayProps> = ({
         crop: next.crop,
         pillText: `Crop ${Math.round(next.width)} × ${Math.round(next.height)}`,
         showGhostBackdrop: true,
+        isOffPage: false,
       });
     } else if (drag.kind === 'crop-pan') {
       const nextCrop = panCropInsideFrame(drag.image, rawDx, rawDy);
-      setLiveTransform({
+      updateLiveTransform({
         id: drag.image.id,
         x: drag.image.x,
         y: drag.image.y,
@@ -289,6 +317,7 @@ export const ImageOverlay: React.FC<ImageOverlayProps> = ({
         crop: nextCrop,
         pillText: `Pan photo`,
         showGhostBackdrop: true,
+        isOffPage: false,
       });
     }
   };
@@ -299,18 +328,41 @@ export const ImageOverlay: React.FC<ImageOverlayProps> = ({
     e.stopPropagation();
     dragRef.current = null;
     onGuidesChange?.([]);
+    onOffPageDragChange?.(null);
 
-    const finalTransform = liveTransform;
-    setLiveTransform(null);
+    const finalTransform = latestTransformRef.current;
+    updateLiveTransform(null);
     if (!finalTransform) return;
 
     if (drag.kind === 'move' && !drag.hasMoved && !drag.prevImagesSnapshot) {
       return;
     }
 
+    if (drag.kind === 'move' && finalTransform.isOffPage && !drag.image.locked) {
+      if (drag.prevImagesSnapshot) {
+        revertAltCloneSnapshot(page.id, { images: drag.prevImagesSnapshot });
+      } else {
+        deleteElementsOffPage(page.id, {
+          strokeIds: [],
+          textboxIds: [],
+          imageIds: [drag.image.id],
+        });
+      }
+      return;
+    }
+
+    const committedX =
+      drag.kind === 'move' && !isWhiteboard
+        ? Math.max(-drag.image.width + 20, Math.min(page.paper.width - 20, finalTransform.x))
+        : finalTransform.x;
+    const committedY =
+      drag.kind === 'move' && !isWhiteboard
+        ? Math.max(-drag.image.height + 20, Math.min(page.paper.height - 20, finalTransform.y))
+        : finalTransform.y;
+
     const patch: Partial<PageImage> = {
-      x: finalTransform.x,
-      y: finalTransform.y,
+      x: committedX,
+      y: committedY,
       width: finalTransform.width,
       height: finalTransform.height,
       crop: finalTransform.crop,
@@ -441,6 +493,7 @@ export const ImageOverlay: React.FC<ImageOverlayProps> = ({
           widthPx < SMALL_WIDTH_PX || heightPx < SMALL_HEIGHT_PX;
         const isLocked = Boolean(effective.locked);
         const showSingleHandles = isPrimary && !isMultiSelected && !isLocked;
+        const isOffPagePreview = Boolean(isActivelyTransforming && liveTransform?.isOffPage);
 
         return (
           <div
@@ -454,6 +507,7 @@ export const ImageOverlay: React.FC<ImageOverlayProps> = ({
             }
             data-cropping={isCropping ? 'true' : 'false'}
             data-locked={isLocked ? 'true' : 'false'}
+            data-off-page-drag={isOffPagePreview ? 'true' : 'false'}
             onPointerEnter={() => {
               if (!isSelected && canInteractUnselected) setHoveredId(img.id);
             }}
@@ -461,8 +515,12 @@ export const ImageOverlay: React.FC<ImageOverlayProps> = ({
               if (hoveredId === img.id) setHoveredId(null);
             }}
             onPointerDown={(e) => {
+              if (e.button === 1) return;
               if (spacePressed) return;
               if (!isSelected && !canInteractUnselected) return;
+              if (e.button === 2 && !isSelected && (activeTool === 'pan' || activeTool === 'pen')) {
+                return;
+              }
               if (e.button !== 0) {
                 e.stopPropagation();
                 return;
@@ -520,6 +578,11 @@ export const ImageOverlay: React.FC<ImageOverlayProps> = ({
             onContextMenu={(e) => {
               if (spacePressed) return;
               if (!isSelected && !canInteractUnselected) return;
+              if (!isSelected && (activeTool === 'pan' || activeTool === 'pen')) {
+                e.preventDefault();
+                e.stopPropagation();
+                return;
+              }
               e.preventDefault();
               e.stopPropagation();
               if (!isSelected) {
@@ -538,19 +601,22 @@ export const ImageOverlay: React.FC<ImageOverlayProps> = ({
               top: `${topPx}px`,
               width: `${widthPx}px`,
               height: `${heightPx}px`,
-              outline: isSelected
-                ? isMultiSelected
-                  ? '1px dashed rgba(7, 45, 89, 0.38)'
-                  : isLocked
-                    ? '1.5px dashed rgba(7, 45, 89, 0.65)'
-                    : '1.5px solid #072D59'
-                : isHovered
-                  ? '1.5px solid rgba(7, 45, 89, 0.5)'
-                  : 'none',
+              opacity: isOffPagePreview ? 0.45 : undefined,
+              outline: isOffPagePreview
+                ? '1.5px dashed #FD6E88'
+                : isSelected
+                  ? isMultiSelected
+                    ? '1px dashed rgba(7, 45, 89, 0.38)'
+                    : isLocked
+                      ? '1.5px dashed rgba(7, 45, 89, 0.65)'
+                      : '1.5px solid #072D59'
+                  : isHovered
+                    ? '1.5px solid rgba(7, 45, 89, 0.5)'
+                    : 'none',
               outlineOffset: '0px',
             }}
             className={`absolute overflow-visible ${
-              spacePressed || isMultiSelected ? 'pointer-events-none' : ''
+              spacePressed || isMultiSelected ? 'pointer-events-none' : 'pointer-events-auto'
             } ${isSelected ? (isMultiSelected ? 'z-10' : 'z-20') : 'z-10'} ${
               isCropping
                 ? 'cursor-grab active:cursor-grabbing'
@@ -725,12 +791,12 @@ export const ImageOverlay: React.FC<ImageOverlayProps> = ({
             )}
 
             {/* Live Coordinate / Dimension Pill */}
-            {isActivelyTransforming && liveTransform && (
+            {isActivelyTransforming && liveTransform && !liveTransform.isOffPage && (
               <div
                 data-testid="live-drag-pill"
                 className={`folio-mono pointer-events-none absolute left-1/2 top-full z-30 ${
                   isSmallElement ? 'mt-9' : 'mt-2'
-                } -translate-x-1/2 whitespace-nowrap rounded-full bg-[#072D59]/95 px-2.5 py-0.5 text-[10px] font-semibold text-white shadow-md`}
+                } folio-glass-badge -translate-x-1/2 whitespace-nowrap rounded-full px-2.5 py-0.5 text-[10px] font-semibold`}
               >
                 {liveTransform.pillText}
               </div>

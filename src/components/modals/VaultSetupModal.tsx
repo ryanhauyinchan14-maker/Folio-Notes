@@ -62,11 +62,11 @@ export const VaultSetupModal: React.FC<VaultSetupModalProps> = ({
   if (!open) return null;
 
   const strengthColors = [
-    'bg-[#072D59]/12',
-    'bg-[#F95573]',
-    'bg-amber-500',
-    'bg-[#0A3D7A]',
-    'bg-emerald-600',
+    'bg-[var(--border-subtle)]',
+    'bg-[var(--state-danger)]',
+    'bg-[var(--state-warning)]',
+    'bg-[#38BDF8]',
+    'bg-[var(--state-success)]',
   ];
 
   const handleCopyKey = async () => {
@@ -141,19 +141,19 @@ export const VaultSetupModal: React.FC<VaultSetupModalProps> = ({
         role="dialog"
         aria-modal="true"
         aria-labelledby="vault-setup-title"
-        className="folio-modal-card flex max-h-[92vh] w-full max-w-lg flex-col overflow-hidden rounded-2xl text-[#072D59]"
+        className="folio-modal-card flex max-h-[92vh] w-full max-w-lg flex-col overflow-hidden rounded-2xl text-[var(--navy-900)]"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="folio-modal-header flex items-center justify-between px-5 py-4">
           <div className="flex items-center gap-2.5">
-            <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-[#072D59] text-white">
+            <div className="folio-glass-badge flex h-9 w-9 items-center justify-center rounded-xl">
               <Shield className="h-4 w-4" />
             </div>
             <div>
-              <h2 id="vault-setup-title" className="text-base font-bold text-[#072D59]">
+              <h2 id="vault-setup-title" className="text-base font-bold text-[var(--navy-900)]">
                 Set Up Vault Password
               </h2>
-              <p className="text-xs text-[#072D59]/65">
+              <p className="text-xs text-[var(--navy-600)]">
                 {notebookToLock
                   ? `Encrypt & lock "${notebookToLock.title}" locally with AES-GCM-256`
                   : 'Create your local encryption password & offline Recovery Key'}
@@ -164,7 +164,7 @@ export const VaultSetupModal: React.FC<VaultSetupModalProps> = ({
             type="button"
             aria-label="Close Vault Setup"
             onClick={onClose}
-            className="rounded-lg p-1.5 text-[#072D59]/55 transition duration-150 hover:bg-[#DBF2FC]/70 hover:text-[#072D59]"
+            className="folio-press rounded-lg p-1.5 text-[var(--navy-600)] hover:bg-[var(--surface-seal)] hover:text-[var(--navy-900)]"
           >
             <X className="h-4 w-4" />
           </button>
@@ -176,7 +176,7 @@ export const VaultSetupModal: React.FC<VaultSetupModalProps> = ({
             <div>
               <label
                 htmlFor="vault-setup-password"
-                className="mb-1 block text-xs font-bold uppercase tracking-wide text-[#072D59]/65"
+                className="folio-section-label mb-1 block"
               >
                 Vault Password
               </label>
@@ -197,7 +197,7 @@ export const VaultSetupModal: React.FC<VaultSetupModalProps> = ({
                   type="button"
                   aria-label={showPassword ? 'Hide password' : 'Show password'}
                   onClick={() => setShowPassword((prev) => !prev)}
-                  className="absolute right-2.5 top-1/2 -translate-y-1/2 rounded-md p-1 text-[#072D59]/50 transition duration-150 hover:bg-[#DBF2FC]/60 hover:text-[#072D59]"
+                  className="folio-press absolute right-2.5 top-1/2 -translate-y-1/2 rounded-md p-1 text-[var(--navy-600)] hover:bg-[var(--surface-tint)] hover:text-[var(--navy-900)]"
                 >
                   {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
                 </button>
@@ -210,14 +210,14 @@ export const VaultSetupModal: React.FC<VaultSetupModalProps> = ({
                     <div
                       key={bar}
                       className={`h-1.5 rounded-full transition-colors ${
-                        strength.score >= bar ? strengthColors[strength.score] : 'bg-[#072D59]/12'
+                        strength.score >= bar ? strengthColors[strength.score] : 'bg-[var(--border-subtle)]'
                       }`}
                     />
                   ))}
                 </div>
                 <span
                   data-testid="password-strength-label"
-                  className="w-16 text-right text-[11px] font-bold text-[#072D59]/70"
+                  className="w-16 text-right text-[11px] font-bold text-[var(--navy-600)]"
                 >
                   {password ? strength.label : 'Enter'}
                 </span>
@@ -227,7 +227,7 @@ export const VaultSetupModal: React.FC<VaultSetupModalProps> = ({
             <div>
               <label
                 htmlFor="vault-setup-confirm"
-                className="mb-1 block text-xs font-bold uppercase tracking-wide text-[#072D59]/65"
+                className="folio-section-label mb-1 block"
               >
                 Confirm Password
               </label>
@@ -239,19 +239,19 @@ export const VaultSetupModal: React.FC<VaultSetupModalProps> = ({
                   setConfirmPassword(e.target.value);
                   setError(null);
                 }}
-                placeholder="Re-enter your Vault Password"
+                placeholder="Reenter your Vault Password"
                 className="folio-input w-full rounded-xl px-3.5 py-2.5 text-sm"
               />
             </div>
           </div>
 
           {/* Generated Recovery Key Box */}
-          <div className="space-y-2.5 rounded-2xl border border-amber-200 bg-amber-50/75 p-4">
-            <div className="flex items-start gap-2 text-amber-900">
-              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
+          <div className="space-y-2.5 rounded-2xl border border-[var(--state-warning-border)] bg-[var(--state-warning-bg)] p-4">
+            <div className="flex items-start gap-2 text-[var(--state-warning-text)]">
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-[var(--state-warning)]" />
               <div className="text-xs">
                 <p className="font-semibold">Save Your Offline Recovery Key</p>
-                <p className="mt-0.5 text-amber-800">
+                <p className="mt-0.5 opacity-90">
                   There is no cloud backup. If you forget your password, this Recovery Key is the
                   only way to decrypt your locked notebooks.
                 </p>
@@ -260,7 +260,7 @@ export const VaultSetupModal: React.FC<VaultSetupModalProps> = ({
 
             <div
               data-testid="generated-recovery-key"
-              className="rounded-xl border border-amber-300 bg-white px-3 py-2.5 text-center font-mono text-sm font-bold tracking-wider text-[#072D59] select-all"
+              className="rounded-xl border border-[var(--state-warning-border)] bg-[var(--surface-elevated)] px-3 py-2.5 text-center font-mono text-sm font-bold tracking-wider text-[var(--navy-900)] select-all"
             >
               {recoveryKey}
             </div>
@@ -269,11 +269,11 @@ export const VaultSetupModal: React.FC<VaultSetupModalProps> = ({
               <button
                 type="button"
                 onClick={handleCopyKey}
-                className="inline-flex flex-1 items-center justify-center gap-1.5 rounded-xl border border-amber-300 bg-white px-3 py-2 text-xs font-semibold text-[#072D59] transition duration-150 hover:bg-amber-100/60"
+                className="folio-btn-secondary folio-press inline-flex flex-1 items-center justify-center gap-1.5 rounded-xl px-3 py-2 text-xs font-semibold"
               >
                 {copied ? (
                   <>
-                    <Check className="h-3.5 w-3.5 text-emerald-600" />
+                    <Check className="h-3.5 w-3.5 text-[var(--state-success)]" />
                     Copied!
                   </>
                 ) : (
@@ -286,7 +286,7 @@ export const VaultSetupModal: React.FC<VaultSetupModalProps> = ({
               <button
                 type="button"
                 onClick={handleDownloadKey}
-                className="inline-flex flex-1 items-center justify-center gap-1.5 rounded-xl border border-amber-300 bg-white px-3 py-2 text-xs font-semibold text-[#072D59] transition duration-150 hover:bg-amber-100/60"
+                className="folio-btn-secondary folio-press inline-flex flex-1 items-center justify-center gap-1.5 rounded-xl px-3 py-2 text-xs font-semibold"
               >
                 <Download className="h-3.5 w-3.5" />
                 Download Recovery Key (.txt)
@@ -295,7 +295,7 @@ export const VaultSetupModal: React.FC<VaultSetupModalProps> = ({
           </div>
 
           {/* Required Confirmation Checkbox */}
-          <label className="flex cursor-pointer items-start gap-2.5 rounded-xl border border-[#072D59]/10 bg-[#DBF2FC]/28 p-3 text-xs text-[#072D59]">
+          <label className="flex cursor-pointer items-start gap-2.5 rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-tint)] p-3 text-xs text-[var(--navy-900)]">
             <input
               type="checkbox"
               checked={savedConfirmed}
@@ -303,7 +303,7 @@ export const VaultSetupModal: React.FC<VaultSetupModalProps> = ({
                 setSavedConfirmed(e.target.checked);
                 setError(null);
               }}
-              className="mt-0.5 h-4 w-4 rounded border-[#072D59]/25 accent-[#FD6E88]"
+              className="mt-0.5 h-4 w-4 rounded border-[var(--border-strong)] accent-[var(--crimson-500)]"
             />
             <span className="font-semibold">
               I have saved my Recovery Key in a safe place offline.
@@ -311,7 +311,7 @@ export const VaultSetupModal: React.FC<VaultSetupModalProps> = ({
           </label>
 
           {error && (
-            <p data-testid="vault-setup-error" className="text-xs font-semibold text-[#F95573]">
+            <p data-testid="vault-setup-error" className="text-xs font-semibold text-[var(--state-danger-text)]">
               {error}
             </p>
           )}
@@ -320,14 +320,14 @@ export const VaultSetupModal: React.FC<VaultSetupModalProps> = ({
             <button
               type="button"
               onClick={onClose}
-              className="folio-btn-secondary rounded-xl px-4 py-2 text-sm font-semibold"
+              className="folio-btn-secondary folio-press rounded-xl px-4 py-2 text-sm font-semibold"
             >
               Cancel
             </button>
             <button
               type="submit"
               disabled={!canSubmit}
-              className="folio-btn-navy inline-flex items-center gap-1.5 rounded-xl px-4 py-2 text-sm font-semibold shadow-xs disabled:cursor-not-allowed disabled:opacity-45"
+              className="folio-btn-navy folio-press inline-flex items-center gap-1.5 rounded-xl px-4 py-2 text-sm font-semibold disabled:cursor-not-allowed disabled:opacity-45"
             >
               <Lock className="h-4 w-4" />
               {submitting

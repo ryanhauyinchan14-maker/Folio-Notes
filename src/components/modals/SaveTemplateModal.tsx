@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { BookmarkCheck, X } from 'lucide-react';
 import { generatePageThumbnail } from '../../canvas/thumbnail';
+import { formatPaperPatternLabel } from '../../constants/papers';
 import { useAppStore } from '../../store/useAppStore';
 import type { Page } from '../../types/notes';
 
@@ -44,7 +45,7 @@ export const SaveTemplateModal: React.FC<SaveTemplateModalProps> = ({
     setSaving(true);
     await saveCurrentPageAsTemplate(
       page.id,
-      name.trim() || `Custom Template (${page.paper.pattern})`,
+      name.trim() || `My ${formatPaperPatternLabel(page.paper.pattern)} Paper`,
     );
     setSaving(false);
     onClose();
@@ -59,19 +60,19 @@ export const SaveTemplateModal: React.FC<SaveTemplateModalProps> = ({
         role="dialog"
         aria-modal="true"
         aria-labelledby="save-template-title"
-        className="folio-modal-card w-full max-w-md overflow-hidden rounded-2xl text-[#072D59]"
+        className="folio-modal-card w-full max-w-md overflow-hidden rounded-2xl text-[var(--navy-900)]"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="folio-modal-header flex items-center justify-between px-5 py-4">
           <div className="flex items-center gap-2.5">
-            <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-[#DBF2FC] text-[#072D59]">
+            <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-[var(--surface-seal)] text-[var(--navy-900)]">
               <BookmarkCheck className="h-4 w-4" />
             </div>
             <div>
-              <h2 id="save-template-title" className="text-base font-bold text-[#072D59]">
+              <h2 id="save-template-title" className="text-base font-bold text-[var(--navy-900)]">
                 Save Current Page as Template
               </h2>
-              <p className="text-xs text-[#072D59]/65">
+              <p className="text-xs text-[var(--navy-600)] tabular-nums">
                 Captures paper style &amp; all {page.strokes.length} stroke
                 {page.strokes.length === 1 ? '' : 's'} into My Templates
               </p>
@@ -81,22 +82,22 @@ export const SaveTemplateModal: React.FC<SaveTemplateModalProps> = ({
             type="button"
             aria-label="Close Save Template modal"
             onClick={onClose}
-            className="rounded-lg p-1.5 text-[#072D59]/55 transition duration-150 hover:bg-[#DBF2FC]/70 hover:text-[#072D59]"
+            className="folio-press rounded-lg p-1.5 text-[var(--navy-600)] hover:bg-[var(--surface-seal)] hover:text-[var(--navy-900)]"
           >
             <X className="h-4 w-4" />
           </button>
         </div>
 
         <form onSubmit={handleSave} className="space-y-4 p-5">
-          <div className="flex justify-center rounded-xl border border-[#072D59]/10 bg-[#DBF2FC]/30 p-4">
+          <div className="flex justify-center rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-tint)] p-4">
             {previewUrl ? (
               <img
                 src={previewUrl}
                 alt="Template preview"
-                className="max-h-52 rounded-sm shadow-md ring-1 ring-[#072D59]/12"
+                className="max-h-52 rounded-sm shadow-[var(--shadow-card)] ring-1 ring-[var(--border-subtle)]"
               />
             ) : (
-              <div className="flex h-44 w-36 items-center justify-center rounded bg-white text-xs text-[#072D59]/45">
+              <div className="flex h-44 w-36 items-center justify-center rounded bg-[var(--surface-elevated)] text-xs text-[var(--navy-600)]">
                 Preview
               </div>
             )}
@@ -105,7 +106,7 @@ export const SaveTemplateModal: React.FC<SaveTemplateModalProps> = ({
           <div>
             <label
               htmlFor="template-name-input"
-              className="mb-1.5 block text-sm font-bold text-[#072D59]"
+              className="folio-section-label mb-1.5 block"
             >
               Template Name
             </label>
@@ -124,14 +125,14 @@ export const SaveTemplateModal: React.FC<SaveTemplateModalProps> = ({
             <button
               type="button"
               onClick={onClose}
-              className="folio-btn-secondary rounded-xl px-4 py-2 text-sm font-semibold"
+              className="folio-btn-secondary folio-press rounded-xl px-4 py-2 text-sm font-semibold"
             >
               Cancel
             </button>
             <button
               type="submit"
               disabled={saving}
-              className="folio-btn-crimson rounded-xl px-4 py-2 text-sm font-semibold shadow-xs disabled:opacity-50"
+              className="folio-btn-crimson folio-press rounded-xl px-4 py-2 text-sm font-semibold disabled:opacity-50"
             >
               {saving ? 'Saving...' : 'Save to My Templates'}
             </button>

@@ -13,7 +13,7 @@ import {
 } from 'lucide-react';
 import { repository } from '../../db/repository';
 import { useAppStore } from '../../store/useAppStore';
-import type { Notebook, Page } from '../../types/notes';
+import type { Folder, Notebook, Page } from '../../types/notes';
 import {
   evaluatePasswordStrength,
   parseRecoveryKeyInput,
@@ -24,7 +24,8 @@ import {
 interface UnlockNotebookModalProps {
   open: boolean;
   notebook: Notebook | null;
-  mode: 'open' | 'remove-lock' | 'lock-existing' | 'export';
+  folder?: Folder | null;
+  mode: 'open' | 'remove-lock' | 'lock-existing' | 'export' | 'delete' | 'delete-folder';
   onUnlockedForExport?: (
     notebook: Notebook,
     pages: Page[],
@@ -36,6 +37,7 @@ interface UnlockNotebookModalProps {
 export const UnlockNotebookModal: React.FC<UnlockNotebookModalProps> = ({
   open,
   notebook,
+  folder = null,
   mode,
   onUnlockedForExport,
   onClose,
@@ -43,7 +45,14 @@ export const UnlockNotebookModal: React.FC<UnlockNotebookModalProps> = ({
   const lockNotebookWithPassword = useAppStore((s) => s.lockNotebookWithPassword);
   const unlockNotebookWithPassword = useAppStore((s) => s.unlockNotebookWithPassword);
   const resetPasswordAndUnlock = useAppStore((s) => s.resetPasswordAndUnlock);
-  const deleteNotebook = useAppStore((s) => s.deleteNotebook);
+  const deleteLockedNotebookWithPassword = useAppStore(
+    (s) => s.deleteLockedNotebookWithPassword,
+  );
+  const deleteLockedNotebookWithRecoveryKey = useAppStore(
+    (s) => s.deleteLockedNotebookWithRecoveryKey,
+  );
+  const deleteFolderWithPassword = useAppStore((s) => s.deleteFolderWithPassword);
+  const deleteFolderWithRecoveryKey = useAppStore((s) => s.deleteFolderWithRecoveryKey);
 
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
@@ -51,7 +60,6 @@ export const UnlockNotebookModal: React.FC<UnlockNotebookModalProps> = ({
   const [recoveryInput, setRecoveryInput] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [confirmNewPassword, setConfirmNewPassword] = useState('');
-  const [confirmDelete, setConfirmDelete] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -63,20 +71,21 @@ export const UnlockNotebookModal: React.FC<UnlockNotebookModalProps> = ({
       setRecoveryInput('');
       setNewPassword('');
       setConfirmNewPassword('');
-      setConfirmDelete(false);
       setError(null);
       setBusy(false);
     }
-  }, [open, notebook?.id, mode]);
+  }, [open, notebook?.id, folder?.id, mode]);
 
   const strength = useMemo(
     () => evaluatePasswordStrength(newPassword),
     [newPassword],
   );
 
-  if (!open || !notebook) return null;
+  if (!open || (mode === 'delete-folder' ? !folder : !notebook)) return null;
 
   const isLockingExisting = mode === 'lock-existing';
+  const isDeleteMode = mode === 'delete' || mode === 'delete-folder';
+  const targetTitle = mode === 'delete-folder' ? folder!.name : notebook!.title;
 
   const handlePasswordSubmit = async (
     e: React.FormEvent,
@@ -91,13 +100,25 @@ export const UnlockNotebookModal: React.FC<UnlockNotebookModalProps> = ({
 
     try {
       setBusy(true);
-      if (isLockingExisting) {
+      if (mode === 'delete' && notebook) {
+        await deleteLockedNotebookWithPassword(notebook.id, password);
+        onClose();
+        return;
+      }
+
+      if (mode === 'delete-folder' && folder) {
+        await deleteFolderWithPassword(folder.id, password);
+        onClose();
+        return;
+      }
+
+      if (isLockingExisting && notebook) {
         await lockNotebookWithPassword(notebook.id, password);
         onClose();
         return;
       }
 
-      if (mode === 'export') {
+      if (mode === 'export' && notebook) {
         const key = await unlockMasterKeyWithPassword(password, false);
         const [loaded, pdfAssets] = await Promise.all([
           repository.getNotebookWithPages(notebook.id, key),
@@ -110,9 +131,11 @@ export const UnlockNotebookModal: React.FC<UnlockNotebookModalProps> = ({
         return;
       }
 
-      const targetAction = overrideAction ?? (mode === 'remove-lock' ? 'remove-lock' : 'open');
-      await unlockNotebookWithPassword(notebook.id, password, targetAction);
-      onClose();
+      if (notebook) {
+        const targetAction = overrideAction ?? (mode === 'remove-lock' ? 'remove-lock' : 'open');
+        await unlockNotebookWithPassword(notebook.id, password, targetAction);
+        onClose();
+      }
     } catch {
       setError('Incorrect Vault Password. Please try again.');
     } finally {
@@ -153,7 +176,17 @@ export const UnlockNotebookModal: React.FC<UnlockNotebookModalProps> = ({
 
     try {
       setBusy(true);
-      if (mode === 'export') {
+      if (mode === 'delete' && notebook) {
+        await deleteLockedNotebookWithRecoveryKey(notebook.id, parsed, newPassword);
+        onClose();
+        return;
+      }
+      if (mode === 'delete-folder' && folder) {
+        await deleteFolderWithRecoveryKey(folder.id, parsed, newPassword);
+        onClose();
+        return;
+      }
+      if (mode === 'export' && notebook) {
         const key = await resetVaultPasswordWithRecoveryKey(parsed, newPassword);
         const [loaded, pdfAssets] = await Promise.all([
           repository.getNotebookWithPages(notebook.id, key),
@@ -165,9 +198,11 @@ export const UnlockNotebookModal: React.FC<UnlockNotebookModalProps> = ({
         }
         return;
       }
-      const targetAction = mode === 'remove-lock' ? 'remove-lock' : 'open';
-      await resetPasswordAndUnlock(notebook.id, parsed, newPassword, targetAction);
-      onClose();
+      if (notebook) {
+        const targetAction = mode === 'remove-lock' ? 'remove-lock' : 'open';
+        await resetPasswordAndUnlock(notebook.id, parsed, newPassword, targetAction);
+        onClose();
+      }
     } catch {
       setError('Invalid Recovery Key. Unable to unwrap Vault Master Key.');
     } finally {
@@ -175,19 +210,12 @@ export const UnlockNotebookModal: React.FC<UnlockNotebookModalProps> = ({
     }
   };
 
-  const handleConfirmDelete = async () => {
-    setBusy(true);
-    await deleteNotebook(notebook.id);
-    setBusy(false);
-    onClose();
-  };
-
   const strengthColors = [
-    'bg-[#072D59]/12',
-    'bg-[#F95573]',
-    'bg-amber-500',
-    'bg-[#0A3D7A]',
-    'bg-emerald-600',
+    'bg-[var(--border-subtle)]',
+    'bg-[var(--state-danger)]',
+    'bg-[var(--state-warning)]',
+    'bg-[#38BDF8]',
+    'bg-[var(--state-success)]',
   ];
 
   return (
@@ -199,13 +227,19 @@ export const UnlockNotebookModal: React.FC<UnlockNotebookModalProps> = ({
         role="dialog"
         aria-modal="true"
         aria-labelledby="unlock-notebook-title"
-        className="folio-modal-card w-full max-w-md overflow-hidden rounded-2xl text-[#072D59]"
+        className="folio-modal-card w-full max-w-md overflow-hidden rounded-2xl text-[var(--navy-900)]"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="folio-modal-header flex items-center justify-between px-5 py-4">
           <div className="flex items-center gap-2.5">
-            <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-[#072D59] text-white">
-              {isLockingExisting ? (
+            <div
+              className={`flex h-9 w-9 items-center justify-center rounded-xl ${
+                isDeleteMode && !forgotMode ? 'bg-[var(--state-danger)] text-white' : 'folio-glass-badge'
+              }`}
+            >
+              {isDeleteMode && !forgotMode ? (
+                <Trash2 className="h-4 w-4" />
+              ) : isLockingExisting ? (
                 <Lock className="h-4 w-4" />
               ) : forgotMode ? (
                 <KeyRound className="h-4 w-4" />
@@ -214,19 +248,23 @@ export const UnlockNotebookModal: React.FC<UnlockNotebookModalProps> = ({
               )}
             </div>
             <div>
-              <h2 id="unlock-notebook-title" className="text-base font-bold text-[#072D59]">
+              <h2 id="unlock-notebook-title" className="text-base font-bold text-[var(--navy-900)]">
                 {isLockingExisting
                   ? 'Lock Notebook'
                   : forgotMode
                     ? 'Reset Password with Recovery Key'
-                    : mode === 'export'
-                      ? 'Unlock to Export'
-                      : mode === 'remove-lock'
-                        ? 'Unlock / Remove Lock'
-                        : 'Unlock Notebook'}
+                    : mode === 'delete'
+                      ? 'Delete Locked Notebook'
+                      : mode === 'delete-folder'
+                        ? 'Delete Protected Folder'
+                        : mode === 'export'
+                          ? 'Unlock to Export'
+                          : mode === 'remove-lock'
+                            ? 'Unlock / Remove Lock'
+                            : 'Unlock Notebook'}
               </h2>
-              <p className="max-w-[240px] truncate text-xs text-[#072D59]/65">
-                {notebook.title}
+              <p className="max-w-[240px] truncate text-xs text-[var(--navy-600)]">
+                {targetTitle}
               </p>
             </div>
           </div>
@@ -234,7 +272,7 @@ export const UnlockNotebookModal: React.FC<UnlockNotebookModalProps> = ({
             type="button"
             aria-label="Close unlock modal"
             onClick={onClose}
-            className="rounded-lg p-1.5 text-[#072D59]/55 transition duration-150 hover:bg-[#DBF2FC]/70 hover:text-[#072D59]"
+            className="folio-press rounded-lg p-1.5 text-[var(--navy-600)] hover:bg-[var(--surface-seal)] hover:text-[var(--navy-900)]"
           >
             <X className="h-4 w-4" />
           </button>
@@ -243,10 +281,33 @@ export const UnlockNotebookModal: React.FC<UnlockNotebookModalProps> = ({
         <div className="space-y-4 p-5">
           {!forgotMode ? (
             <form onSubmit={(e) => void handlePasswordSubmit(e)} className="space-y-4">
+              {isDeleteMode && (
+                <div
+                  data-testid="unlock-delete-warning"
+                  className="folio-badge-danger flex items-start gap-2 rounded-xl p-3 text-xs"
+                >
+                  <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-[var(--state-danger)]" />
+                  <p>
+                    {mode === 'delete-folder' ? (
+                      <>
+                        <strong>{targetTitle}</strong> contains Vault locked notebooks. Enter your
+                        Vault Password to delete this folder and move its notebooks to Trash for 7
+                        days.
+                      </>
+                    ) : (
+                      <>
+                        Enter your Vault Password to delete <strong>{targetTitle}</strong>. Deleted
+                        notebooks stay encrypted in Recently Deleted for 7 days.
+                      </>
+                    )}
+                  </p>
+                </div>
+              )}
+
               <div>
                 <label
                   htmlFor="unlock-vault-password"
-                  className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-[#072D59]/65"
+                  className="folio-section-label mb-1.5 block"
                 >
                   Vault Password
                 </label>
@@ -267,7 +328,7 @@ export const UnlockNotebookModal: React.FC<UnlockNotebookModalProps> = ({
                     type="button"
                     aria-label={showPassword ? 'Hide password' : 'Show password'}
                     onClick={() => setShowPassword((prev) => !prev)}
-                    className="absolute right-2.5 top-1/2 -translate-y-1/2 rounded-md p-1 text-[#072D59]/50 transition duration-150 hover:bg-[#DBF2FC]/60 hover:text-[#072D59]"
+                    className="folio-press absolute right-2.5 top-1/2 -translate-y-1/2 rounded-md p-1 text-[var(--navy-600)] hover:bg-[var(--surface-tint)] hover:text-[var(--navy-900)]"
                   >
                     {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
                   </button>
@@ -275,7 +336,7 @@ export const UnlockNotebookModal: React.FC<UnlockNotebookModalProps> = ({
               </div>
 
               {error && (
-                <p data-testid="unlock-error-message" className="text-xs font-semibold text-[#F95573]">
+                <p data-testid="unlock-error-message" className="text-xs font-semibold text-[var(--state-danger-text)]">
                   {error}
                 </p>
               )}
@@ -288,7 +349,7 @@ export const UnlockNotebookModal: React.FC<UnlockNotebookModalProps> = ({
                       setForgotMode(true);
                       setError(null);
                     }}
-                    className="text-xs font-semibold text-[#F95573] hover:underline"
+                    className="text-xs font-semibold text-[var(--crimson-600)] hover:underline"
                   >
                     Forgot Password?
                   </button>
@@ -300,7 +361,7 @@ export const UnlockNotebookModal: React.FC<UnlockNotebookModalProps> = ({
                   <button
                     type="button"
                     onClick={onClose}
-                    className="folio-btn-secondary rounded-xl px-3.5 py-2 text-xs font-semibold"
+                    className="folio-btn-secondary folio-press rounded-xl px-3.5 py-2 text-xs font-semibold"
                   >
                     Cancel
                   </button>
@@ -311,24 +372,38 @@ export const UnlockNotebookModal: React.FC<UnlockNotebookModalProps> = ({
                         type="button"
                         disabled={busy}
                         onClick={(e) => void handlePasswordSubmit(e, 'open')}
-                        className="folio-btn-secondary rounded-xl px-3 py-2 text-xs font-semibold disabled:opacity-50"
+                        className="folio-btn-secondary folio-press rounded-xl px-3 py-2 text-xs font-semibold disabled:opacity-50"
                       >
                         Unlock &amp; Open
                       </button>
                       <button
                         type="submit"
                         disabled={busy}
-                        className="folio-btn-navy inline-flex items-center gap-1.5 rounded-xl px-3.5 py-2 text-xs font-semibold disabled:opacity-50"
+                        className="folio-btn-navy folio-press inline-flex items-center gap-1.5 rounded-xl px-3.5 py-2 text-xs font-semibold disabled:opacity-50"
                       >
                         <Unlock className="h-3.5 w-3.5" />
                         {busy ? 'Decrypting...' : 'Remove Lock'}
                       </button>
                     </>
+                  ) : isDeleteMode ? (
+                    <button
+                      type="submit"
+                      data-testid="unlock-confirm-delete-btn"
+                      disabled={busy}
+                      className="folio-btn-danger folio-press inline-flex items-center gap-1.5 rounded-xl px-4 py-2 text-xs font-semibold disabled:opacity-50"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                      {busy
+                        ? 'Deleting...'
+                        : mode === 'delete-folder'
+                          ? 'Verify & Delete Folder'
+                          : 'Verify & Delete'}
+                    </button>
                   ) : (
                     <button
                       type="submit"
                       disabled={busy}
-                      className="folio-btn-navy inline-flex items-center gap-1.5 rounded-xl px-4 py-2 text-xs font-semibold disabled:opacity-50"
+                      className="folio-btn-navy folio-press inline-flex items-center gap-1.5 rounded-xl px-4 py-2 text-xs font-semibold disabled:opacity-50"
                     >
                       {isLockingExisting ? (
                         <>
@@ -357,12 +432,12 @@ export const UnlockNotebookModal: React.FC<UnlockNotebookModalProps> = ({
                 <div className="mb-1.5 flex items-center justify-between">
                   <label
                     htmlFor="recovery-key-input"
-                    className="text-xs font-bold uppercase tracking-wide text-[#072D59]/65"
+                    className="folio-section-label"
                   >
                     Recovery Key
                   </label>
-                  <label className="folio-btn-secondary inline-flex cursor-pointer items-center gap-1 rounded-lg px-2 py-1 text-[11px] font-semibold">
-                    <Upload className="h-3 w-3 text-[#FD6E88]" />
+                  <label className="folio-btn-secondary folio-press inline-flex cursor-pointer items-center gap-1 rounded-lg px-2 py-1 text-[11px] font-semibold">
+                    <Upload className="h-3 w-3 text-[var(--crimson-500)]" />
                     Upload .txt
                     <input
                       type="file"
@@ -390,7 +465,7 @@ export const UnlockNotebookModal: React.FC<UnlockNotebookModalProps> = ({
               <div>
                 <label
                   htmlFor="recovery-new-password"
-                  className="mb-1 block text-xs font-bold uppercase tracking-wide text-[#072D59]/65"
+                  className="folio-section-label mb-1 block"
                 >
                   New Vault Password
                 </label>
@@ -411,12 +486,12 @@ export const UnlockNotebookModal: React.FC<UnlockNotebookModalProps> = ({
                       <div
                         key={bar}
                         className={`h-1.5 rounded-full ${
-                          strength.score >= bar ? strengthColors[strength.score] : 'bg-[#072D59]/12'
+                          strength.score >= bar ? strengthColors[strength.score] : 'bg-[var(--border-subtle)]'
                         }`}
                       />
                     ))}
                   </div>
-                  <span className="text-[11px] font-semibold text-[#072D59]/65">
+                  <span className="text-[11px] font-semibold text-[var(--navy-600)]">
                     {newPassword ? strength.label : ''}
                   </span>
                 </div>
@@ -425,7 +500,7 @@ export const UnlockNotebookModal: React.FC<UnlockNotebookModalProps> = ({
               <div>
                 <label
                   htmlFor="recovery-confirm-password"
-                  className="mb-1 block text-xs font-bold uppercase tracking-wide text-[#072D59]/65"
+                  className="folio-section-label mb-1 block"
                 >
                   Confirm New Password
                 </label>
@@ -437,13 +512,13 @@ export const UnlockNotebookModal: React.FC<UnlockNotebookModalProps> = ({
                     setConfirmNewPassword(e.target.value);
                     setError(null);
                   }}
-                  placeholder="Re-enter new password"
+                  placeholder="Reenter new password"
                   className="folio-input w-full rounded-xl px-3.5 py-2 text-sm"
                 />
               </div>
 
               {error && (
-                <p data-testid="recovery-error-message" className="text-xs font-semibold text-[#F95573]">
+                <p data-testid="recovery-error-message" className="text-xs font-semibold text-[var(--state-danger-text)]">
                   {error}
                 </p>
               )}
@@ -455,62 +530,27 @@ export const UnlockNotebookModal: React.FC<UnlockNotebookModalProps> = ({
                     setForgotMode(false);
                     setError(null);
                   }}
-                  className="text-xs font-semibold text-[#072D59]/70 hover:text-[#072D59]"
+                  className="text-xs font-semibold text-[var(--navy-600)] hover:text-[var(--navy-900)]"
                 >
                   Back to password
                 </button>
                 <button
                   type="submit"
                   disabled={busy}
-                  className="folio-btn-crimson rounded-xl px-4 py-2 text-xs font-semibold disabled:opacity-50"
+                  className={`${
+                    isDeleteMode ? 'folio-btn-danger' : 'folio-btn-crimson'
+                  } folio-press rounded-xl px-4 py-2 text-xs font-semibold disabled:opacity-50`}
                 >
-                  {busy ? 'Resetting...' : 'Reset Password & Unlock'}
+                  {busy
+                    ? isDeleteMode
+                      ? 'Deleting...'
+                      : 'Resetting...'
+                    : isDeleteMode
+                      ? 'Reset Password & Delete'
+                      : 'Reset Password & Unlock'}
                 </button>
               </div>
             </form>
-          )}
-
-          {/* Secondary Delete Locked Notebook option */}
-          {!isLockingExisting && (
-            <div className="border-t border-[#072D59]/10 pt-3">
-              {!confirmDelete ? (
-                <button
-                  type="button"
-                  onClick={() => setConfirmDelete(true)}
-                  className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#F95573] hover:underline"
-                >
-                  <Trash2 className="h-3.5 w-3.5" />
-                  Delete Locked Notebook
-                </button>
-              ) : (
-                <div className="space-y-2 rounded-xl border border-[#FD6E88]/35 bg-[#FD6E88]/10 p-3">
-                  <div className="flex items-start gap-2 text-xs text-[#072D59]">
-                    <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-[#F95573]" />
-                    <p>
-                      Permanently delete <strong>{notebook.title}</strong> and all encrypted pages?
-                      This cannot be undone.
-                    </p>
-                  </div>
-                  <div className="flex justify-end gap-2">
-                    <button
-                      type="button"
-                      onClick={() => setConfirmDelete(false)}
-                      className="folio-btn-secondary rounded-lg px-2.5 py-1 text-xs font-semibold"
-                    >
-                      Keep Notebook
-                    </button>
-                    <button
-                      type="button"
-                      disabled={busy}
-                      onClick={handleConfirmDelete}
-                      className="folio-btn-crimson rounded-lg px-3 py-1 text-xs font-semibold"
-                    >
-                      Confirm Delete
-                    </button>
-                  </div>
-                </div>
-              )}
-            </div>
           )}
         </div>
       </div>

@@ -11,11 +11,18 @@ import {
 } from '../../canvas/paperRenderer';
 import {
   expandSelectionWithGroups,
+  isBoundsOffPage,
   type PageElementSelection,
 } from '../../canvas/selection';
 import {
+  isPointOnTextboxText,
+  MAX_ELEMENT_DIMENSION,
+  MAX_TEXTBOX_FONT_SIZE,
   measureTextboxLayout,
+  MIN_TEXTBOX_FONT_SIZE,
+  resolveTextboxCaretOffsetAtPoint,
   TEXTBOX_FONT_STACKS,
+  type TextboxLayout,
 } from '../../canvas/textLayout';
 import { useAppStore } from '../../store/useAppStore';
 import type { Page, Textbox } from '../../types/notes';
@@ -25,9 +32,12 @@ interface TextboxOverlayProps {
   page: Page;
   zoom: number;
   spacePressed?: boolean;
+  isWhiteboard?: boolean;
   hiddenTextboxIds?: ReadonlySet<string>;
+  ignoreDoubleClickUntilRef?: { readonly current: number };
   onDraggingTextboxChange?: (textboxId: string | null) => void;
   onGuidesChange?: (guides: AlignmentGuide[]) => void;
+  onOffPageDragChange?: (pos: { clientX: number; clientY: number } | null) => void;
   onStartMultiDrag?: (
     e: React.PointerEvent<HTMLElement>,
     sel: PageElementSelection,
@@ -39,14 +49,19 @@ type CornerKey = 'tl' | 'tr' | 'bl' | 'br';
 
 const SMALL_WIDTH_PX = 44;
 const SMALL_HEIGHT_PX = 30;
+export const TEXTBOX_FRAME_PAD_X = 14;
+export const TEXTBOX_FRAME_PAD_Y = 9;
 
 export const TextboxOverlay: React.FC<TextboxOverlayProps> = ({
   page,
   zoom,
   spacePressed = false,
+  isWhiteboard = false,
   hiddenTextboxIds,
+  ignoreDoubleClickUntilRef,
   onDraggingTextboxChange,
   onGuidesChange,
+  onOffPageDragChange,
   onStartMultiDrag,
   onContextMenuRequest,
 }) => {
@@ -58,6 +73,7 @@ export const TextboxOverlay: React.FC<TextboxOverlayProps> = ({
   const selectedImageIds = useAppStore((s) => s.selectedImageIds);
   const lassoSelection = useAppStore((s) => s.lassoSelection);
   const selectTextbox = useAppStore((s) => s.selectTextbox);
+  const setActiveTool = useAppStore((s) => s.setActiveTool);
   const setUnifiedSelection = useAppStore((s) => s.setUnifiedSelection);
   const toggleElementInSelection = useAppStore((s) => s.toggleElementInSelection);
   const updateTextboxLive = useAppStore((s) => s.updateTextboxLive);
@@ -68,21 +84,32 @@ export const TextboxOverlay: React.FC<TextboxOverlayProps> = ({
   const beginEditTextbox = useAppStore((s) => s.beginEditTextbox);
   const copyTextboxStyle = useAppStore((s) => s.copyTextboxStyle);
   const pasteTextboxStyle = useAppStore((s) => s.pasteTextboxStyle);
+  const deleteElementsOffPage = useAppStore((s) => s.deleteElementsOffPage);
+  const revertAltCloneSnapshot = useAppStore((s) => s.revertAltCloneSnapshot);
 
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const sawTextareaKeyDownRef = useRef(false);
   const initialSpawnCharRef = useRef<string | null>(null);
+  const pendingCaretOffsetRef = useRef<{ textboxId: string; offset: number } | null>(null);
 
-  const [hoveredId, setHoveredId] = useState<string | null>(null);
+  const [hoverState, setHoverState] = useState<{ id: string; zone: 'text' | 'move' } | null>(null);
 
-  const [liveTransform, setLiveTransform] = useState<{
+  type LiveTextboxTransform = {
     id: string;
     x: number;
     y: number;
     fontSize: number;
     wrapWidth?: number;
     pillText: string;
-  } | null>(null);
+    isOffPage?: boolean;
+  };
+  const [liveTransform, setLiveTransform] = useState<LiveTextboxTransform | null>(null);
+  const latestTransformRef = useRef<LiveTextboxTransform | null>(null);
+
+  const updateLiveTransform = (next: LiveTextboxTransform | null) => {
+    latestTransformRef.current = next;
+    setLiveTransform(next);
+  };
 
   const dragRef = useRef<{
     kind: 'move' | 'scale' | 'wrap';
@@ -95,6 +122,10 @@ export const TextboxOverlay: React.FC<TextboxOverlayProps> = ({
     startWidth: number;
     startHeight: number;
     hasMoved: boolean;
+    startedOnText: boolean;
+    clickLocalX: number;
+    clickLocalY: number;
+    dragThresholdPx: number;
   } | null>(null);
 
   const textboxes = page.textboxes ?? [];
@@ -122,22 +153,29 @@ export const TextboxOverlay: React.FC<TextboxOverlayProps> = ({
     primaryTextbox && activeTextboxId === primaryTextbox.id,
   );
 
-  // Auto-focus & put caret at end when entering active editing
+  // Auto-focus & position caret at clicked glyph (or end on new spawn / double-click fallback)
   useEffect(() => {
-    if (!isEditingPrimary || !textareaRef.current) return;
+    if (!isEditingPrimary || !textareaRef.current || !primaryTextbox) return;
     sawTextareaKeyDownRef.current = false;
     initialSpawnCharRef.current =
-      primaryTextbox?.text.length === 1 ? primaryTextbox.text : null;
+      primaryTextbox.text.length === 1 ? primaryTextbox.text : null;
     const el = textareaRef.current;
     el.focus();
     const len = el.value.length;
-    el.setSelectionRange(len, len);
+    const pending = pendingCaretOffsetRef.current;
+    if (pending && pending.textboxId === primaryTextbox.id) {
+      pendingCaretOffsetRef.current = null;
+      const clamped = Math.max(0, Math.min(len, pending.offset));
+      el.setSelectionRange(clamped, clamped);
+    } else {
+      el.setSelectionRange(len, len);
+    }
   }, [isEditingPrimary, primaryTextbox?.id]);
 
   // Clear hover when leaving pan mode or switching page
   useEffect(() => {
     if (activeTool !== 'pan' || spacePressed) {
-      setHoveredId(null);
+      setHoverState(null);
     }
   }, [activeTool, spacePressed, page.id]);
 
@@ -160,12 +198,36 @@ export const TextboxOverlay: React.FC<TextboxOverlayProps> = ({
     );
   };
 
+  const getHoverZoneForEvent = (
+    e: { clientX: number; clientY: number; target?: EventTarget | null },
+    el: HTMLElement,
+    tb: Textbox,
+    layout: TextboxLayout,
+  ): { zone: 'text' | 'move'; localX: number; localY: number } => {
+    const rect = el.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) {
+      return { zone: 'move', localX: 0, localY: 0 };
+    }
+    const safeZoom = Math.max(0.005, zoom);
+    const localX = (e.clientX - rect.left) / safeZoom;
+    const localY = (e.clientY - rect.top) / safeZoom;
+    if (e.target instanceof HTMLElement && e.target.closest('button')) {
+      return { zone: 'move', localX, localY };
+    }
+    return {
+      zone: isPointOnTextboxText(localX, localY, tb, layout) ? 'text' : 'move',
+      localX,
+      localY,
+    };
+  };
+
   const handleDragStart = (
     e: React.PointerEvent<HTMLElement>,
     tb: Textbox,
     kind: 'move' | 'scale' | 'wrap',
     corner?: CornerKey,
     captureEl?: HTMLElement,
+    hitInfo?: { startedOnText: boolean; clickLocalX: number; clickLocalY: number },
   ) => {
     if (e.button !== 0) return;
     e.preventDefault();
@@ -192,6 +254,7 @@ export const TextboxOverlay: React.FC<TextboxOverlayProps> = ({
     }
 
     const startLayout = measureTextboxLayout(targetTb);
+    const startedOnText = kind === 'move' && Boolean(hitInfo?.startedOnText);
     dragRef.current = {
       kind,
       corner,
@@ -203,8 +266,12 @@ export const TextboxOverlay: React.FC<TextboxOverlayProps> = ({
       startWidth: startLayout.width,
       startHeight: startLayout.height,
       hasMoved: false,
+      startedOnText,
+      clickLocalX: hitInfo?.clickLocalX ?? 0,
+      clickLocalY: hitInfo?.clickLocalY ?? 0,
+      dragThresholdPx: startedOnText ? 3 : 2,
     };
-    setLiveTransform({
+    updateLiveTransform({
       id: targetTb.id,
       x: targetTb.x,
       y: targetTb.y,
@@ -214,6 +281,7 @@ export const TextboxOverlay: React.FC<TextboxOverlayProps> = ({
         kind === 'move'
           ? `X: ${Math.round(targetTb.x)}, Y: ${Math.round(targetTb.y)}`
           : `${Math.round(startLayout.width)} × ${Math.round(startLayout.height)} · ${targetTb.fontSize}pt`,
+      isOffPage: false,
     });
     if (kind !== 'move' || prevSnapshot) {
       onDraggingTextboxChange?.(targetTb.id);
@@ -229,7 +297,7 @@ export const TextboxOverlay: React.FC<TextboxOverlayProps> = ({
       e.clientX - drag.startClientX,
       e.clientY - drag.startClientY,
     );
-    if (!drag.hasMoved && distPx >= 2) {
+    if (!drag.hasMoved && distPx >= drag.dragThresholdPx) {
       drag.hasMoved = true;
       onDraggingTextboxChange?.(drag.textbox.id);
     }
@@ -260,24 +328,34 @@ export const TextboxOverlay: React.FC<TextboxOverlayProps> = ({
         axisLock: e.shiftKey,
         bypassSnap: e.ctrlKey || e.metaKey,
         snapThreshold: 5,
+        isWhiteboard,
       });
 
-      const nextX = Math.max(
-        0,
-        Math.min(page.paper.width - 12, drag.textbox.x + dx),
-      );
-      const nextY = Math.max(
-        0,
-        Math.min(page.paper.height - 12, drag.textbox.y + dy),
-      );
-      onGuidesChange?.(guides);
-      setLiveTransform({
+      const candX = drag.textbox.x + dx;
+      const candY = drag.textbox.y + dy;
+      const offPage = isWhiteboard
+        ? false
+        : isBoundsOffPage(
+            {
+              minX: candX,
+              minY: candY,
+              maxX: candX + drag.startWidth,
+              maxY: candY + drag.startHeight,
+            },
+            page.paper,
+          );
+
+      onGuidesChange?.(offPage ? [] : guides);
+      onOffPageDragChange?.(offPage ? { clientX: e.clientX, clientY: e.clientY } : null);
+
+      updateLiveTransform({
         id: drag.textbox.id,
-        x: nextX,
-        y: nextY,
+        x: candX,
+        y: candY,
         fontSize: drag.textbox.fontSize,
         wrapWidth: drag.textbox.wrapWidth,
-        pillText: `X: ${Math.round(nextX)}, Y: ${Math.round(nextY)}`,
+        pillText: `X: ${Math.round(candX)}, Y: ${Math.round(candY)}`,
+        isOffPage: offPage,
       });
     } else if (drag.kind === 'scale') {
       const corner = drag.corner ?? 'br';
@@ -292,18 +370,21 @@ export const TextboxOverlay: React.FC<TextboxOverlayProps> = ({
           : orientedDy * aspect;
 
       const ratio = Math.max(
-        0.35,
+        0.05,
         (drag.startWidth + diagDelta) / Math.max(12, drag.startWidth),
       );
       const nextFontSize = Math.max(
-        10,
-        Math.min(96, Math.round(drag.textbox.fontSize * ratio)),
+        MIN_TEXTBOX_FONT_SIZE,
+        Math.min(MAX_TEXTBOX_FONT_SIZE, Math.round(drag.textbox.fontSize * ratio)),
       );
       const nextWrap = drag.textbox.wrapWidth
         ? Math.max(
-            40,
-            Math.round(
-              drag.textbox.wrapWidth * (nextFontSize / drag.textbox.fontSize),
+            24,
+            Math.min(
+              MAX_ELEMENT_DIMENSION,
+              Math.round(
+                drag.textbox.wrapWidth * (nextFontSize / drag.textbox.fontSize),
+              ),
             ),
           )
         : undefined;
@@ -323,27 +404,32 @@ export const TextboxOverlay: React.FC<TextboxOverlayProps> = ({
           ? drag.textbox.y + (drag.startHeight - previewLayout.height)
           : drag.textbox.y;
 
-      setLiveTransform({
+      updateLiveTransform({
         id: drag.textbox.id,
         x: nextX,
         y: nextY,
         fontSize: nextFontSize,
         wrapWidth: nextWrap,
         pillText: `${Math.round(previewLayout.width)} × ${Math.round(previewLayout.height)} · ${nextFontSize}pt`,
+        isOffPage: false,
       });
     } else {
-      const nextWrap = Math.max(48, Math.round(drag.startWidth + rawDx));
+      const nextWrap = Math.max(
+        24,
+        Math.min(MAX_ELEMENT_DIMENSION, Math.round(drag.startWidth + rawDx)),
+      );
       const previewLayout = measureTextboxLayout({
         ...drag.textbox,
         wrapWidth: nextWrap,
       });
-      setLiveTransform({
+      updateLiveTransform({
         id: drag.textbox.id,
         x: drag.textbox.x,
         y: drag.textbox.y,
         fontSize: drag.textbox.fontSize,
         wrapWidth: nextWrap,
         pillText: `${Math.round(previewLayout.width)} × ${Math.round(previewLayout.height)} · Wrap`,
+        isOffPage: false,
       });
     }
   };
@@ -355,19 +441,55 @@ export const TextboxOverlay: React.FC<TextboxOverlayProps> = ({
     dragRef.current = null;
     onDraggingTextboxChange?.(null);
     onGuidesChange?.([]);
+    onOffPageDragChange?.(null);
 
-    const finalTransform = liveTransform;
-    setLiveTransform(null);
+    const finalTransform = latestTransformRef.current;
+    updateLiveTransform(null);
     if (!finalTransform) return;
 
-    // Pure click without drag shouldn't create a no-op Undo entry
+    // Pure click without drag: enter editing directly if the user clicked on actual text,
+    // or keep selected cleanly without no-op Undo entry when clicking blank space / border.
     if (drag.kind === 'move' && !drag.hasMoved && !drag.prevTextboxesSnapshot) {
+      if (drag.startedOnText && !drag.textbox.locked) {
+        const offset = resolveTextboxCaretOffsetAtPoint(
+          drag.clickLocalX,
+          drag.clickLocalY,
+          drag.textbox,
+        );
+        pendingCaretOffsetRef.current = {
+          textboxId: drag.textbox.id,
+          offset,
+        };
+        beginEditTextbox(page.id, drag.textbox.id);
+      }
       return;
     }
 
+    if (drag.kind === 'move' && finalTransform.isOffPage && !drag.textbox.locked) {
+      if (drag.prevTextboxesSnapshot) {
+        revertAltCloneSnapshot(page.id, { textboxes: drag.prevTextboxesSnapshot });
+      } else {
+        deleteElementsOffPage(page.id, {
+          strokeIds: [],
+          textboxIds: [drag.textbox.id],
+          imageIds: [],
+        });
+      }
+      return;
+    }
+
+    const committedX =
+      drag.kind === 'move' && !isWhiteboard
+        ? Math.max(0, Math.min(page.paper.width - 12, finalTransform.x))
+        : finalTransform.x;
+    const committedY =
+      drag.kind === 'move' && !isWhiteboard
+        ? Math.max(0, Math.min(page.paper.height - 12, finalTransform.y))
+        : finalTransform.y;
+
     const patch: Partial<Textbox> = {
-      x: finalTransform.x,
-      y: finalTransform.y,
+      x: committedX,
+      y: committedY,
       fontSize: finalTransform.fontSize,
       wrapWidth: finalTransform.wrapWidth,
     };
@@ -431,7 +553,7 @@ export const TextboxOverlay: React.FC<TextboxOverlayProps> = ({
       e.preventDefault();
       e.stopPropagation();
       updateTextboxLive(page.id, primaryTextbox.id, {
-        fontSize: Math.min(96, primaryTextbox.fontSize + 1),
+        fontSize: Math.min(MAX_TEXTBOX_FONT_SIZE, primaryTextbox.fontSize + 1),
       });
       return;
     }
@@ -439,7 +561,7 @@ export const TextboxOverlay: React.FC<TextboxOverlayProps> = ({
       e.preventDefault();
       e.stopPropagation();
       updateTextboxLive(page.id, primaryTextbox.id, {
-        fontSize: Math.max(10, primaryTextbox.fontSize - 1),
+        fontSize: Math.max(MIN_TEXTBOX_FONT_SIZE, primaryTextbox.fontSize - 1),
       });
       return;
     }
@@ -529,11 +651,32 @@ export const TextboxOverlay: React.FC<TextboxOverlayProps> = ({
           smartDarkActive,
           false,
         );
-        const isHovered = !isSelected && hoveredId === tb.id;
+        const isHovered = !isSelected && hoverState?.id === tb.id;
         const isSmallElement =
           widthPx < SMALL_WIDTH_PX || heightPx < SMALL_HEIGHT_PX;
         const isLocked = Boolean(effectiveTb.locked);
         const showSingleHandles = isPrimary && !isMultiSelected && !isLocked;
+        const isOffPagePreview = Boolean(isActivelyTransforming && liveTransform?.isOffPage);
+        const activeHoverZone: 'text' | 'move' = isActivelyTransforming
+          ? 'move'
+          : isEditing
+            ? 'text'
+            : hoverState?.id === tb.id
+              ? hoverState.zone
+              : 'move';
+
+        const showFrame = isSelected || isHovered || isOffPagePreview;
+        const frameBorder = isOffPagePreview
+          ? '1.5px dashed #FD6E88'
+          : isSelected
+            ? isMultiSelected
+              ? '1px dashed rgba(7, 45, 89, 0.38)'
+              : isLocked
+                ? '1.5px dashed rgba(7, 45, 89, 0.65)'
+                : '1.5px solid #072D59'
+            : isHovered
+              ? '1.5px solid rgba(7, 45, 89, 0.5)'
+              : 'none';
 
         return (
           <div
@@ -547,17 +690,34 @@ export const TextboxOverlay: React.FC<TextboxOverlayProps> = ({
             }
             data-editing={isEditing ? 'true' : 'false'}
             data-locked={isLocked ? 'true' : 'false'}
-            onPointerEnter={() => {
-              if (!isSelected && canInteractUnselected) setHoveredId(tb.id);
+            data-off-page-drag={isOffPagePreview ? 'true' : 'false'}
+            data-hover-zone={isLocked ? 'locked' : activeHoverZone}
+            onPointerEnter={(e) => {
+              if (
+                !isEditing &&
+                !isLocked &&
+                !isMultiSelected &&
+                !spacePressed &&
+                (isSelected || canInteractUnselected)
+              ) {
+                const { zone } = getHoverZoneForEvent(e, e.currentTarget, effectiveTb, layout);
+                setHoverState((prev) =>
+                  prev?.id === tb.id && prev.zone === zone ? prev : { id: tb.id, zone },
+                );
+              }
             }}
             onPointerLeave={() => {
-              if (hoveredId === tb.id) setHoveredId(null);
+              if (hoverState?.id === tb.id) setHoverState(null);
             }}
             onPointerDown={(e) => {
+              if (e.button === 1) return;
               if (spacePressed) return;
               if (!isSelected && !canInteractUnselected) return;
               if (isEditing) {
                 e.stopPropagation();
+                return;
+              }
+              if (e.button === 2 && !isSelected && (activeTool === 'pan' || activeTool === 'pen')) {
                 return;
               }
               if (e.button !== 0) {
@@ -598,22 +758,73 @@ export const TextboxOverlay: React.FC<TextboxOverlayProps> = ({
                 }
                 return;
               }
-              handleDragStart(e, effectiveTb, 'move', undefined, e.currentTarget);
+              const hitInfo = getHoverZoneForEvent(e, e.currentTarget, effectiveTb, layout);
+              handleDragStart(e, effectiveTb, 'move', undefined, e.currentTarget, {
+                startedOnText: hitInfo.zone === 'text',
+                clickLocalX: hitInfo.localX,
+                clickLocalY: hitInfo.localY,
+              });
             }}
-            onPointerMove={handleDragMove}
+            onPointerMove={(e) => {
+              if (dragRef.current && dragRef.current.pointerId === e.pointerId) {
+                handleDragMove(e);
+                return;
+              }
+              if (
+                !isEditing &&
+                !isLocked &&
+                !isMultiSelected &&
+                !spacePressed &&
+                (isSelected || canInteractUnselected)
+              ) {
+                const { zone } = getHoverZoneForEvent(e, e.currentTarget, effectiveTb, layout);
+                setHoverState((prev) =>
+                  prev?.id === tb.id && prev.zone === zone ? prev : { id: tb.id, zone },
+                );
+              }
+            }}
             onPointerUp={handleDragEnd}
             onPointerCancel={handleDragEnd}
             onDoubleClick={(e) => {
               if (spacePressed) return;
+              if (
+                activeTool !== 'pen' &&
+                ignoreDoubleClickUntilRef &&
+                Date.now() < ignoreDoubleClickUntilRef.current
+              ) {
+                e.stopPropagation();
+                return;
+              }
+              if (activeTool === 'pen') {
+                e.stopPropagation();
+                setActiveTool('pan');
+                selectTextbox(tb.id);
+                return;
+              }
               if (!isSelected && !canInteractUnselected) return;
               e.stopPropagation();
               if (!isEditing && !isLocked) {
+                const rect = e.currentTarget.getBoundingClientRect();
+                if (rect.width > 0 && rect.height > 0) {
+                  const safeZoom = Math.max(0.005, zoom);
+                  const localX = (e.clientX - rect.left) / safeZoom;
+                  const localY = (e.clientY - rect.top) / safeZoom;
+                  pendingCaretOffsetRef.current = {
+                    textboxId: tb.id,
+                    offset: resolveTextboxCaretOffsetAtPoint(localX, localY, effectiveTb, layout),
+                  };
+                }
                 beginEditTextbox(page.id, tb.id);
               }
             }}
             onContextMenu={(e) => {
               if (spacePressed) return;
               if (!isSelected && !canInteractUnselected) return;
+              if (!isSelected && (activeTool === 'pan' || activeTool === 'pen')) {
+                e.preventDefault();
+                e.stopPropagation();
+                return;
+              }
               e.preventDefault();
               e.stopPropagation();
               if (!isSelected) {
@@ -633,97 +844,33 @@ export const TextboxOverlay: React.FC<TextboxOverlayProps> = ({
               width: `${widthPx}px`,
               height: `${heightPx}px`,
               padding: 0,
-              outline: isSelected
-                ? isMultiSelected
-                  ? '1px dashed rgba(7, 45, 89, 0.38)'
-                  : isLocked
-                    ? '1.5px dashed rgba(7, 45, 89, 0.65)'
-                    : '1.5px solid #072D59'
-                : isHovered
-                  ? '1.5px solid rgba(7, 45, 89, 0.5)'
-                  : 'none',
-              outlineOffset: '0px',
+              opacity: isOffPagePreview ? 0.45 : undefined,
             }}
             className={`absolute overflow-visible ${
-              spacePressed || isMultiSelected ? 'pointer-events-none' : ''
+              spacePressed || isMultiSelected ? 'pointer-events-none' : 'pointer-events-auto'
             } ${isSelected ? (isMultiSelected ? 'z-10' : 'z-20') : 'z-10'} ${
-              isEditing ? 'cursor-text' : isLocked ? 'cursor-default' : 'cursor-move'
+              isEditing
+                ? 'cursor-text'
+                : isLocked
+                  ? 'cursor-default'
+                  : activeHoverZone === 'text'
+                    ? 'cursor-text'
+                    : 'cursor-move'
             }`}
           >
-            {/* Generous +4px outer pointer tolerance zone */}
+            {/* Padded outer hit-tolerance zone matching visual selection frame */}
             {!isEditing && !isLocked && !isMultiSelected && (
               <div
                 aria-hidden="true"
-                className="absolute -inset-1 cursor-move bg-transparent"
+                style={{
+                  cursor: 'inherit',
+                  left: `-${TEXTBOX_FRAME_PAD_X}px`,
+                  top: `-${TEXTBOX_FRAME_PAD_Y}px`,
+                  right: `-${TEXTBOX_FRAME_PAD_X}px`,
+                  bottom: `-${TEXTBOX_FRAME_PAD_Y}px`,
+                }}
+                className="pointer-events-auto absolute bg-transparent"
               />
-            )}
-
-            {isHovered && (
-              <div
-                data-testid="textbox-hover-outline"
-                className="pointer-events-none absolute inset-0"
-              />
-            )}
-
-            {isPrimary && !isMultiSelected && isLocked && (
-              <span
-                data-testid="element-lock-badge"
-                title="Locked element — unlock from top bar or right-click menu"
-                className="pointer-events-none absolute -top-3 right-0 inline-flex items-center gap-1 rounded-full border border-[#072D59]/20 bg-white px-1.5 py-0.5 text-[10px] font-bold text-[#072D59] shadow-sm"
-              >
-                <Lock className="h-2.5 w-2.5 text-[#FD6E88]" />
-                <span>Locked</span>
-              </span>
-            )}
-
-            {/* Border-strip drag targets while actively editing text */}
-            {isEditing && (
-              <>
-                <div
-                  title="Drag border to move textbox"
-                  onMouseDown={(e) => e.preventDefault()}
-                  onPointerDown={(e) =>
-                    handleDragStart(e, effectiveTb, 'move')
-                  }
-                  onPointerMove={handleDragMove}
-                  onPointerUp={handleDragEnd}
-                  onPointerCancel={handleDragEnd}
-                  className="absolute -top-1.5 left-1 right-1 h-2 cursor-move bg-transparent"
-                />
-                <div
-                  title="Drag border to move textbox"
-                  onMouseDown={(e) => e.preventDefault()}
-                  onPointerDown={(e) =>
-                    handleDragStart(e, effectiveTb, 'move')
-                  }
-                  onPointerMove={handleDragMove}
-                  onPointerUp={handleDragEnd}
-                  onPointerCancel={handleDragEnd}
-                  className="absolute -bottom-1.5 left-1 right-1 h-2 cursor-move bg-transparent"
-                />
-                <div
-                  title="Drag border to move textbox"
-                  onMouseDown={(e) => e.preventDefault()}
-                  onPointerDown={(e) =>
-                    handleDragStart(e, effectiveTb, 'move')
-                  }
-                  onPointerMove={handleDragMove}
-                  onPointerUp={handleDragEnd}
-                  onPointerCancel={handleDragEnd}
-                  className="absolute -left-1.5 bottom-1 top-1 w-2 cursor-move bg-transparent"
-                />
-                <div
-                  title="Drag border to move textbox"
-                  onMouseDown={(e) => e.preventDefault()}
-                  onPointerDown={(e) =>
-                    handleDragStart(e, effectiveTb, 'move')
-                  }
-                  onPointerMove={handleDragMove}
-                  onPointerUp={handleDragEnd}
-                  onPointerCancel={handleDragEnd}
-                  className="absolute -right-1.5 bottom-1 top-1 w-2 cursor-move bg-transparent"
-                />
-              </>
             )}
 
             {/* Preview glyphs when dragging/scaling while not in active text editing */}
@@ -762,8 +909,12 @@ export const TextboxOverlay: React.FC<TextboxOverlayProps> = ({
                 }
                 onBeforeInput={handleBeforeInput}
                 onKeyDown={handleKeyDown}
-                onBlur={() => {
-                  commitTextboxSession(page.id, tb.id, false);
+                onBlur={(e) => {
+                  const nextFocused = e.relatedTarget as HTMLElement | null;
+                  const keepSelected = Boolean(
+                    nextFocused?.closest('[data-testid="contextual-subbar"]'),
+                  );
+                  commitTextboxSession(page.id, tb.id, keepSelected);
                 }}
                 style={
                   {
@@ -799,78 +950,161 @@ export const TextboxOverlay: React.FC<TextboxOverlayProps> = ({
               />
             )}
 
-            {/* Canva-style corner & side handles ONLY on single unlocked primary selected textbox */}
-            {showSingleHandles && (
-              <>
-                {corners.map((c) => (
-                  <button
-                    key={c.key}
-                    type="button"
-                    data-testid={`textbox-handle-${c.key}`}
-                    title="Drag corner (or Shift+Drag) to scale"
-                    aria-label={c.label}
-                    onMouseDown={(e) => e.preventDefault()}
-                    onPointerDown={(e) =>
-                      handleDragStart(e, effectiveTb, 'scale', c.key)
-                    }
-                    onPointerMove={handleDragMove}
-                    onPointerUp={handleDragEnd}
-                    onPointerCancel={handleDragEnd}
-                    className={`group absolute ${c.posClass} z-10 flex h-6 w-6 items-center justify-center bg-transparent ${c.cursorClass}`}
-                  >
-                    <span className="block h-2.5 w-2.5 rounded-full border-[1.5px] border-[#072D59] bg-white shadow-xs transition-transform group-hover:scale-110" />
-                  </button>
-                ))}
-
-                {/* Right-edge pill handle for text wrap width with >=6px hit-slop */}
-                <button
-                  type="button"
-                  data-testid="textbox-handle-wrap"
-                  title="Drag to adjust text wrap width"
-                  aria-label="Resize textbox wrap width"
-                  onMouseDown={(e) => e.preventDefault()}
-                  onPointerDown={(e) =>
-                    handleDragStart(e, effectiveTb, 'wrap')
-                  }
-                  onPointerMove={handleDragMove}
-                  onPointerUp={handleDragEnd}
-                  onPointerCancel={handleDragEnd}
-                  className="group absolute -right-2.5 top-1/2 z-10 flex h-7 w-5 -translate-y-1/2 cursor-ew-resize items-center justify-center bg-transparent"
-                >
-                  <span className="block h-4 w-[5px] rounded-full border-[1.5px] border-[#072D59] bg-white shadow-xs transition-transform group-hover:scale-110" />
-                </button>
-
-                {/* Smart compact floating move handle ONLY when element is very small */}
-                {isSmallElement && (
-                  <button
-                    type="button"
-                    data-testid="small-element-move-handle"
-                    title="Drag to move small element"
-                    aria-label="Drag to move small textbox"
-                    onMouseDown={(e) => e.preventDefault()}
-                    onPointerDown={(e) =>
-                      handleDragStart(e, effectiveTb, 'move')
-                    }
-                    onPointerMove={handleDragMove}
-                    onPointerUp={handleDragEnd}
-                    onPointerCancel={handleDragEnd}
-                    className="absolute left-1/2 top-full z-20 mt-2 flex h-6 w-6 -translate-x-1/2 cursor-move items-center justify-center rounded-full border border-[#072D59] bg-white text-[#072D59] shadow-sm hover:bg-[#DBF2FC]"
-                  >
-                    <Move className="h-3 w-3" />
-                  </button>
-                )}
-              </>
-            )}
-
-            {/* Live Coordinate / Dimension Pill while dragging or scaling */}
-            {isActivelyTransforming && liveTransform && (
+            {/* Padded selection/hover frame + anchored handles with comfortable breathing room */}
+            {showFrame && (
               <div
-                data-testid="live-drag-pill"
-                className={`folio-mono pointer-events-none absolute left-1/2 top-full z-30 ${
-                  isSmallElement ? 'mt-9' : 'mt-2'
-                } -translate-x-1/2 whitespace-nowrap rounded-full bg-[#072D59]/95 px-2.5 py-0.5 text-[10px] font-semibold text-white shadow-md`}
+                data-testid="textbox-selection-frame"
+                style={{
+                  left: `-${TEXTBOX_FRAME_PAD_X}px`,
+                  top: `-${TEXTBOX_FRAME_PAD_Y}px`,
+                  right: `-${TEXTBOX_FRAME_PAD_X}px`,
+                  bottom: `-${TEXTBOX_FRAME_PAD_Y}px`,
+                  border: frameBorder,
+                }}
+                className="pointer-events-none absolute rounded-[3px]"
               >
-                {liveTransform.pillText}
+                {isHovered && (
+                  <div
+                    data-testid="textbox-hover-outline"
+                    className="pointer-events-none absolute inset-0"
+                  />
+                )}
+
+                {isPrimary && !isMultiSelected && isLocked && (
+                  <span
+                    data-testid="element-lock-badge"
+                    title="Locked element — unlock from top bar or right-click menu"
+                    className="pointer-events-none absolute -top-3.5 right-0 inline-flex items-center gap-1 rounded-full border border-[#072D59]/20 bg-white px-1.5 py-0.5 text-[10px] font-bold text-[#072D59] shadow-sm"
+                  >
+                    <Lock className="h-2.5 w-2.5 text-[#FD6E88]" />
+                    <span>Locked</span>
+                  </span>
+                )}
+
+                {/* Border-strip drag targets along the padded frame while actively editing */}
+                {isEditing && (
+                  <>
+                    <div
+                      title="Drag border to move textbox"
+                      onMouseDown={(e) => e.preventDefault()}
+                      onPointerDown={(e) =>
+                        handleDragStart(e, effectiveTb, 'move')
+                      }
+                      onPointerMove={handleDragMove}
+                      onPointerUp={handleDragEnd}
+                      onPointerCancel={handleDragEnd}
+                      className="pointer-events-auto absolute -top-1.5 left-2 right-2 h-2.5 cursor-move bg-transparent"
+                    />
+                    <div
+                      title="Drag border to move textbox"
+                      onMouseDown={(e) => e.preventDefault()}
+                      onPointerDown={(e) =>
+                        handleDragStart(e, effectiveTb, 'move')
+                      }
+                      onPointerMove={handleDragMove}
+                      onPointerUp={handleDragEnd}
+                      onPointerCancel={handleDragEnd}
+                      className="pointer-events-auto absolute -bottom-1.5 left-2 right-2 h-2.5 cursor-move bg-transparent"
+                    />
+                    <div
+                      title="Drag border to move textbox"
+                      onMouseDown={(e) => e.preventDefault()}
+                      onPointerDown={(e) =>
+                        handleDragStart(e, effectiveTb, 'move')
+                      }
+                      onPointerMove={handleDragMove}
+                      onPointerUp={handleDragEnd}
+                      onPointerCancel={handleDragEnd}
+                      className="pointer-events-auto absolute -left-1.5 bottom-2 top-2 w-3 cursor-move bg-transparent"
+                    />
+                    <div
+                      title="Drag border to move textbox"
+                      onMouseDown={(e) => e.preventDefault()}
+                      onPointerDown={(e) =>
+                        handleDragStart(e, effectiveTb, 'move')
+                      }
+                      onPointerMove={handleDragMove}
+                      onPointerUp={handleDragEnd}
+                      onPointerCancel={handleDragEnd}
+                      className="pointer-events-auto absolute -right-1.5 bottom-2 top-2 w-3 cursor-move bg-transparent"
+                    />
+                  </>
+                )}
+
+                {/* Canva-style corner & side handles ONLY on single unlocked primary selected textbox */}
+                {showSingleHandles && (
+                  <>
+                    {corners.map((c) => (
+                      <button
+                        key={c.key}
+                        type="button"
+                        data-testid={`textbox-handle-${c.key}`}
+                        title="Drag corner (or Shift+Drag) to scale"
+                        aria-label={c.label}
+                        onMouseDown={(e) => e.preventDefault()}
+                        onPointerDown={(e) =>
+                          handleDragStart(e, effectiveTb, 'scale', c.key)
+                        }
+                        onPointerMove={handleDragMove}
+                        onPointerUp={handleDragEnd}
+                        onPointerCancel={handleDragEnd}
+                        className={`pointer-events-auto group absolute ${c.posClass} z-10 flex h-6 w-6 items-center justify-center bg-transparent ${c.cursorClass}`}
+                      >
+                        <span className="block h-2.5 w-2.5 rounded-full border-[1.5px] border-[#072D59] bg-white shadow-xs transition-transform group-hover:scale-110" />
+                      </button>
+                    ))}
+
+                    {/* Right-edge pill handle for text wrap width */}
+                    <button
+                      type="button"
+                      data-testid="textbox-handle-wrap"
+                      title="Drag to adjust text wrap width"
+                      aria-label="Resize textbox wrap width"
+                      onMouseDown={(e) => e.preventDefault()}
+                      onPointerDown={(e) =>
+                        handleDragStart(e, effectiveTb, 'wrap')
+                      }
+                      onPointerMove={handleDragMove}
+                      onPointerUp={handleDragEnd}
+                      onPointerCancel={handleDragEnd}
+                      className="pointer-events-auto group absolute -right-2.5 top-1/2 z-10 flex h-7 w-5 -translate-y-1/2 cursor-ew-resize items-center justify-center bg-transparent"
+                    >
+                      <span className="block h-4 w-[5px] rounded-full border-[1.5px] border-[#072D59] bg-white shadow-xs transition-transform group-hover:scale-110" />
+                    </button>
+
+                    {/* Smart compact floating move handle ONLY when element is very small */}
+                    {isSmallElement && (
+                      <button
+                        type="button"
+                        data-testid="small-element-move-handle"
+                        title="Drag to move small element"
+                        aria-label="Drag to move small textbox"
+                        onMouseDown={(e) => e.preventDefault()}
+                        onPointerDown={(e) =>
+                          handleDragStart(e, effectiveTb, 'move')
+                        }
+                        onPointerMove={handleDragMove}
+                        onPointerUp={handleDragEnd}
+                        onPointerCancel={handleDragEnd}
+                        className="pointer-events-auto absolute left-1/2 top-full z-20 mt-2.5 flex h-6 w-6 -translate-x-1/2 cursor-move items-center justify-center rounded-full border border-[#072D59] bg-white text-[#072D59] shadow-sm hover:bg-[#DBF2FC]"
+                      >
+                        <Move className="h-3 w-3" />
+                      </button>
+                    )}
+                  </>
+                )}
+
+                {/* Live Coordinate / Dimension Pill while dragging or scaling */}
+                {isActivelyTransforming && liveTransform && !liveTransform.isOffPage && (
+                  <div
+                    data-testid="live-drag-pill"
+                    className={`folio-mono pointer-events-none absolute left-1/2 top-full z-30 ${
+                      isSmallElement ? 'mt-10' : 'mt-2.5'
+                    } folio-glass-badge -translate-x-1/2 whitespace-nowrap rounded-full px-2.5 py-0.5 text-[10px] font-semibold`}
+                  >
+                    {liveTransform.pillText}
+                  </div>
+                )}
               </div>
             )}
           </div>

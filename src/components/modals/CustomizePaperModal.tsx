@@ -3,6 +3,9 @@ import { BookmarkPlus, Check, SlidersHorizontal, X } from 'lucide-react';
 import { renderPaperBackground } from '../../canvas/paperRenderer';
 import {
   DEFAULT_PAPER_CONFIG,
+  formatPaperPatternLabel,
+  MAX_CUSTOM_PAGE_DIMENSION,
+  MIN_CUSTOM_PAGE_DIMENSION,
   PAGE_SIZE_DEFINITIONS,
   PAPER_COLOR_PRESETS,
   resolvePageDimensions,
@@ -14,21 +17,26 @@ import type {
   PaperConfig,
   PaperPattern,
 } from '../../types/notes';
+import { DraggableRangeSlider } from '../common/DraggableRangeSlider';
+import { MorphingPill, useMorphingIndicator } from '../common/MorphingIndicator';
 
 interface CustomizePaperModalProps {
   open: boolean;
   pageId: string | null;
   initialPaper: PaperConfig;
+  isWhiteboard?: boolean;
   onClose: () => void;
 }
 
 const PATTERNS: { id: PaperPattern; label: string }[] = [
   { id: 'blank', label: 'Blank' },
-  { id: 'ruled', label: 'Ruled' },
-  { id: 'grid', label: 'Grid' },
+  { id: 'ruled', label: 'Lined' },
+  { id: 'grid', label: 'Graph' },
   { id: 'dotted', label: 'Dotted' },
-  { id: 'cornell', label: 'Cornell' },
+  { id: 'cornell', label: 'Study Notes' },
 ];
+
+const WHITEBOARD_PATTERNS: PaperPattern[] = ['blank', 'grid', 'dotted'];
 
 const SPACING_PRESETS = [
   { label: 'Narrow', value: 24 },
@@ -40,19 +48,31 @@ export const CustomizePaperModal: React.FC<CustomizePaperModalProps> = ({
   open,
   pageId,
   initialPaper,
+  isWhiteboard = false,
   onClose,
 }) => {
   const applyPaperToPage = useAppStore((s) => s.applyPaperToPage);
   const savePresetTemplate = useAppStore((s) => s.savePresetTemplate);
 
   const [draft, setDraft] = useState<PaperConfig>(initialPaper);
+  const [widthText, setWidthText] = useState(String(initialPaper.width));
+  const [heightText, setHeightText] = useState(String(initialPaper.height));
   const [presetName, setPresetName] = useState('');
   const [savedNotice, setSavedNotice] = useState<string | null>(null);
   const previewCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const orientationTrackRef = useRef<HTMLDivElement | null>(null);
+  const orientationIndicator = useMorphingIndicator(
+    orientationTrackRef,
+    open && !isWhiteboard ? draft.orientation : null,
+    [open, isWhiteboard],
+  );
 
   useEffect(() => {
     if (open) {
-      setDraft({ ...DEFAULT_PAPER_CONFIG, ...initialPaper });
+      const next = { ...DEFAULT_PAPER_CONFIG, ...initialPaper };
+      setDraft(next);
+      setWidthText(String(next.width));
+      setHeightText(String(next.height));
       setPresetName('');
       setSavedNotice(null);
     }
@@ -75,6 +95,8 @@ export const CustomizePaperModal: React.FC<CustomizePaperModalProps> = ({
       cssH = maxPreviewH;
       cssW = Math.round(cssH * aspect);
     }
+    cssW = Math.max(12, cssW);
+    cssH = Math.max(12, cssH);
 
     const dpr = window.devicePixelRatio || 1;
     canvas.width = Math.round(cssW * dpr);
@@ -90,6 +112,18 @@ export const CustomizePaperModal: React.FC<CustomizePaperModalProps> = ({
 
   if (!open) return null;
 
+  const clampDimension = (raw: number, fallback: number): number => {
+    const val = Number.isFinite(raw) && raw > 0 ? Math.round(raw) : fallback;
+    return Math.max(MIN_CUSTOM_PAGE_DIMENSION, Math.min(MAX_CUSTOM_PAGE_DIMENSION, val));
+  };
+
+  const resolveNormalizedDraft = (): PaperConfig => {
+    if (draft.sizePreset !== 'custom') return draft;
+    const w = clampDimension(Number(widthText), draft.width);
+    const h = clampDimension(Number(heightText), draft.height);
+    return w === draft.width && h === draft.height ? draft : { ...draft, width: w, height: h };
+  };
+
   const handleSizePresetChange = (sizePreset: PageSizePresetId) => {
     const dims = resolvePageDimensions(
       sizePreset,
@@ -97,6 +131,8 @@ export const CustomizePaperModal: React.FC<CustomizePaperModalProps> = ({
       draft.width,
       draft.height,
     );
+    setWidthText(String(dims.width));
+    setHeightText(String(dims.height));
     setDraft((prev) => ({
       ...prev,
       sizePreset,
@@ -112,6 +148,8 @@ export const CustomizePaperModal: React.FC<CustomizePaperModalProps> = ({
       draft.width,
       draft.height,
     );
+    setWidthText(String(dims.width));
+    setHeightText(String(dims.height));
     setDraft((prev) => ({
       ...prev,
       orientation,
@@ -120,8 +158,31 @@ export const CustomizePaperModal: React.FC<CustomizePaperModalProps> = ({
     }));
   };
 
-  const handleCustomDimension = (axis: 'width' | 'height', value: number) => {
-    const clamped = Math.max(320, Math.min(2400, Math.round(value || 320)));
+  const handleCustomDimensionInput = (axis: 'width' | 'height', rawText: string) => {
+    if (axis === 'width') setWidthText(rawText);
+    else setHeightText(rawText);
+
+    const parsed = Math.round(Number(rawText));
+    if (
+      rawText.trim() !== '' &&
+      Number.isFinite(parsed) &&
+      parsed >= MIN_CUSTOM_PAGE_DIMENSION &&
+      parsed <= MAX_CUSTOM_PAGE_DIMENSION
+    ) {
+      setDraft((prev) => ({
+        ...prev,
+        sizePreset: 'custom',
+        [axis]: parsed,
+      }));
+    }
+  };
+
+  const commitCustomDimensionBlur = (axis: 'width' | 'height') => {
+    const raw = axis === 'width' ? widthText : heightText;
+    const fallback = axis === 'width' ? draft.width : draft.height;
+    const clamped = clampDimension(Number(raw), fallback);
+    if (axis === 'width') setWidthText(String(clamped));
+    else setHeightText(String(clamped));
     setDraft((prev) => ({
       ...prev,
       sizePreset: 'custom',
@@ -130,15 +191,22 @@ export const CustomizePaperModal: React.FC<CustomizePaperModalProps> = ({
   };
 
   const handleSavePreset = async () => {
-    const name = presetName.trim() || `${draft.pattern[0].toUpperCase()}${draft.pattern.slice(1)} Preset`;
-    await savePresetTemplate(name, draft);
+    const normalized = resolveNormalizedDraft();
+    setDraft(normalized);
+    setWidthText(String(normalized.width));
+    setHeightText(String(normalized.height));
+    const name =
+      presetName.trim() ||
+      `${formatPaperPatternLabel(normalized.pattern)} Paper`;
+    await savePresetTemplate(name, normalized);
     setSavedNotice(`Saved "${name}" to My Templates`);
     setPresetName('');
   };
 
   const handleApply = async () => {
+    const normalized = resolveNormalizedDraft();
     if (pageId) {
-      await applyPaperToPage(pageId, draft);
+      await applyPaperToPage(pageId, normalized);
     }
     onClose();
   };
@@ -152,21 +220,23 @@ export const CustomizePaperModal: React.FC<CustomizePaperModalProps> = ({
         role="dialog"
         aria-modal="true"
         aria-labelledby="customize-paper-title"
-        className="folio-modal-card flex max-h-[92vh] w-full max-w-3xl flex-col overflow-hidden rounded-2xl text-[#072D59]"
+        className="folio-modal-card flex max-h-[92vh] w-full max-w-3xl flex-col overflow-hidden rounded-2xl text-[var(--navy-900)]"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
         <div className="folio-modal-header flex items-center justify-between px-5 py-4">
           <div className="flex items-center gap-2.5">
-            <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-[#DBF2FC] text-[#072D59]">
+            <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-[var(--surface-seal)] text-[var(--navy-900)]">
               <SlidersHorizontal className="h-4 w-4" />
             </div>
             <div>
-              <h2 id="customize-paper-title" className="text-base font-bold text-[#072D59]">
-                Customize Paper
+              <h2 id="customize-paper-title" className="text-base font-bold text-[var(--navy-900)]">
+                {isWhiteboard ? 'Customize Board' : 'Customize Paper'}
               </h2>
-              <p className="text-xs text-[#072D59]/65">
-                Configure paper template, page size, spacing &amp; color
+              <p className="text-xs text-[var(--navy-600)]">
+                {isWhiteboard
+                  ? 'Configure whiteboard grid pattern, spacing & background color'
+                  : 'Configure paper template, page size, spacing & color'}
               </p>
             </div>
           </div>
@@ -174,7 +244,7 @@ export const CustomizePaperModal: React.FC<CustomizePaperModalProps> = ({
             type="button"
             aria-label="Close Customize Paper"
             onClick={onClose}
-            className="rounded-lg p-1.5 text-[#072D59]/55 transition duration-150 hover:bg-[#DBF2FC]/70 hover:text-[#072D59]"
+            className="folio-press rounded-lg p-1.5 text-[var(--navy-600)] hover:bg-[var(--surface-seal)] hover:text-[var(--navy-900)]"
           >
             <X className="h-4 w-4" />
           </button>
@@ -183,14 +253,16 @@ export const CustomizePaperModal: React.FC<CustomizePaperModalProps> = ({
         {/* Body */}
         <div className="grid flex-1 gap-6 overflow-y-auto p-5 md:grid-cols-[270px_1fr]">
           {/* Live Preview Pane */}
-          <div className="flex flex-col items-center justify-center rounded-2xl border border-[#072D59]/10 bg-[#DBF2FC]/30 p-4">
+          <div className="flex flex-col items-center justify-center rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-tint)] p-4">
             <canvas
               ref={previewCanvasRef}
               data-testid="customize-paper-preview"
-              className="rounded-sm shadow-md ring-1 ring-[#072D59]/12"
+              className="rounded-sm shadow-[var(--shadow-card)] ring-1 ring-[var(--border-subtle)]"
             />
-            <span className="mt-3 text-xs font-semibold text-[#072D59]/65">
-              {draft.width} × {draft.height} px · {draft.orientation}
+            <span className="mt-3 text-xs font-semibold text-[var(--navy-600)] tabular-nums">
+              {isWhiteboard
+                ? 'Whiteboard Background'
+                : `${draft.width} × ${draft.height} px · ${draft.orientation}`}
             </span>
           </div>
 
@@ -198,19 +270,22 @@ export const CustomizePaperModal: React.FC<CustomizePaperModalProps> = ({
           <div className="space-y-5">
             {/* Pattern */}
             <div>
-              <label className="mb-2 block text-xs font-bold uppercase tracking-wide text-[#072D59]/65">
+              <label className="folio-section-label mb-2 block">
                 Pattern
               </label>
-              <div className="grid grid-cols-5 gap-1.5">
-                {PATTERNS.map((pat) => (
+              <div className={`grid gap-1.5 ${isWhiteboard ? 'grid-cols-3' : 'grid-cols-5'}`}>
+                {(isWhiteboard
+                  ? PATTERNS.filter((pat) => WHITEBOARD_PATTERNS.includes(pat.id))
+                  : PATTERNS
+                ).map((pat) => (
                   <button
                     key={pat.id}
                     type="button"
                     onClick={() => setDraft((prev) => ({ ...prev, pattern: pat.id }))}
-                    className={`rounded-xl border px-2 py-2 text-xs font-semibold transition duration-150 ${
+                    className={`folio-press rounded-xl border px-2 py-2 text-xs font-semibold ${
                       draft.pattern === pat.id
-                        ? 'border-[#072D59] bg-[#072D59] text-white shadow-xs'
-                        : 'border-[#072D59]/12 bg-white text-[#072D59] hover:bg-[#DBF2FC]/45'
+                        ? 'folio-glass-active'
+                        : 'border-[var(--border-subtle)] bg-[var(--surface-elevated)] text-[var(--navy-900)] hover:bg-[var(--surface-tint)]'
                     }`}
                   >
                     {pat.label}
@@ -219,12 +294,14 @@ export const CustomizePaperModal: React.FC<CustomizePaperModalProps> = ({
               </div>
             </div>
 
-            {/* Page Size & Orientation */}
-            <div className="grid gap-3 sm:grid-cols-[1fr_auto]">
+            {!isWhiteboard && (
+              <>
+                {/* Page Size & Orientation */}
+                <div className="grid gap-3 sm:grid-cols-[1fr_auto]">
               <div>
                 <label
                   htmlFor="paper-size-select"
-                  className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-[#072D59]/65"
+                  className="folio-section-label mb-1.5 block"
                 >
                   Page Size
                 </label>
@@ -243,19 +320,26 @@ export const CustomizePaperModal: React.FC<CustomizePaperModalProps> = ({
               </div>
 
               <div>
-                <label className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-[#072D59]/65">
+                <label className="folio-section-label mb-1.5 block">
                   Orientation
                 </label>
-                <div className="flex rounded-xl border border-[#072D59]/12 bg-[#DBF2FC]/30 p-0.5">
+                <div
+                  ref={orientationTrackRef}
+                  className="folio-segmented-track flex rounded-xl p-0.5"
+                >
+                  <MorphingPill indicator={orientationIndicator} className="rounded-lg" />
                   {(['portrait', 'landscape'] as PageOrientation[]).map((ori) => (
                     <button
                       key={ori}
                       type="button"
+                      data-morph-key={ori}
                       onClick={() => handleOrientationChange(ori)}
-                      className={`rounded-lg px-3 py-1.5 text-xs font-semibold capitalize transition duration-150 ${
+                      className={`folio-press relative z-10 rounded-lg px-3 py-1.5 text-xs font-semibold capitalize ${
                         draft.orientation === ori
-                          ? 'bg-[#072D59] text-white shadow-xs'
-                          : 'text-[#072D59]/75 hover:text-[#072D59]'
+                          ? orientationIndicator.ready
+                            ? 'text-white'
+                            : 'folio-glass-active'
+                          : 'text-[var(--navy-600)] hover:text-[var(--navy-900)]'
                       }`}
                     >
                       {ori}
@@ -266,43 +350,61 @@ export const CustomizePaperModal: React.FC<CustomizePaperModalProps> = ({
             </div>
 
             {draft.sizePreset === 'custom' && (
-              <div className="grid grid-cols-2 gap-3 rounded-xl border border-[#072D59]/10 bg-[#DBF2FC]/25 p-3">
-                <div>
-                  <label className="mb-1 block text-xs font-semibold text-[#072D59]/75">
-                    Width (px)
-                  </label>
-                  <input
-                    type="number"
-                    min={320}
-                    max={2400}
-                    value={draft.width}
-                    onChange={(e) => handleCustomDimension('width', Number(e.target.value))}
-                    className="folio-input w-full rounded-lg px-2.5 py-1.5 text-sm"
-                  />
+              <div className="space-y-2.5 rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-tint)] p-3">
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="mb-1 block text-xs font-semibold text-[var(--navy-600)]">
+                      Width (px)
+                    </label>
+                    <input
+                      type="number"
+                      data-testid="custom-paper-width-input"
+                      min={MIN_CUSTOM_PAGE_DIMENSION}
+                      max={MAX_CUSTOM_PAGE_DIMENSION}
+                      value={widthText}
+                      onChange={(e) => handleCustomDimensionInput('width', e.target.value)}
+                      onBlur={() => commitCustomDimensionBlur('width')}
+                      className="folio-input w-full rounded-lg px-2.5 py-1.5 text-sm tabular-nums"
+                    />
+                  </div>
+                  <div>
+                    <label className="mb-1 block text-xs font-semibold text-[var(--navy-600)]">
+                      Height (px)
+                    </label>
+                    <input
+                      type="number"
+                      data-testid="custom-paper-height-input"
+                      min={MIN_CUSTOM_PAGE_DIMENSION}
+                      max={MAX_CUSTOM_PAGE_DIMENSION}
+                      value={heightText}
+                      onChange={(e) => handleCustomDimensionInput('height', e.target.value)}
+                      onBlur={() => commitCustomDimensionBlur('height')}
+                      className="folio-input w-full rounded-lg px-2.5 py-1.5 text-sm tabular-nums"
+                    />
+                  </div>
                 </div>
-                <div>
-                  <label className="mb-1 block text-xs font-semibold text-[#072D59]/75">
-                    Height (px)
-                  </label>
-                  <input
-                    type="number"
-                    min={320}
-                    max={2400}
-                    value={draft.height}
-                    onChange={(e) => handleCustomDimension('height', Number(e.target.value))}
-                    className="folio-input w-full rounded-lg px-2.5 py-1.5 text-sm"
-                  />
-                </div>
+                {(draft.width > 4096 || draft.height > 4096) && (
+                  <p
+                    data-testid="large-page-note"
+                    className="text-[11px] leading-snug text-[var(--navy-600)]"
+                  >
+                    Large page (&gt; 4096 px): Live rendering stays sharp via viewport windowing.
+                    PNG/JPG/PDF exports auto-scale within browser bitmap &amp; PDF viewer limits
+                    (SVG stays full vector).
+                  </p>
+                )}
               </div>
+            )}
+              </>
             )}
 
             {/* Line Spacing */}
             <div>
               <div className="mb-2 flex items-center justify-between">
-                <label className="text-xs font-bold uppercase tracking-wide text-[#072D59]/65">
+                <label className="folio-section-label">
                   Line / Grid Spacing
                 </label>
-                <span className="text-xs font-bold text-[#072D59]">{draft.spacing} px</span>
+                <span className="folio-mono text-xs font-bold text-[var(--navy-900)]">{draft.spacing} px</span>
               </div>
               <div className="flex flex-wrap items-center gap-2">
                 {SPACING_PRESETS.map((sp) => (
@@ -310,39 +412,39 @@ export const CustomizePaperModal: React.FC<CustomizePaperModalProps> = ({
                     key={sp.value}
                     type="button"
                     onClick={() => setDraft((prev) => ({ ...prev, spacing: sp.value }))}
-                    className={`rounded-lg border px-2.5 py-1 text-xs font-semibold transition duration-150 ${
+                    className={`folio-press rounded-lg border px-2.5 py-1 text-xs font-semibold tabular-nums ${
                       draft.spacing === sp.value
-                        ? 'border-[#072D59] bg-[#072D59] text-white'
-                        : 'border-[#072D59]/12 text-[#072D59]/75 hover:bg-[#DBF2FC]/45'
+                        ? 'folio-glass-active'
+                        : 'border-[var(--border-subtle)] text-[var(--navy-600)] hover:bg-[var(--surface-tint)] hover:text-[var(--navy-900)]'
                     }`}
                   >
                     {sp.label} ({sp.value})
                   </button>
                 ))}
-                <input
-                  type="range"
+                <DraggableRangeSlider
                   min={16}
                   max={64}
                   step={2}
-                  aria-label="Line spacing slider"
+                  ariaLabel="Line spacing slider"
                   value={draft.spacing}
-                  onChange={(e) =>
-                    setDraft((prev) => ({ ...prev, spacing: Number(e.target.value) }))
+                  onChange={(spacing) =>
+                    setDraft((prev) => ({ ...prev, spacing }))
                   }
-                  className="ml-auto flex-1 min-w-[110px] accent-[#FD6E88]"
+                  className="ml-auto flex-1 min-w-[110px]"
                 />
               </div>
             </div>
 
             {/* Margin Line */}
-            <div className="flex items-center justify-between rounded-xl border border-[#072D59]/10 px-3.5 py-2.5">
-              <div>
-                <div className="text-sm font-bold text-[#072D59]">Margin Line</div>
-                <div className="text-xs text-[#072D59]/60">
-                  Vertical left margin guide ({draft.marginOffset ?? 96}px)
+            {!isWhiteboard && (
+              <div className="flex items-center justify-between rounded-xl border border-[var(--border-subtle)] px-3.5 py-2.5">
+                <div>
+                  <div className="text-sm font-bold text-[var(--navy-900)]">Margin Line</div>
+                  <div className="text-xs text-[var(--navy-600)] tabular-nums">
+                    Vertical left margin guide ({draft.marginOffset ?? 96}px)
+                  </div>
                 </div>
-              </div>
-              <div className="flex items-center gap-3">
+                <div className="flex items-center gap-3">
                 {draft.marginLine && (
                   <input
                     type="color"
@@ -351,7 +453,7 @@ export const CustomizePaperModal: React.FC<CustomizePaperModalProps> = ({
                     onChange={(e) =>
                       setDraft((prev) => ({ ...prev, marginColor: e.target.value }))
                     }
-                    className="h-7 w-7 cursor-pointer rounded border border-[#072D59]/15 bg-transparent p-0"
+                    className="h-7 w-7 cursor-pointer rounded border border-[var(--border-strong)] bg-transparent p-0"
                   />
                 )}
                 <button
@@ -362,22 +464,23 @@ export const CustomizePaperModal: React.FC<CustomizePaperModalProps> = ({
                   onClick={() =>
                     setDraft((prev) => ({ ...prev, marginLine: !prev.marginLine }))
                   }
-                  className={`relative h-6 w-11 rounded-full transition-colors duration-150 ${
-                    draft.marginLine ? 'bg-[#FD6E88]' : 'bg-[#072D59]/20'
+                  className={`folio-press inline-flex h-6 w-11 shrink-0 items-center rounded-full p-0.5 transition-colors duration-150 ${
+                    draft.marginLine ? 'bg-[var(--crimson-500)]' : 'bg-[var(--border-strong)]'
                   }`}
                 >
                   <span
-                    className={`block h-5 w-5 translate-y-0.5 rounded-full bg-white shadow transition-transform duration-150 ${
-                      draft.marginLine ? 'translate-x-5.5' : 'translate-x-0.5'
+                    className={`pointer-events-none block h-5 w-5 rounded-full bg-white shadow transition-transform duration-150 ${
+                      draft.marginLine ? 'translate-x-5' : 'translate-x-0'
                     }`}
                   />
                 </button>
               </div>
             </div>
+            )}
 
             {/* Paper Color */}
             <div>
-              <label className="mb-2 block text-xs font-bold uppercase tracking-wide text-[#072D59]/65">
+              <label className="folio-section-label mb-2 block">
                 Paper Color
               </label>
               <div className="flex flex-wrap items-center gap-2.5">
@@ -393,21 +496,21 @@ export const CustomizePaperModal: React.FC<CustomizePaperModalProps> = ({
                       onClick={() =>
                         setDraft((prev) => ({ ...prev, paperColor: preset.color }))
                       }
-                      className={`flex items-center gap-1.5 rounded-xl border px-2.5 py-1.5 text-xs font-semibold transition duration-150 ${
+                      className={`folio-press flex items-center gap-1.5 rounded-xl border px-2.5 py-1.5 text-xs font-semibold ${
                         selected
-                          ? 'border-[#FD6E88] bg-[#FD6E88]/8 ring-2 ring-[#FD6E88]/25'
-                          : 'border-[#072D59]/12 hover:border-[#072D59]/30'
+                          ? 'border-[var(--crimson-500)] bg-[var(--surface-seal)]/55 ring-2 ring-[var(--crimson-glow)]'
+                          : 'border-[var(--border-subtle)] hover:border-[var(--border-strong)]'
                       }`}
                     >
                       <span
-                        className="h-4 w-4 rounded-full border border-[#072D59]/20"
+                        className="h-4 w-4 rounded-full border border-[var(--border-strong)]"
                         style={{ backgroundColor: preset.color }}
                       />
                       <span>{preset.label}</span>
                     </button>
                   );
                 })}
-                <label className="inline-flex cursor-pointer items-center gap-1.5 rounded-xl border border-[#072D59]/12 px-2.5 py-1.5 text-xs font-semibold text-[#072D59] transition duration-150 hover:bg-[#DBF2FC]/45">
+                <label className="folio-press inline-flex cursor-pointer items-center gap-1.5 rounded-xl border border-[var(--border-subtle)] px-2.5 py-1.5 text-xs font-semibold text-[var(--navy-900)] hover:bg-[var(--surface-tint)]">
                   <input
                     type="color"
                     aria-label="Custom paper color"
@@ -423,10 +526,10 @@ export const CustomizePaperModal: React.FC<CustomizePaperModalProps> = ({
             </div>
 
             {/* Save as Named Preset */}
-            <div className="rounded-xl border border-[#072D59]/10 bg-[#DBF2FC]/25 p-3.5">
+            <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-tint)] p-3.5">
               <label
                 htmlFor="preset-name-input"
-                className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-[#072D59]/70"
+                className="folio-section-label mb-1.5 block"
               >
                 Save Paper Configuration as Preset
               </label>
@@ -445,16 +548,16 @@ export const CustomizePaperModal: React.FC<CustomizePaperModalProps> = ({
                 <button
                   type="button"
                   onClick={handleSavePreset}
-                  className="folio-btn-secondary inline-flex items-center gap-1.5 rounded-xl px-3.5 py-2 text-xs font-semibold"
+                  className="folio-btn-secondary folio-press inline-flex items-center gap-1.5 rounded-xl px-3.5 py-2 text-xs font-semibold"
                 >
-                  <BookmarkPlus className="h-4 w-4 text-[#FD6E88]" />
+                  <BookmarkPlus className="h-4 w-4 text-[var(--crimson-500)]" />
                   Save Preset
                 </button>
               </div>
               {savedNotice && (
                 <p
                   data-testid="preset-saved-notice"
-                  className="mt-2 flex items-center gap-1 text-xs font-semibold text-emerald-700"
+                  className="mt-2 flex items-center gap-1 text-xs font-semibold text-[var(--state-success-text)]"
                 >
                   <Check className="h-3.5 w-3.5" />
                   {savedNotice}
@@ -469,14 +572,14 @@ export const CustomizePaperModal: React.FC<CustomizePaperModalProps> = ({
           <button
             type="button"
             onClick={onClose}
-            className="folio-btn-secondary rounded-xl px-4 py-2 text-sm font-semibold"
+            className="folio-btn-secondary folio-press rounded-xl px-4 py-2 text-sm font-semibold"
           >
             Cancel
           </button>
           <button
             type="button"
             onClick={handleApply}
-            className="folio-btn-crimson rounded-xl px-4 py-2 text-sm font-semibold shadow-xs"
+            className="folio-btn-crimson folio-press rounded-xl px-4 py-2 text-sm font-semibold"
           >
             Apply to Current Page
           </button>

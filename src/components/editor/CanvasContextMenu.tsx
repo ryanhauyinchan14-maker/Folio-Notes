@@ -31,12 +31,14 @@ export interface CanvasContextMenuState {
 interface CanvasContextMenuProps {
   menu: CanvasContextMenuState | null;
   onLassoAiAction?: (action: 'ask' | 'math-hint' | 'transcribe') => void;
+  onTidyHandwritingAi?: () => void;
   onClose: () => void;
 }
 
 export const CanvasContextMenu: React.FC<CanvasContextMenuProps> = ({
   menu,
   onLassoAiAction,
+  onTidyHandwritingAi,
   onClose,
 }) => {
   const pages = useAppStore((s) => s.pages);
@@ -99,7 +101,7 @@ export const CanvasContextMenu: React.FC<CanvasContextMenuProps> = ({
       data-testid="canvas-context-menu"
       onMouseDown={(e) => e.stopPropagation()}
       style={{ left: `${left}px`, top: `${top}px` }}
-      className="fixed z-50 w-54 rounded-xl border border-[#072D59]/14 bg-white p-1.5 text-[#072D59] shadow-2xl"
+      className="folio-popover fixed z-50 w-54 rounded-xl p-1.5 text-[var(--navy-900)]"
     >
       <button
         type="button"
@@ -107,13 +109,13 @@ export const CanvasContextMenu: React.FC<CanvasContextMenuProps> = ({
           copySelection(menu.pageId);
           onClose();
         }}
-        className="flex w-full items-center justify-between rounded-lg px-2.5 py-1.5 text-xs font-semibold text-[#072D59] transition duration-150 hover:bg-[#DBF2FC]/55"
+        className="folio-press flex w-full items-center justify-between rounded-lg px-2.5 py-1.5 text-xs font-semibold text-[var(--navy-900)] hover:bg-[var(--surface-tint)]"
       >
         <span className="flex items-center gap-2">
-          <Copy className="h-3.5 w-3.5 text-[#072D59]/65" />
+          <Copy className="h-3.5 w-3.5 text-[var(--navy-600)]" />
           Copy
         </span>
-        <kbd className="text-[10px] text-[#072D59]/50">Ctrl+C</kbd>
+        <kbd className="text-[10px] text-[var(--navy-600)]">Ctrl+C</kbd>
       </button>
 
       <button
@@ -122,18 +124,18 @@ export const CanvasContextMenu: React.FC<CanvasContextMenuProps> = ({
           duplicateSelection(menu.pageId);
           onClose();
         }}
-        className="flex w-full items-center justify-between rounded-lg px-2.5 py-1.5 text-xs font-semibold text-[#072D59] transition duration-150 hover:bg-[#DBF2FC]/55"
+        className="folio-press flex w-full items-center justify-between rounded-lg px-2.5 py-1.5 text-xs font-semibold text-[var(--navy-900)] hover:bg-[var(--surface-tint)]"
       >
         <span className="flex items-center gap-2">
-          <CopyPlus className="h-3.5 w-3.5 text-[#072D59]/65" />
+          <CopyPlus className="h-3.5 w-3.5 text-[var(--navy-600)]" />
           Duplicate
         </span>
-        <kbd className="text-[10px] text-[#072D59]/50">Ctrl+D</kbd>
+        <kbd className="text-[10px] text-[var(--navy-600)]">Ctrl+D</kbd>
       </button>
 
       {summary && (summary.canGroup || summary.canUngroup || summary.totalCount > 0) && (
         <>
-          <div className="my-1 h-px bg-[#072D59]/10" />
+          <div className="my-1 h-px bg-[var(--border-subtle)]" />
           {summary.canGroup && (
             <button
               type="button"
@@ -142,13 +144,13 @@ export const CanvasContextMenu: React.FC<CanvasContextMenuProps> = ({
                 groupSelection(menu.pageId);
                 onClose();
               }}
-              className="flex w-full items-center justify-between rounded-lg px-2.5 py-1.5 text-xs font-semibold text-[#072D59] transition duration-150 hover:bg-[#DBF2FC]/55"
+              className="folio-press flex w-full items-center justify-between rounded-lg px-2.5 py-1.5 text-xs font-semibold text-[var(--navy-900)] hover:bg-[var(--surface-tint)]"
             >
               <span className="flex items-center gap-2">
-                <Group className="h-3.5 w-3.5 text-[#072D59]/70" />
+                <Group className="h-3.5 w-3.5 text-[var(--navy-600)]" />
                 Group
               </span>
-              <kbd className="text-[10px] text-[#072D59]/50">Ctrl+G</kbd>
+              <kbd className="text-[10px] text-[var(--navy-600)]">Ctrl+G</kbd>
             </button>
           )}
           {summary.canUngroup && (
@@ -159,13 +161,13 @@ export const CanvasContextMenu: React.FC<CanvasContextMenuProps> = ({
                 ungroupSelection(menu.pageId);
                 onClose();
               }}
-              className="flex w-full items-center justify-between rounded-lg px-2.5 py-1.5 text-xs font-semibold text-[#072D59] transition duration-150 hover:bg-[#DBF2FC]/55"
+              className="folio-press flex w-full items-center justify-between rounded-lg px-2.5 py-1.5 text-xs font-semibold text-[var(--navy-900)] hover:bg-[var(--surface-tint)]"
             >
               <span className="flex items-center gap-2">
-                <Ungroup className="h-3.5 w-3.5 text-[#072D59]/70" />
+                <Ungroup className="h-3.5 w-3.5 text-[var(--navy-600)]" />
                 Ungroup
               </span>
-              <kbd className="text-[10px] text-[#072D59]/50">Ctrl+Shift+G</kbd>
+              <kbd className="text-[10px] text-[var(--navy-600)]">Ctrl+Shift+G</kbd>
             </button>
           )}
           <button
@@ -175,13 +177,13 @@ export const CanvasContextMenu: React.FC<CanvasContextMenuProps> = ({
               toggleLockSelection(menu.pageId);
               onClose();
             }}
-            className="flex w-full items-center justify-between rounded-lg px-2.5 py-1.5 text-xs font-semibold text-[#072D59] transition duration-150 hover:bg-[#DBF2FC]/55"
+            className="folio-press flex w-full items-center justify-between rounded-lg px-2.5 py-1.5 text-xs font-semibold text-[var(--navy-900)] hover:bg-[var(--surface-tint)]"
           >
             <span className="flex items-center gap-2">
               {allLocked ? (
-                <Unlock className="h-3.5 w-3.5 text-[#FD6E88]" />
+                <Unlock className="h-3.5 w-3.5 text-[var(--crimson-500)]" />
               ) : (
-                <Lock className="h-3.5 w-3.5 text-[#072D59]/70" />
+                <Lock className="h-3.5 w-3.5 text-[var(--navy-600)]" />
               )}
               {allLocked ? 'Unlock Element' : 'Lock Position'}
             </span>
@@ -191,20 +193,20 @@ export const CanvasContextMenu: React.FC<CanvasContextMenuProps> = ({
 
       {isSingleTextbox && (
         <>
-          <div className="my-1 h-px bg-[#072D59]/10" />
+          <div className="my-1 h-px bg-[var(--border-subtle)]" />
           <button
             type="button"
             onClick={() => {
               copyTextboxStyle(menu.pageId, menu.textboxId!);
               onClose();
             }}
-            className="flex w-full items-center justify-between rounded-lg px-2.5 py-1.5 text-xs font-semibold text-[#072D59] transition duration-150 hover:bg-[#DBF2FC]/55"
+            className="folio-press flex w-full items-center justify-between rounded-lg px-2.5 py-1.5 text-xs font-semibold text-[var(--navy-900)] hover:bg-[var(--surface-tint)]"
           >
             <span className="flex items-center gap-2">
-              <Paintbrush className="h-3.5 w-3.5 text-[#072D59]/65" />
+              <Paintbrush className="h-3.5 w-3.5 text-[var(--navy-600)]" />
               Copy Style
             </span>
-            <kbd className="text-[10px] text-[#072D59]/50">Ctrl+Alt+C</kbd>
+            <kbd className="text-[10px] text-[var(--navy-600)]">Ctrl+Alt+C</kbd>
           </button>
           <button
             type="button"
@@ -215,20 +217,20 @@ export const CanvasContextMenu: React.FC<CanvasContextMenuProps> = ({
               pasteTextboxStyle(menu.pageId, ids);
               onClose();
             }}
-            className="flex w-full items-center justify-between rounded-lg px-2.5 py-1.5 text-xs font-semibold text-[#072D59] transition duration-150 hover:bg-[#DBF2FC]/55 disabled:cursor-not-allowed disabled:opacity-40"
+            className="folio-press flex w-full items-center justify-between rounded-lg px-2.5 py-1.5 text-xs font-semibold text-[var(--navy-900)] hover:bg-[var(--surface-tint)] disabled:cursor-not-allowed disabled:opacity-40"
           >
             <span className="flex items-center gap-2">
-              <Clipboard className="h-3.5 w-3.5 text-[#072D59]/65" />
+              <Clipboard className="h-3.5 w-3.5 text-[var(--navy-600)]" />
               Paste Style
             </span>
-            <kbd className="text-[10px] text-[#072D59]/50">Ctrl+Alt+V</kbd>
+            <kbd className="text-[10px] text-[var(--navy-600)]">Ctrl+Alt+V</kbd>
           </button>
         </>
       )}
 
       {isSingleImage && (
         <>
-          <div className="my-1 h-px bg-[#072D59]/10" />
+          <div className="my-1 h-px bg-[var(--border-subtle)]" />
           <button
             type="button"
             disabled={allLocked}
@@ -236,13 +238,13 @@ export const CanvasContextMenu: React.FC<CanvasContextMenuProps> = ({
               setCroppingImageId(menu.imageId!);
               onClose();
             }}
-            className="flex w-full items-center justify-between rounded-lg px-2.5 py-1.5 text-xs font-semibold text-[#072D59] transition duration-150 hover:bg-[#DBF2FC]/55 disabled:cursor-not-allowed disabled:opacity-40"
+            className="folio-press flex w-full items-center justify-between rounded-lg px-2.5 py-1.5 text-xs font-semibold text-[var(--navy-900)] hover:bg-[var(--surface-tint)] disabled:cursor-not-allowed disabled:opacity-40"
           >
             <span className="flex items-center gap-2">
-              <Crop className="h-3.5 w-3.5 text-[#072D59]/65" />
+              <Crop className="h-3.5 w-3.5 text-[var(--navy-600)]" />
               Crop Photo
             </span>
-            <kbd className="text-[10px] text-[#072D59]/50">2× Click</kbd>
+            <kbd className="text-[10px] text-[var(--navy-600)]">2× Click</kbd>
           </button>
           <button
             type="button"
@@ -250,10 +252,10 @@ export const CanvasContextMenu: React.FC<CanvasContextMenuProps> = ({
               reorderImageLayer(menu.pageId, menu.imageId!, 'forward');
               onClose();
             }}
-            className="flex w-full items-center justify-between rounded-lg px-2.5 py-1.5 text-xs font-semibold text-[#072D59] transition duration-150 hover:bg-[#DBF2FC]/55"
+            className="folio-press flex w-full items-center justify-between rounded-lg px-2.5 py-1.5 text-xs font-semibold text-[var(--navy-900)] hover:bg-[var(--surface-tint)]"
           >
             <span className="flex items-center gap-2">
-              <ArrowUp className="h-3.5 w-3.5 text-[#072D59]/65" />
+              <ArrowUp className="h-3.5 w-3.5 text-[var(--navy-600)]" />
               Bring Forward
             </span>
           </button>
@@ -263,59 +265,77 @@ export const CanvasContextMenu: React.FC<CanvasContextMenuProps> = ({
               reorderImageLayer(menu.pageId, menu.imageId!, 'backward');
               onClose();
             }}
-            className="flex w-full items-center justify-between rounded-lg px-2.5 py-1.5 text-xs font-semibold text-[#072D59] transition duration-150 hover:bg-[#DBF2FC]/55"
+            className="folio-press flex w-full items-center justify-between rounded-lg px-2.5 py-1.5 text-xs font-semibold text-[var(--navy-900)] hover:bg-[var(--surface-tint)]"
           >
             <span className="flex items-center gap-2">
-              <ArrowDown className="h-3.5 w-3.5 text-[#072D59]/65" />
+              <ArrowDown className="h-3.5 w-3.5 text-[var(--navy-600)]" />
               Send Backward
             </span>
           </button>
         </>
       )}
 
-      {showAiActions && onLassoAiAction && (
+      {showAiActions && (onLassoAiAction || onTidyHandwritingAi) && (
         <>
-          <div className="my-1 h-px bg-[#072D59]/10" />
-          <button
-            type="button"
-            data-testid="context-lasso-ask-ai"
-            onClick={() => {
-              onLassoAiAction('ask');
-              onClose();
-            }}
-            className="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-xs font-semibold text-[#072D59] transition duration-150 hover:bg-[#DBF2FC]/55"
-          >
-            <Sparkles className="h-3.5 w-3.5 text-[#FD6E88]" />
-            <span>Ask AI</span>
-          </button>
-          <button
-            type="button"
-            data-testid="context-lasso-math-hint"
-            onClick={() => {
-              onLassoAiAction('math-hint');
-              onClose();
-            }}
-            className="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-xs font-semibold text-[#072D59] transition duration-150 hover:bg-[#DBF2FC]/55"
-          >
-            <Calculator className="h-3.5 w-3.5 text-[#072D59]" />
-            <span>Math Hint</span>
-          </button>
-          <button
-            type="button"
-            data-testid="context-lasso-transcribe"
-            onClick={() => {
-              onLassoAiAction('transcribe');
-              onClose();
-            }}
-            className="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-xs font-semibold text-[#072D59] transition duration-150 hover:bg-[#DBF2FC]/55"
-          >
-            <Type className="h-3.5 w-3.5 text-[#072D59]" />
-            <span>Transcribe</span>
-          </button>
+          <div className="my-1 h-px bg-[var(--border-subtle)]" />
+          {onTidyHandwritingAi && !allLocked && (
+            <button
+              type="button"
+              data-testid="context-tidy-handwriting-ai"
+              onClick={() => {
+                onTidyHandwritingAi();
+                onClose();
+              }}
+              className="folio-press flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-xs font-semibold text-[var(--navy-900)] hover:bg-[var(--surface-tint)]"
+            >
+              <Sparkles className="h-3.5 w-3.5 text-[var(--crimson-500)]" />
+              <span>Tidy Handwriting (AI)</span>
+            </button>
+          )}
+          {onLassoAiAction && (
+            <>
+              <button
+                type="button"
+                data-testid="context-lasso-ask-ai"
+                onClick={() => {
+                  onLassoAiAction('ask');
+                  onClose();
+                }}
+                className="folio-press flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-xs font-semibold text-[var(--navy-900)] hover:bg-[var(--surface-tint)]"
+              >
+                <Sparkles className="h-3.5 w-3.5 text-[var(--crimson-500)]" />
+                <span>Ask AI</span>
+              </button>
+              <button
+                type="button"
+                data-testid="context-lasso-math-hint"
+                onClick={() => {
+                  onLassoAiAction('math-hint');
+                  onClose();
+                }}
+                className="folio-press flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-xs font-semibold text-[var(--navy-900)] hover:bg-[var(--surface-tint)]"
+              >
+                <Calculator className="h-3.5 w-3.5 text-[var(--navy-900)]" />
+                <span>Math Hint</span>
+              </button>
+              <button
+                type="button"
+                data-testid="context-lasso-transcribe"
+                onClick={() => {
+                  onLassoAiAction('transcribe');
+                  onClose();
+                }}
+                className="folio-press flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-xs font-semibold text-[var(--navy-900)] hover:bg-[var(--surface-tint)]"
+              >
+                <Type className="h-3.5 w-3.5 text-[var(--navy-900)]" />
+                <span>Transcribe</span>
+              </button>
+            </>
+          )}
         </>
       )}
 
-      <div className="my-1 h-px bg-[#072D59]/10" />
+      <div className="my-1 h-px bg-[var(--border-subtle)]" />
       <button
         type="button"
         disabled={allLocked}
@@ -323,13 +343,13 @@ export const CanvasContextMenu: React.FC<CanvasContextMenuProps> = ({
           deleteActiveSelection(menu.pageId);
           onClose();
         }}
-        className="flex w-full items-center justify-between rounded-lg px-2.5 py-1.5 text-xs font-semibold text-[#F95573] transition duration-150 hover:bg-[#FD6E88]/12 disabled:cursor-not-allowed disabled:opacity-40"
+        className="folio-press flex w-full items-center justify-between rounded-lg px-2.5 py-1.5 text-xs font-semibold text-[var(--state-danger-text)] hover:bg-[var(--state-danger-bg)] disabled:cursor-not-allowed disabled:opacity-40"
       >
         <span className="flex items-center gap-2">
           <Trash2 className="h-3.5 w-3.5" />
           Delete
         </span>
-        <kbd className="text-[10px] text-[#F95573]/80">Del</kbd>
+        <kbd className="text-[10px] text-[var(--state-danger-text)]/80">Del</kbd>
       </button>
     </div>
   );

@@ -14,8 +14,11 @@ interface UnifiedSelectionOverlayProps {
   page: Page;
   zoom: number;
   spacePressed?: boolean;
+  isWhiteboard?: boolean;
+  clientToWorld?: (clientX: number, clientY: number) => { x: number; y: number };
   liveDragOffset?: { dx: number; dy: number } | null;
   liveScaleBounds?: BoundingBox | null;
+  isOffPageDrag?: boolean;
   onStrokeScalePreview?: (
     preview: {
       strokeIds: string[];
@@ -36,8 +39,11 @@ export const UnifiedSelectionOverlay: React.FC<UnifiedSelectionOverlayProps> = (
   page,
   zoom,
   spacePressed = false,
+  isWhiteboard = false,
+  clientToWorld,
   liveDragOffset = null,
   liveScaleBounds = null,
+  isOffPageDrag = false,
   onStrokeScalePreview,
   onStartMultiDrag,
   onContextMenuRequest,
@@ -98,7 +104,7 @@ export const UnifiedSelectionOverlay: React.FC<UnifiedSelectionOverlayProps> = (
     summary.textboxCount === 0 &&
     summary.imageCount === 0;
   const activeBounds = liveScaleBounds ?? summary.combinedBounds;
-  const pad = isStrokesOnly ? 8 : 6;
+  const pad = isStrokesOnly ? 8 : summary.textboxCount > 0 ? 10 : 6;
   const dxCur = liveDragOffset?.dx ?? 0;
   const dyCur = liveDragOffset?.dy ?? 0;
 
@@ -118,6 +124,9 @@ export const UnifiedSelectionOverlay: React.FC<UnifiedSelectionOverlayProps> = (
     clientX: number,
     clientY: number,
   ): { x: number; y: number } | null => {
+    if (isWhiteboard && clientToWorld) {
+      return clientToWorld(clientX, clientY);
+    }
     const surface = el.closest<HTMLElement>('[data-page-id]');
     if (!surface) return null;
     const rect = surface.getBoundingClientRect();
@@ -128,7 +137,12 @@ export const UnifiedSelectionOverlay: React.FC<UnifiedSelectionOverlayProps> = (
   };
 
   const handleBoxPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (e.button !== 0 || spacePressed) return;
+    if (spacePressed) return;
+    if (e.button === 2) {
+      e.stopPropagation();
+      return;
+    }
+    if (e.button !== 0) return;
     e.preventDefault();
     e.stopPropagation();
 
@@ -337,6 +351,7 @@ export const UnifiedSelectionOverlay: React.FC<UnifiedSelectionOverlayProps> = (
       data-testid={isStrokesOnly ? 'lasso-selection-box' : 'multi-selection-box'}
       data-group-selected={summary.isSingleGroup ? 'true' : 'false'}
       data-locked={summary.anyLocked ? 'true' : 'false'}
+      data-off-page-drag={isOffPageDrag ? 'true' : 'false'}
       onPointerDown={handleBoxPointerDown}
       onDoubleClick={handleDoubleClick}
       onContextMenu={(e) => {
@@ -360,14 +375,16 @@ export const UnifiedSelectionOverlay: React.FC<UnifiedSelectionOverlayProps> = (
         spacePressed
           ? 'pointer-events-none'
           : summary.anyLocked
-            ? 'cursor-default'
-            : 'cursor-move'
+            ? 'pointer-events-auto cursor-default'
+            : 'pointer-events-auto cursor-move'
       } ${
-        summary.anyLocked
-          ? 'border-2 border-dashed border-[#072D59]/60 bg-[#DBF2FC]/15'
-          : summary.isSingleGroup
-            ? 'border-2 border-[#072D59] bg-[#DBF2FC]/12 shadow-xs'
-            : 'border-[1.5px] border-dashed border-[#072D59] bg-[#DBF2FC]/15 shadow-xs'
+        isOffPageDrag
+          ? 'opacity-45 border-[1.5px] border-dashed border-[#FD6E88] bg-[#FD6E88]/12'
+          : summary.anyLocked
+            ? 'border-2 border-dashed border-[#072D59]/60 bg-[#DBF2FC]/15'
+            : summary.isSingleGroup
+              ? 'border-2 border-[#072D59] bg-[#DBF2FC]/12 shadow-xs'
+              : 'border-[1.5px] border-dashed border-[#072D59] bg-[#DBF2FC]/15 shadow-xs'
       }`}
     >
       {/* Stroke scale corner handles OR subtle corner indicators */}
@@ -401,7 +418,7 @@ export const UnifiedSelectionOverlay: React.FC<UnifiedSelectionOverlayProps> = (
       {summary.isSingleGroup && !summary.anyLocked && (
         <span
           data-testid="group-badge"
-          className="pointer-events-none absolute -top-5 left-0 rounded-full bg-[#072D59] px-2 py-0.5 text-[9px] font-bold uppercase tracking-wide text-white shadow-xs"
+          className="folio-glass-badge pointer-events-none absolute -top-5 left-0 rounded-full px-2 py-0.5 text-[9px] font-bold uppercase tracking-wide"
         >
           Group · {summary.totalCount}
         </span>
@@ -418,10 +435,10 @@ export const UnifiedSelectionOverlay: React.FC<UnifiedSelectionOverlayProps> = (
         </span>
       )}
 
-      {coordPill && (
+      {coordPill && !isOffPageDrag && (
         <div
           data-testid="live-drag-pill"
-          className="folio-mono pointer-events-none absolute left-1/2 top-full z-30 mt-2 -translate-x-1/2 whitespace-nowrap rounded-full bg-[#072D59]/95 px-2.5 py-0.5 text-[10px] font-semibold text-white shadow-md"
+          className="folio-mono folio-glass-badge pointer-events-none absolute left-1/2 top-full z-30 mt-2 -translate-x-1/2 whitespace-nowrap rounded-full px-2.5 py-0.5 text-[10px] font-semibold"
         >
           {coordPill}
         </div>

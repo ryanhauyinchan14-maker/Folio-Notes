@@ -2,7 +2,15 @@ import 'fake-indexeddb/auto';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { computeBoundsFromPoints } from '../../../canvas/geometry';
+import {
+  getTextboxLineGlyphRects,
+  measureTextboxLayout,
+} from '../../../canvas/textLayout';
+import { DEFAULT_WHITEBOARD_PAPER } from '../../../canvas/whiteboard';
+import { COVER_PRESETS } from '../../../constants/covers';
 import { useAppStore } from '../../../store/useAppStore';
+import { SettingsModal } from '../../modals/SettingsModal';
 import { NotebookEditor } from '../NotebookEditor';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -20,7 +28,7 @@ function makePngBlob(): File {
 function dispatchPointer(
   target: EventTarget,
   type: 'pointerdown' | 'pointermove' | 'pointerup',
-  coords: { clientX: number; clientY: number; button?: number },
+  coords: { clientX: number; clientY: number; button?: number; shiftKey?: boolean },
 ): void {
   const evt = new MouseEvent(type, {
     bubbles: true,
@@ -28,6 +36,7 @@ function dispatchPointer(
     clientX: coords.clientX,
     clientY: coords.clientY,
     button: coords.button ?? 0,
+    shiftKey: Boolean(coords.shiftKey),
   });
   Object.defineProperty(evt, 'pointerId', { value: 1 });
   Object.defineProperty(evt, 'pointerType', { value: 'mouse' });
@@ -369,15 +378,12 @@ describe('Canva hitboxes, one-motion drag, photo insertion paths & single-undo s
     expect(container.querySelector('[data-testid="top-header-bar"]')).not.toBeNull();
     expect(container.querySelector('[data-testid="zen-mode-pill"]')).toBeNull();
 
-    // Toggle Dark Paper View, Desk Backdrop, and Left Dock Position
+    // Dark paper button is removed from header; Desk Backdrop and Left Dock Position still apply cleanly
+    expect(container.querySelector('[data-testid="dark-paper-toggle"]')).toBeNull();
     await act(async () => {
-      useAppStore.getState().setDarkPaperView(true);
       useAppStore.getState().setDeskBackdrop('midnight-navy');
       useAppStore.getState().setDockPosition('left');
     });
-    expect(
-      container.querySelector('[data-testid="page-surface-1"]')?.getAttribute('data-dark-paper'),
-    ).toBe('true');
     expect(
       container
         .querySelector('[data-testid="notebook-editor-root"]')
@@ -389,10 +395,847 @@ describe('Canva hitboxes, one-motion drag, photo insertion paths & single-undo s
 
     // Reset back cleanly
     await act(async () => {
-      useAppStore.getState().setDarkPaperView(false);
       useAppStore.getState().setDeskBackdrop('cool-gray');
       useAppStore.getState().setDockPosition('bottom');
       useAppStore.getState().resetPenSlots();
     });
+  });
+
+  it('pastes plain clipboard text directly into notebooks and whiteboards without opening a textbox first', async () => {
+    const dispatchTextPaste = (text: string) => {
+      const pasteEvent = new Event('paste', {
+        bubbles: true,
+        cancelable: true,
+      }) as Event & {
+        clipboardData: {
+          items: unknown[];
+          files: File[];
+          getData: (type: string) => string;
+        };
+      };
+      pasteEvent.clipboardData = {
+        items: [],
+        files: [],
+        getData: (type: string) => (type === 'text/plain' ? text : ''),
+      };
+      window.dispatchEvent(pasteEvent);
+      return pasteEvent;
+    };
+
+    await act(async () => {
+      useAppStore.getState().setActiveTool('pen');
+      root.render(<NotebookEditor />);
+    });
+
+    const pageId = useAppStore.getState().activePageId!;
+    expect(useAppStore.getState().selectedTextboxIds).toHaveLength(0);
+    expect(useAppStore.getState().activeTextboxId).toBeNull();
+
+    // 1. Short single-line paste while Pen tool is active & no textbox selected
+    let paste1!: Event;
+    await act(async () => {
+      paste1 = dispatchTextPaste('Copied lecture notes');
+    });
+    expect(paste1.defaultPrevented).toBe(true);
+
+    let textboxes = useAppStore.getState().pages[0].textboxes ?? [];
+    expect(textboxes).toHaveLength(1);
+    expect(textboxes[0].text).toBe('Copied lecture notes');
+    expect(textboxes[0].wrapWidth).toBeUndefined();
+    expect(useAppStore.getState().selectedTextboxIds).toEqual([textboxes[0].id]);
+
+    // Single Undo removes the pasted textbox cleanly
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'z', ctrlKey: true, bubbles: true }));
+    });
+    expect(useAppStore.getState().pages[0].textboxes ?? []).toHaveLength(0);
+
+    // 2. Multi-line CRLF text normalizes line breaks & sets readable wrapWidth
+    await act(async () => {
+      dispatchTextPaste('Line one\r\nLine two with extra details for lecture notes');
+    });
+    textboxes = useAppStore.getState().pages[0].textboxes ?? [];
+    expect(textboxes).toHaveLength(1);
+    expect(textboxes[0].text).toBe('Line one\nLine two with extra details for lecture notes');
+    expect(textboxes[0].wrapWidth).toBeGreaterThan(200);
+
+    // 3. Internal canvas copy takes precedence right after Ctrl+C; after blur (external copy), OS text takes precedence
+    const strokePts = [
+      { x: 120, y: 160, pressure: 0.5 },
+      { x: 180, y: 160, pressure: 0.5 },
+    ];
+    await act(async () => {
+      useAppStore.getState().commitNewStroke(pageId, {
+        id: 'copy-stroke-1',
+        tool: 'pen',
+        color: '#072D59',
+        size: 4,
+        opacity: 1,
+        simulatePressure: false,
+        points: strokePts,
+        bounds: computeBoundsFromPoints(strokePts, 3),
+        createdAt: Date.now(),
+      });
+      useAppStore.getState().setUnifiedSelection(pageId, {
+        strokeIds: ['copy-stroke-1'],
+        textboxIds: [],
+        imageIds: [],
+      });
+    });
+
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'c', ctrlKey: true, bubbles: true }));
+    });
+
+    // Immediate paste with stale text/plain in OS clipboard pastes internal stroke instead of text
+    await act(async () => {
+      dispatchTextPaste('Stale external clipboard text');
+    });
+    expect(useAppStore.getState().pages[0].strokes).toHaveLength(2);
+    expect(useAppStore.getState().pages[0].textboxes ?? []).toHaveLength(1);
+
+    // After switching away (window blur) and returning, OS clipboard text takes precedence
+    await act(async () => {
+      window.dispatchEvent(new Event('blur'));
+    });
+    await act(async () => {
+      dispatchTextPaste('Fresh note from browser');
+    });
+    textboxes = useAppStore.getState().pages[0].textboxes ?? [];
+    expect(textboxes).toHaveLength(2);
+    expect(textboxes[1].text).toBe('Fresh note from browser');
+
+    // 4. Infinite Whiteboard direct paste without clipping coordinates
+    await act(async () => {
+      await useAppStore.getState().closeNotebook();
+      await useAppStore.getState().createNotebook({
+        title: 'Paste Whiteboard',
+        mode: 'whiteboard',
+        folderId: null,
+        cover: COVER_PRESETS[3].cover,
+        paper: { ...DEFAULT_WHITEBOARD_PAPER },
+        openImmediately: true,
+      });
+    });
+
+    await act(async () => {
+      dispatchTextPaste('Whiteboard sticky concept');
+    });
+    const wbBoxes = useAppStore.getState().pages[0].textboxes ?? [];
+    expect(wbBoxes).toHaveLength(1);
+    expect(wbBoxes[0].text).toBe('Whiteboard sticky concept');
+  });
+
+  it('shows I-beam text cursor & edits only on glyph text, while keeping blank areas as move cursor/drag inside selected textboxes', async () => {
+    await act(async () => {
+      root.render(<NotebookEditor />);
+    });
+
+    const pageId = useAppStore.getState().activePageId!;
+    let multiTbId = '';
+    await act(async () => {
+      useAppStore.getState().setActiveTool('pan');
+      const tb = useAppStore.getState().spawnTextbox({
+        pageId,
+        x: 100,
+        y: 120,
+        initialText: 'dwdwdwa\nwdw\nd\nd\nd\n\n\ndwdwd',
+        fontSize: 24,
+      })!;
+      multiTbId = tb.id;
+      useAppStore.getState().commitTextboxSession(pageId, tb.id, true);
+    });
+
+    const tb = useAppStore
+      .getState()
+      .pages.find((p) => p.id === pageId)!
+      .textboxes!.find((t) => t.id === multiTbId)!;
+    const layout = measureTextboxLayout(tb);
+    const rects = getTextboxLineGlyphRects(tb, layout);
+    const line5Rect = rects.find((r) => r.lineIndex === 4)!;
+
+    const origBcr = HTMLElement.prototype.getBoundingClientRect;
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (
+      this: HTMLElement,
+    ) {
+      if (this.dataset?.testid === 'textbox-box') {
+        const curTb = useAppStore
+          .getState()
+          .pages.find((p) => p.id === pageId)!
+          .textboxes!.find((t) => t.id === multiTbId)!;
+        return {
+          x: curTb.x,
+          y: curTb.y,
+          left: curTb.x,
+          top: curTb.y,
+          right: curTb.x + layout.width,
+          bottom: curTb.y + layout.height,
+          width: layout.width,
+          height: layout.height,
+          toJSON: () => ({}),
+        } as DOMRect;
+      }
+      return origBcr.call(this);
+    });
+
+    const tbBox = container.querySelector<HTMLElement>('[data-testid="textbox-box"]')!;
+    expect(tbBox).not.toBeNull();
+
+    // 1. Hover blank right-hand area next to short 'd' -> move cursor
+    const blankRightX = tb.x + layout.width - 8;
+    const line5MidY = tb.y + (line5Rect.minY + line5Rect.maxY) / 2;
+    await act(async () => {
+      dispatchPointer(tbBox, 'pointermove', { clientX: blankRightX, clientY: line5MidY });
+    });
+    expect(tbBox.getAttribute('data-hover-zone')).toBe('move');
+    expect(tbBox.className).toContain('cursor-move');
+
+    // Hover empty blank line -> move cursor
+    const emptyLineY = tb.y + layout.firstAscent + 5 * layout.lineStep - 4;
+    await act(async () => {
+      dispatchPointer(tbBox, 'pointermove', { clientX: tb.x + 8, clientY: emptyLineY });
+    });
+    expect(tbBox.getAttribute('data-hover-zone')).toBe('move');
+    expect(tbBox.className).toContain('cursor-move');
+
+    // 2. Click without dragging on blank area keeps textbox selected without entering editing
+    await act(async () => {
+      dispatchPointer(tbBox, 'pointerdown', { clientX: blankRightX, clientY: line5MidY });
+      dispatchPointer(tbBox, 'pointerup', { clientX: blankRightX, clientY: line5MidY });
+    });
+    expect(useAppStore.getState().activeTextboxId).toBeNull();
+    expect(useAppStore.getState().selectedTextboxIds).toEqual([multiTbId]);
+
+    // 3. Dragging from blank area moves the textbox smoothly
+    await act(async () => {
+      dispatchPointer(tbBox, 'pointerdown', { clientX: blankRightX, clientY: line5MidY });
+    });
+    await act(async () => {
+      dispatchPointer(tbBox, 'pointermove', {
+        clientX: blankRightX + 45,
+        clientY: line5MidY + 25,
+      });
+    });
+    await act(async () => {
+      dispatchPointer(tbBox, 'pointerup', {
+        clientX: blankRightX + 45,
+        clientY: line5MidY + 25,
+      });
+    });
+    const movedTb = useAppStore
+      .getState()
+      .pages.find((p) => p.id === pageId)!
+      .textboxes!.find((t) => t.id === multiTbId)!;
+    expect(movedTb.x).toBe(145);
+    expect(movedTb.y).toBe(145);
+
+    // 4. Hover directly on 'd' glyph of line 5 -> switches to I-beam cursor-text
+    const movedTextX = movedTb.x + (line5Rect.minX + line5Rect.maxX) / 2;
+    const movedTextY = movedTb.y + (line5Rect.minY + line5Rect.maxY) / 2;
+    await act(async () => {
+      dispatchPointer(tbBox, 'pointermove', { clientX: movedTextX, clientY: movedTextY });
+    });
+    expect(tbBox.getAttribute('data-hover-zone')).toBe('text');
+    expect(tbBox.className).toContain('cursor-text');
+
+    // 5. Clicking directly on 'd' enters text edit mode right on line 5
+    await act(async () => {
+      dispatchPointer(tbBox, 'pointerdown', { clientX: movedTextX, clientY: movedTextY });
+    });
+    await act(async () => {
+      dispatchPointer(tbBox, 'pointerup', { clientX: movedTextX, clientY: movedTextY });
+    });
+    expect(useAppStore.getState().activeTextboxId).toBe(multiTbId);
+    const textarea = container.querySelector<HTMLTextAreaElement>(
+      '[data-testid="textbox-textarea"]',
+    )!;
+    expect(textarea).not.toBeNull();
+    expect(textarea.selectionStart).toBeGreaterThanOrEqual(16);
+    expect(textarea.selectionStart).toBeLessThanOrEqual(17);
+  });
+
+  it('draws straight horizontal and vertical lines in pen and highlighter mode while holding Shift', async () => {
+    await act(async () => {
+      root.render(<NotebookEditor />);
+    });
+
+    const pageId = useAppStore.getState().activePageId!;
+    const canvas = container.querySelector<HTMLCanvasElement>('[data-testid="active-canvas-1"]')!;
+    expect(canvas).not.toBeNull();
+
+    const origBcr = HTMLElement.prototype.getBoundingClientRect;
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (
+      this: HTMLElement,
+    ) {
+      if (this === canvas) {
+        return {
+          x: 0,
+          y: 0,
+          left: 0,
+          top: 0,
+          right: 816,
+          bottom: 1056,
+          width: 816,
+          height: 1056,
+          toJSON: () => ({}),
+        } as DOMRect;
+      }
+      return origBcr.call(this);
+    });
+
+    // 1. Pen + Shift held on pointerdown + horizontal-dominant diagonal drag
+    await act(async () => {
+      useAppStore.getState().setActiveTool('pen');
+    });
+    await act(async () => {
+      dispatchPointer(canvas, 'pointerdown', { clientX: 100, clientY: 120, shiftKey: true });
+      dispatchPointer(canvas, 'pointermove', { clientX: 280, clientY: 165, shiftKey: true });
+      dispatchPointer(canvas, 'pointerup', { clientX: 280, clientY: 165, shiftKey: true });
+    });
+
+    let strokes = useAppStore.getState().pages.find((p) => p.id === pageId)!.strokes;
+    expect(strokes).toHaveLength(1);
+    expect(strokes[0].tool).toBe('pen');
+    expect(strokes[0].opacity).toBe(1);
+    expect(strokes[0].shape).toEqual({
+      kind: 'line',
+      x1: 100,
+      y1: 120,
+      x2: 280,
+      y2: 120,
+    });
+    expect(container.textContent).not.toContain('Snapped to Line');
+
+    // 2. Swinging cursor mid-drag while holding Shift flips axis dynamically from horizontal to vertical
+    await act(async () => {
+      dispatchPointer(canvas, 'pointerdown', { clientX: 100, clientY: 120, shiftKey: true });
+      dispatchPointer(canvas, 'pointermove', { clientX: 220, clientY: 140, shiftKey: true });
+      dispatchPointer(canvas, 'pointermove', { clientX: 130, clientY: 310, shiftKey: true });
+      dispatchPointer(canvas, 'pointerup', { clientX: 130, clientY: 310, shiftKey: true });
+    });
+
+    strokes = useAppStore.getState().pages.find((p) => p.id === pageId)!.strokes;
+    expect(strokes).toHaveLength(2);
+    expect(strokes[1].shape).toEqual({
+      kind: 'line',
+      x1: 100,
+      y1: 120,
+      x2: 100,
+      y2: 310,
+    });
+
+    // 3. Highlighter + Shift held + vertical-dominant drag
+    await act(async () => {
+      useAppStore.getState().setActiveTool('highlighter');
+    });
+    await act(async () => {
+      dispatchPointer(canvas, 'pointerdown', { clientX: 200, clientY: 150, shiftKey: true });
+      dispatchPointer(canvas, 'pointermove', { clientX: 235, clientY: 390, shiftKey: true });
+      dispatchPointer(canvas, 'pointerup', { clientX: 235, clientY: 390, shiftKey: true });
+    });
+
+    strokes = useAppStore.getState().pages.find((p) => p.id === pageId)!.strokes;
+    expect(strokes).toHaveLength(3);
+    expect(strokes[2].tool).toBe('highlighter');
+    expect(strokes[2].opacity).toBe(0.45);
+    expect(strokes[2].shape).toEqual({
+      kind: 'line',
+      x1: 200,
+      y1: 150,
+      x2: 200,
+      y2: 390,
+    });
+
+    // 4. Pressing Shift mid-stroke and releasing Shift right before pointerup preserves straight line
+    await act(async () => {
+      useAppStore.getState().setActiveTool('pen');
+    });
+    await act(async () => {
+      dispatchPointer(canvas, 'pointerdown', { clientX: 150, clientY: 200 });
+      dispatchPointer(canvas, 'pointermove', { clientX: 290, clientY: 235 });
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Shift', shiftKey: true }));
+      window.dispatchEvent(new KeyboardEvent('keyup', { key: 'Shift', shiftKey: false }));
+      dispatchPointer(canvas, 'pointerup', { clientX: 290, clientY: 235 });
+    });
+
+    strokes = useAppStore.getState().pages.find((p) => p.id === pageId)!.strokes;
+    expect(strokes).toHaveLength(4);
+    expect(strokes[3].shape).toEqual({
+      kind: 'line',
+      x1: 150,
+      y1: 200,
+      x2: 290,
+      y2: 200,
+    });
+  });
+
+  it('removes 560x72 / 96pt cap and supports typing exact W, H, and pt numbers for textboxes, images, and strokes', async () => {
+    await act(async () => {
+      root.render(<NotebookEditor />);
+    });
+
+    const pageId = useAppStore.getState().activePageId!;
+
+    const typeIntoSubbarInput = async (testId: string, nextVal: string) => {
+      const input = container.querySelector<HTMLInputElement>(`[data-testid="${testId}"]`)!;
+      expect(input).not.toBeNull();
+      await act(async () => {
+        input.focus();
+      });
+      await act(async () => {
+        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!;
+        setter.call(input, nextVal);
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      await act(async () => {
+        input.dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+        );
+      });
+    };
+
+    // 1. Spawn and select a textbox with "bdwdwwdwd", then scale corner far beyond old 96pt / 560x72 limit
+    let tbId = '';
+    await act(async () => {
+      useAppStore.getState().setActiveTool('pan');
+      const tb = useAppStore.getState().spawnTextbox({
+        pageId,
+        x: 100,
+        y: 120,
+        initialText: 'bdwdwwdwd',
+        fontSize: 57,
+      })!;
+      tbId = tb.id;
+      useAppStore.getState().commitTextboxSession(pageId, tb.id, true);
+    });
+
+    const brHandle = container.querySelector<HTMLButtonElement>('[data-testid="textbox-handle-br"]')!;
+    expect(brHandle).not.toBeNull();
+    await act(async () => {
+      dispatchPointer(brHandle, 'pointerdown', { clientX: 390, clientY: 165 });
+      dispatchPointer(brHandle, 'pointermove', { clientX: 980, clientY: 360 });
+      dispatchPointer(brHandle, 'pointerup', { clientX: 980, clientY: 360 });
+    });
+
+    let curTb = useAppStore
+      .getState()
+      .pages.find((p) => p.id === pageId)!
+      .textboxes!.find((t) => t.id === tbId)!;
+    expect(curTb.fontSize).toBeGreaterThan(120);
+    expect(measureTextboxLayout(curTb).width).toBeGreaterThan(600);
+
+    // 2. Type exact pt, W, H numbers directly into top bar inputs + verify 1-step Undo
+    await typeIntoSubbarInput('subbar-font-size', '250');
+    curTb = useAppStore
+      .getState()
+      .pages.find((p) => p.id === pageId)!
+      .textboxes!.find((t) => t.id === tbId)!;
+    expect(curTb.fontSize).toBe(250);
+
+    await typeIntoSubbarInput('subbar-dim-w', '1000');
+    curTb = useAppStore
+      .getState()
+      .pages.find((p) => p.id === pageId)!
+      .textboxes!.find((t) => t.id === tbId)!;
+    expect(Math.abs(Math.round(measureTextboxLayout(curTb).width) - 1000)).toBeLessThanOrEqual(2);
+
+    await typeIntoSubbarInput('subbar-dim-h', '180');
+    curTb = useAppStore
+      .getState()
+      .pages.find((p) => p.id === pageId)!
+      .textboxes!.find((t) => t.id === tbId)!;
+    expect(Math.abs(Math.round(measureTextboxLayout(curTb).height) - 180)).toBeLessThanOrEqual(2);
+
+    const fontBeforeUndo = curTb.fontSize;
+    await act(async () => {
+      useAppStore.getState().undo();
+    });
+    const tbAfterUndo = useAppStore
+      .getState()
+      .pages.find((p) => p.id === pageId)!
+      .textboxes!.find((t) => t.id === tbId)!;
+    expect(tbAfterUndo.fontSize).not.toBe(fontBeforeUndo);
+
+    // 3. Image exact W & H numeric inputs
+    const imgId = 'img-dim-test';
+    await act(async () => {
+      useAppStore.getState().addPageImages(pageId, [
+        {
+          id: imgId,
+          dataUrl: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAhKmMIQAAAABJRU5ErkJggg==',
+          naturalWidth: 400,
+          naturalHeight: 300,
+          x: 80,
+          y: 250,
+          width: 240,
+          height: 180,
+          opacity: 1,
+          borderRadius: 0,
+          crop: { x: 0, y: 0, width: 1, height: 1 },
+          flipX: false,
+          flipY: false,
+          zIndex: 1,
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        },
+      ]);
+      useAppStore.getState().selectImage(imgId);
+    });
+
+    await typeIntoSubbarInput('subbar-dim-w', '900');
+    await typeIntoSubbarInput('subbar-dim-h', '600');
+    const updatedImg = useAppStore
+      .getState()
+      .pages.find((p) => p.id === pageId)!
+      .images!.find((im) => im.id === imgId)!;
+    expect(updatedImg.width).toBe(900);
+    expect(updatedImg.height).toBe(600);
+
+    // 4. Stroke exact W & H numeric inputs
+    const strokePts = [
+      { x: 100, y: 100, pressure: 0.5 },
+      { x: 300, y: 200, pressure: 0.5 },
+    ];
+    const strokeId = 'st-dim-test';
+    await act(async () => {
+      useAppStore.getState().commitNewStroke(pageId, {
+        id: strokeId,
+        tool: 'pen',
+        color: '#072D59',
+        size: 4,
+        opacity: 1,
+        simulatePressure: false,
+        points: strokePts,
+        bounds: computeBoundsFromPoints(strokePts, 2.4),
+        createdAt: Date.now(),
+      });
+      useAppStore.getState().setUnifiedSelection(pageId, {
+        strokeIds: [strokeId],
+        textboxIds: [],
+        imageIds: [],
+      });
+    });
+
+    await typeIntoSubbarInput('subbar-dim-w', '500');
+    await typeIntoSubbarInput('subbar-dim-h', '250');
+    const scaledStroke = useAppStore
+      .getState()
+      .pages.find((p) => p.id === pageId)!
+      .strokes.find((s) => s.id === strokeId)!;
+    const scaledStrokeW = Math.round(scaledStroke.bounds.maxX - scaledStroke.bounds.minX);
+    const scaledStrokeH = Math.round(scaledStroke.bounds.maxY - scaledStroke.bounds.minY);
+    expect(scaledStrokeW).toBeGreaterThanOrEqual(490);
+    expect(scaledStrokeW).toBeLessThanOrEqual(505);
+    expect(scaledStrokeH).toBeGreaterThanOrEqual(240);
+    expect(scaledStrokeH).toBeLessThanOrEqual(255);
+  });
+
+  it('toggles Subtle UI Sounds in Settings -> Appearance and renders morphing tab tracks cleanly', async () => {
+    await act(async () => {
+      await useAppStore.getState().setUiSoundsEnabled(false);
+    });
+
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const localRoot = createRoot(host);
+
+    await act(async () => {
+      localRoot.render(<SettingsModal open onClose={() => {}} initialTab="appearance" />);
+    });
+
+    try {
+      const appearanceTab = host.querySelector('[data-morph-key="appearance"]');
+      expect(appearanceTab).toBeTruthy();
+
+      const toggleBtn = host.querySelector(
+        '[data-testid="settings-ui-sounds-toggle"]',
+      ) as HTMLButtonElement | null;
+      expect(toggleBtn).toBeTruthy();
+      expect(toggleBtn?.getAttribute('aria-checked')).toBe('false');
+      expect(useAppStore.getState().uiSoundsEnabled).toBe(false);
+
+      await act(async () => {
+        toggleBtn?.click();
+      });
+
+      expect(toggleBtn?.getAttribute('aria-checked')).toBe('true');
+      expect(useAppStore.getState().uiSoundsEnabled).toBe(true);
+
+      const generalTab = host.querySelector(
+        '[data-testid="settings-tab-general"]',
+      ) as HTMLButtonElement | null;
+      expect(generalTab).toBeTruthy();
+      await act(async () => {
+        generalTab?.click();
+      });
+
+      expect(host.querySelectorAll('[data-morph-key]').length).toBeGreaterThan(4);
+    } finally {
+      await act(async () => {
+        localRoot.unmount();
+        await useAppStore.getState().setUiSoundsEnabled(false);
+      });
+      host.remove();
+    }
+  });
+
+  it('switches from pen mode to select mode on double-click/double-tap over text without leaving stray strokes', async () => {
+    await act(async () => {
+      root.render(<NotebookEditor />);
+    });
+
+    const pageId = useAppStore.getState().activePageId!;
+    let tbId = '';
+    await act(async () => {
+      const tb = useAppStore.getState().spawnTextbox({
+        pageId,
+        x: 120,
+        y: 140,
+        initialText: 'when i doubleclick on text like this in pen mode, make it select mode',
+        fontSize: 22,
+      })!;
+      tbId = tb.id;
+      useAppStore.getState().commitTextboxSession(pageId, tb.id, false);
+      useAppStore.getState().setActiveTool('pen');
+    });
+
+    const initialUndoLen = useAppStore.getState().undoStack.length;
+    const canvas = container.querySelector<HTMLCanvasElement>('[data-testid="active-canvas-1"]')!;
+    expect(canvas).not.toBeNull();
+    vi.spyOn(canvas, 'getBoundingClientRect').mockReturnValue({
+      left: 0,
+      top: 0,
+      width: 816,
+      height: 1056,
+      right: 816,
+      bottom: 1056,
+      x: 0,
+      y: 0,
+      toJSON: () => ({}),
+    });
+
+    // Simulate real mouse/stylus double-tap sequence + trailing native dblclick
+    await act(async () => {
+      dispatchPointer(canvas, 'pointerdown', { clientX: 150, clientY: 155 });
+    });
+    await act(async () => {
+      dispatchPointer(canvas, 'pointerup', { clientX: 150, clientY: 155 });
+    });
+    await act(async () => {
+      dispatchPointer(canvas, 'pointerdown', { clientX: 152, clientY: 156 });
+    });
+    await act(async () => {
+      dispatchPointer(canvas, 'pointerup', { clientX: 152, clientY: 156 });
+    });
+
+    const selectedOverlayAfterTap = container.querySelector<HTMLElement>(
+      '[data-testid="textbox-box"]',
+    );
+    await act(async () => {
+      (selectedOverlayAfterTap ?? canvas).dispatchEvent(
+        new MouseEvent('dblclick', {
+          bubbles: true,
+          cancelable: true,
+          clientX: 152,
+          clientY: 156,
+        }),
+      );
+    });
+
+    const stateAfterDoubleClick = useAppStore.getState();
+    const pageAfterDoubleClick = stateAfterDoubleClick.pages.find((p) => p.id === pageId)!;
+    expect(stateAfterDoubleClick.activeTool).toBe('pan');
+    expect(stateAfterDoubleClick.selectedTextboxIds).toEqual([tbId]);
+    expect(stateAfterDoubleClick.activeTextboxId).toBeNull();
+    expect(pageAfterDoubleClick.strokes).toHaveLength(0);
+    expect(stateAfterDoubleClick.undoStack).toHaveLength(initialUndoLen);
+
+    // Also verify slow/synthetic canvas dblclick in pen mode switches cleanly to Select
+    await act(async () => {
+      useAppStore.getState().setActiveTool('pen');
+    });
+    await act(async () => {
+      canvas.dispatchEvent(
+        new MouseEvent('dblclick', {
+          bubbles: true,
+          cancelable: true,
+          clientX: 152,
+          clientY: 156,
+        }),
+      );
+    });
+    expect(useAppStore.getState().activeTool).toBe('pan');
+    expect(useAppStore.getState().selectedTextboxIds).toEqual([tbId]);
+    expect(useAppStore.getState().activeTextboxId).toBeNull();
+
+    // Double-clicking empty paper in pen mode must stay in pen mode and not spawn textboxes
+    await act(async () => {
+      useAppStore.getState().setActiveTool('pen');
+    });
+    const tbCountBeforeEmpty = useAppStore
+      .getState()
+      .pages.find((p) => p.id === pageId)!
+      .textboxes!.length;
+    await act(async () => {
+      dispatchPointer(canvas, 'pointerdown', { clientX: 600, clientY: 800 });
+      dispatchPointer(canvas, 'pointerup', { clientX: 600, clientY: 800 });
+      dispatchPointer(canvas, 'pointerdown', { clientX: 601, clientY: 801 });
+      dispatchPointer(canvas, 'pointerup', { clientX: 601, clientY: 801 });
+      canvas.dispatchEvent(
+        new MouseEvent('dblclick', {
+          bubbles: true,
+          cancelable: true,
+          clientX: 601,
+          clientY: 801,
+        }),
+      );
+    });
+    expect(useAppStore.getState().activeTool).toBe('pen');
+    expect(useAppStore.getState().selectedTextboxIds).toEqual([]);
+    expect(
+      useAppStore.getState().pages.find((p) => p.id === pageId)!.textboxes,
+    ).toHaveLength(tbCountBeforeEmpty);
+
+    // Single tap on a textbox in pen mode stays in pen mode and keeps the dot stroke
+    const strokesBeforeSingleTap = useAppStore
+      .getState()
+      .pages.find((p) => p.id === pageId)!.strokes.length;
+    await act(async () => {
+      dispatchPointer(canvas, 'pointerdown', { clientX: 150, clientY: 155 });
+    });
+    await act(async () => {
+      dispatchPointer(canvas, 'pointerup', { clientX: 150, clientY: 155 });
+    });
+    expect(useAppStore.getState().activeTool).toBe('pen');
+    expect(
+      useAppStore.getState().pages.find((p) => p.id === pageId)!.strokes.length,
+    ).toBe(strokesBeforeSingleTap + 1);
+  });
+
+  it('progressively dismisses selection / page menu on Escape and returns to the Home Shelf when idle', async () => {
+    await act(async () => {
+      root.render(<NotebookEditor />);
+    });
+
+    const pageId = useAppStore.getState().activePageId!;
+    const activeNotebookId = useAppStore.getState().activeNotebook?.id;
+    expect(activeNotebookId).toBeTruthy();
+
+    // 1. When a textbox is selected, first Escape deselects instead of leaving the notebook
+    await act(async () => {
+      const tb = useAppStore.getState().spawnTextbox({
+        pageId,
+        x: 100,
+        y: 120,
+        initialText: 'Selected note',
+      })!;
+      useAppStore.getState().commitTextboxSession(pageId, tb.id, true);
+    });
+    expect(useAppStore.getState().selectedTextboxIds).toHaveLength(1);
+
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    });
+    expect(useAppStore.getState().selectedTextboxIds).toEqual([]);
+    expect(useAppStore.getState().activeNotebook?.id).toBe(activeNotebookId);
+
+    // 2. When the Page dropdown is open, Escape closes the menu first without leaving the notebook
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>('[data-testid="page-menu-button"]')?.click();
+    });
+    expect(container.querySelector('[data-testid="page-dropdown-menu"]')).not.toBeNull();
+
+    await act(async () => {
+      window.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }),
+      );
+    });
+    expect(container.querySelector('[data-testid="page-dropdown-menu"]')).toBeNull();
+    expect(useAppStore.getState().activeNotebook?.id).toBe(activeNotebookId);
+
+    // 3. When idle on the notebook page, Escape returns cleanly to the Home Shelf
+    await act(async () => {
+      window.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }),
+      );
+      await new Promise((r) => setTimeout(r, 30));
+    });
+    expect(useAppStore.getState().activeNotebook).toBeNull();
+  });
+
+  it('renders a generously padded selection frame and handles around selected textboxes without overlapping glyphs', async () => {
+    await act(async () => {
+      root.render(<NotebookEditor />);
+    });
+
+    const pageId = useAppStore.getState().activePageId!;
+    let tbId = '';
+    await act(async () => {
+      useAppStore.getState().setActiveTool('pan');
+      const tb = useAppStore.getState().spawnTextbox({
+        pageId,
+        x: 140,
+        y: 160,
+        initialText: 'Memorize drama script',
+        fontSize: 24,
+      })!;
+      tbId = tb.id;
+      useAppStore.getState().commitTextboxSession(pageId, tb.id, true);
+    });
+
+    const tb = useAppStore
+      .getState()
+      .pages.find((p) => p.id === pageId)!
+      .textboxes!.find((t) => t.id === tbId)!;
+    const layout = measureTextboxLayout(tb);
+
+    const tbBox = container.querySelector<HTMLElement>('[data-testid="textbox-box"]')!;
+    expect(tbBox).not.toBeNull();
+    expect(tbBox.style.outline).toBe('');
+
+    const frame = container.querySelector<HTMLElement>('[data-testid="textbox-selection-frame"]')!;
+    expect(frame).not.toBeNull();
+    expect(frame.style.left).toBe('-14px');
+    expect(frame.style.right).toBe('-14px');
+    expect(frame.style.top).toBe('-9px');
+    expect(frame.style.bottom).toBe('-9px');
+    expect(frame.style.border).toContain('solid');
+
+    expect(frame.querySelector('[data-testid="textbox-handle-tl"]')).not.toBeNull();
+    expect(frame.querySelector('[data-testid="textbox-handle-tr"]')).not.toBeNull();
+    expect(frame.querySelector('[data-testid="textbox-handle-bl"]')).not.toBeNull();
+    expect(frame.querySelector('[data-testid="textbox-handle-br"]')).not.toBeNull();
+    expect(frame.querySelector('[data-testid="textbox-handle-wrap"]')).not.toBeNull();
+
+    // Pointer inside padded breathing room gives move cursor; over glyphs gives text cursor
+    const origBcr = HTMLElement.prototype.getBoundingClientRect;
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (
+      this: HTMLElement,
+    ) {
+      if (this.dataset?.testid === 'textbox-box') {
+        return {
+          x: tb.x,
+          y: tb.y,
+          left: tb.x,
+          top: tb.y,
+          right: tb.x + layout.width,
+          bottom: tb.y + layout.height,
+          width: layout.width,
+          height: layout.height,
+          toJSON: () => ({}),
+        } as DOMRect;
+      }
+      return origBcr.call(this);
+    });
+
+    await act(async () => {
+      dispatchPointer(tbBox, 'pointermove', { clientX: tb.x - 8, clientY: tb.y + 4 });
+    });
+    expect(tbBox.getAttribute('data-hover-zone')).toBe('move');
+
+    await act(async () => {
+      dispatchPointer(tbBox, 'pointermove', { clientX: tb.x + 12, clientY: tb.y + 8 });
+    });
+    expect(tbBox.getAttribute('data-hover-zone')).toBe('text');
   });
 });

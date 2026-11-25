@@ -5,6 +5,7 @@ import {
   Check,
   Copy,
   ExternalLink,
+  Eye,
   FileText,
   ImagePlus,
   KeyRound,
@@ -22,34 +23,38 @@ import {
   X,
 } from 'lucide-react';
 import {
-  askNotesWithGemini,
-  classifyGeminiError,
+  askNotesWithAi,
+  classifyAiError,
   formatMathSolutionForTextbox,
-  generateStudySet,
-  generateStudyVisual,
+  generateStudySetWithAi,
+  generateStudyVisualWithAi,
   type MathTutorResult,
-  runMathTutor,
+  runMathTutorWithAi,
   type StudySetResult,
-  transcribeHandwriting,
-} from '../../ai/geminiClient';
+  transcribeHandwritingWithAi,
+} from '../../ai/aiClient';
 import {
   captureLassoCropSnapshot,
   captureMultiPageSnapshots,
   capturePageSnapshot,
+  captureViewportSnapshot,
   type SnapshotCropRect,
   type SnapshotImagePart,
 } from '../../ai/pageSnapshot';
 import { repository } from '../../db/repository';
 import { useAppStore } from '../../store/useAppStore';
 import type { Page } from '../../types/notes';
+import { formatAiMarkdownForTextbox } from '../../utils/aiMarkdown';
 import {
-  GEMINI_API_STUDIO_URL,
+  AI_PROVIDER_META,
   IMAGE_GEMINI_MODEL,
-  resolveActiveGeminiModel,
+  resolveActiveAiConfig,
 } from '../../utils/settings';
+import { AiRichText } from './AiRichText';
+import { MorphingPill, useMorphingIndicator } from '../common/MorphingIndicator';
 
 export type AiSidebarMode = 'chat' | 'math' | 'study' | 'transcribe' | 'visual';
-export type AiContextScope = 'page' | 'lasso' | 'multi';
+export type AiContextScope = 'view' | 'page' | 'lasso' | 'multi';
 
 export interface PendingLassoAiAction {
   id: number;
@@ -70,8 +75,11 @@ interface AiSidebarProps {
   activePage: Page | null;
   activePageIndex: number;
   pages: Page[];
+  getVisibleRect?: () => SnapshotCropRect | null;
   pendingLassoAction: PendingLassoAiAction | null;
   onConsumePendingLassoAction: () => void;
+  onTidyHandwritingAi?: () => void;
+  tidyingHandwriting?: boolean;
   onInsertTextbox: (text: string, nearRect?: SnapshotCropRect) => void;
   onInsertImageDataUrl: (dataUrl: string) => Promise<void>;
   onOpenSettings: () => void;
@@ -91,7 +99,7 @@ const MODE_TABS: Array<{
 ];
 
 const CHAT_STARTERS = [
-  'Summarize this page clearly',
+  'Summarize these notes clearly',
   'Explain the key concepts',
   'List action items & takeaways',
 ];
@@ -101,8 +109,11 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
   activePage,
   activePageIndex,
   pages,
+  getVisibleRect,
   pendingLassoAction,
   onConsumePendingLassoAction,
+  onTidyHandwritingAi,
+  tidyingHandwriting = false,
   onInsertTextbox,
   onInsertImageDataUrl,
   onOpenSettings,
@@ -111,14 +122,49 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
   const activeNotebook = useAppStore((s) => s.activeNotebook);
   const unlockedMasterKey = useAppStore((s) => s.unlockedMasterKey);
   const lassoSelection = useAppStore((s) => s.lassoSelection);
+  const activeAiProvider = useAppStore((s) => s.activeAiProvider);
+  const aiProviderKeys = useAppStore((s) => s.aiProviderKeys);
+  const aiProviderModels = useAppStore((s) => s.aiProviderModels);
+  const aiCustomBaseUrl = useAppStore((s) => s.aiCustomBaseUrl);
   const geminiApiKey = useAppStore((s) => s.geminiApiKey);
   const geminiModelPreset = useAppStore((s) => s.geminiModelPreset);
   const geminiCustomModelId = useAppStore((s) => s.geminiCustomModelId);
   const blockAiOnVaultLocked = useAppStore((s) => s.blockAiOnVaultLocked);
+  const handwritingCorrectionEnabled = useAppStore((s) => s.handwritingCorrectionEnabled);
+  const setHandwritingCorrectionEnabled = useAppStore(
+    (s) => s.setHandwritingCorrectionEnabled,
+  );
 
-  const activeModel = useMemo(
-    () => resolveActiveGeminiModel({ geminiModelPreset, geminiCustomModelId }),
-    [geminiModelPreset, geminiCustomModelId],
+  const activeAi = useMemo(
+    () =>
+      resolveActiveAiConfig({
+        activeAiProvider,
+        aiProviderKeys,
+        aiProviderModels,
+        aiCustomBaseUrl,
+        geminiApiKey,
+        geminiModelPreset,
+        geminiCustomModelId,
+      }),
+    [
+      activeAiProvider,
+      aiProviderKeys,
+      aiProviderModels,
+      aiCustomBaseUrl,
+      geminiApiKey,
+      geminiModelPreset,
+      geminiCustomModelId,
+    ],
+  );
+  const activeMeta = AI_PROVIDER_META[activeAi.provider];
+  const aiClientConfig = useMemo(
+    () => ({
+      provider: activeAi.provider,
+      apiKey: activeAi.apiKey,
+      model: activeAi.model,
+      baseUrl: activeAi.baseUrl,
+    }),
+    [activeAi.provider, activeAi.apiKey, activeAi.model, activeAi.baseUrl],
   );
 
   const isVaultBlocked = Boolean(activeNotebook?.isLocked && blockAiOnVaultLocked);
@@ -138,7 +184,7 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
   );
 
   const [mode, setMode] = useState<AiSidebarMode>('chat');
-  const [scope, setScope] = useState<AiContextScope>('page');
+  const [scope, setScope] = useState<AiContextScope>('view');
   const [lassoPreview, setLassoPreview] = useState<SnapshotImagePart | null>(null);
   const [busy, setBusy] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -182,6 +228,8 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
 
   const lastHandledLassoActionIdRef = useRef<number | null>(null);
   const copyTimerRef = useRef<number | null>(null);
+  const scopeTrackRef = useRef<HTMLDivElement | null>(null);
+  const modeTrackRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     return () => {
@@ -211,7 +259,7 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
   useEffect(() => {
     setLassoPreview(null);
     if (scope === 'lasso' && !hasLiveLasso) {
-      setScope('page');
+      setScope('view');
     }
   }, [activePage?.id]);
 
@@ -236,6 +284,7 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
     ): Promise<SnapshotImagePart[]> => {
       if (!activePage) return [];
       const pageNum = activePageIndex + 1;
+      const isWhiteboard = activeNotebook?.mode === 'whiteboard';
 
       if (requestedScope === 'lasso') {
         const strokeIds = explicitStrokeIds ?? lassoSelection?.strokeIds ?? [];
@@ -243,6 +292,7 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
           const part = await captureLassoCropSnapshot(activePage, pageNum, strokeIds, {
             scale: 1.5,
             padding: 16,
+            isWhiteboard,
             resolvePdfBytes,
           });
           setLassoPreview(part);
@@ -257,17 +307,42 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
         return captureMultiPageSnapshots(pages, activePageIndex, {
           maxPages: 5,
           scale: 1.25,
+          isWhiteboard,
           resolvePdfBytes,
         });
       }
 
+      if (requestedScope === 'view') {
+        const viewportPart = await captureViewportSnapshot(
+          activePage,
+          pageNum,
+          getVisibleRect?.() ?? null,
+          {
+            scale: 1.5,
+            isWhiteboard,
+            resolvePdfBytes,
+          },
+        );
+        return [viewportPart];
+      }
+
       const full = await capturePageSnapshot(activePage, pageNum, {
         scale: 1.5,
+        isWhiteboard,
         resolvePdfBytes,
       });
       return [full];
     },
-    [activePage, activePageIndex, lassoPreview, lassoSelection, pages, resolvePdfBytes],
+    [
+      activeNotebook?.mode,
+      activePage,
+      activePageIndex,
+      getVisibleRect,
+      lassoPreview,
+      lassoSelection,
+      pages,
+      resolvePdfBytes,
+    ],
   );
 
   const handleAskSubmit = useCallback(
@@ -293,9 +368,8 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
         const usedScope = scopeOverride ?? scope;
         const snapshots = await captureSnapshotsForScope(usedScope, strokeIdsOverride);
         const history = messages.map((m) => ({ role: m.role, text: m.text }));
-        const { text } = await askNotesWithGemini({
-          apiKey: geminiApiKey,
-          model: activeModel,
+        const { text } = await askNotesWithAi({
+          config: aiClientConfig,
           prompt,
           history,
           snapshots,
@@ -311,17 +385,17 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
           },
         ]);
       } catch (err) {
-        setErrorMsg(classifyGeminiError(err).message);
+        setErrorMsg(classifyAiError(err, activeAi.label).message);
       } finally {
         setBusy(false);
       }
     },
     [
-      activeModel,
+      activeAi.label,
       activePage,
+      aiClientConfig,
       captureSnapshotsForScope,
       chatInput,
-      geminiApiKey,
       messages,
       privacyGuard,
       scope,
@@ -345,9 +419,8 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
           scopeOverride ?? scope,
           strokeIdsOverride,
         );
-        const result = await runMathTutor({
-          apiKey: geminiApiKey,
-          model: activeModel,
+        const result = await runMathTutorWithAi({
+          config: aiClientConfig,
           mode: targetMode,
           userNote: mathNote,
           snapshots,
@@ -357,16 +430,16 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
         setRevealedHints(1);
         setMathCropRect(snapshots[0]?.cropRect);
       } catch (err) {
-        setErrorMsg(classifyGeminiError(err).message);
+        setErrorMsg(classifyAiError(err, activeAi.label).message);
       } finally {
         setBusy(false);
       }
     },
     [
-      activeModel,
+      activeAi.label,
       activePage,
+      aiClientConfig,
       captureSnapshotsForScope,
-      geminiApiKey,
       mathMode,
       mathNote,
       privacyGuard,
@@ -380,9 +453,8 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
     setBusy(true);
     try {
       const snapshots = await captureSnapshotsForScope(scope);
-      const res = await generateStudySet({
-        apiKey: geminiApiKey,
-        model: activeModel,
+      const res = await generateStudySetWithAi({
+        config: aiClientConfig,
         kind: studyKind,
         count: studyCount,
         snapshots,
@@ -399,15 +471,15 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
         setReviewIds(new Set());
       }
     } catch (err) {
-      setErrorMsg(classifyGeminiError(err).message);
+      setErrorMsg(classifyAiError(err, activeAi.label).message);
     } finally {
       setBusy(false);
     }
   }, [
-    activeModel,
+    activeAi.label,
     activePage,
+    aiClientConfig,
     captureSnapshotsForScope,
-    geminiApiKey,
     privacyGuard,
     scope,
     studyCount,
@@ -424,21 +496,20 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
           scopeOverride ?? scope,
           strokeIdsOverride,
         );
-        const { text } = await transcribeHandwriting({
-          apiKey: geminiApiKey,
-          model: activeModel,
+        const { text } = await transcribeHandwritingWithAi({
+          config: aiClientConfig,
           snapshots,
           guard: privacyGuard,
         });
         setTranscribedText(text);
         setTranscribeCropRect(snapshots[0]?.cropRect);
       } catch (err) {
-        setErrorMsg(classifyGeminiError(err).message);
+        setErrorMsg(classifyAiError(err, activeAi.label).message);
       } finally {
         setBusy(false);
       }
     },
-    [activeModel, activePage, captureSnapshotsForScope, geminiApiKey, privacyGuard, scope],
+    [activeAi.label, activePage, aiClientConfig, captureSnapshotsForScope, privacyGuard, scope],
   );
 
   const handleGenerateVisual = useCallback(async () => {
@@ -450,22 +521,23 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
       const snapshots = visualUsePageRef
         ? await captureSnapshotsForScope(scope)
         : undefined;
-      const res = await generateStudyVisual({
-        apiKey: geminiApiKey,
+      const res = await generateStudyVisualWithAi({
+        config: aiClientConfig,
         prompt,
         snapshots,
         guard: privacyGuard,
       });
       setGeneratedVisual(res);
     } catch (err) {
-      setErrorMsg(classifyGeminiError(err).message);
+      setErrorMsg(classifyAiError(err, activeAi.label).message);
     } finally {
       setBusy(false);
     }
   }, [
+    activeAi.label,
     activePage,
+    aiClientConfig,
     captureSnapshotsForScope,
-    geminiApiKey,
     privacyGuard,
     scope,
     visualPrompt,
@@ -491,7 +563,7 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
 
     setScope('lasso');
 
-    if (isVaultBlocked || !geminiApiKey.trim()) {
+    if (isVaultBlocked || !activeAi.configured) {
       return;
     }
     if (!activePage || activePage.id !== pageId) return;
@@ -504,8 +576,8 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
       void handleTranscribe('lasso', strokeIds);
     }
   }, [
+    activeAi.configured,
     activePage,
-    geminiApiKey,
     handleAskSubmit,
     handleRunMathTutor,
     handleTranscribe,
@@ -515,10 +587,129 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
     pendingLassoAction,
   ]);
 
+  const hasUnlockedSelectedPenStrokes = useMemo(() => {
+    if (!activePage || !lassoSelection || lassoSelection.pageId !== activePage.id) {
+      return false;
+    }
+    const idSet = new Set(lassoSelection.strokeIds);
+    return activePage.strokes.some((s) => idSet.has(s.id) && s.tool === 'pen' && !s.locked);
+  }, [activePage, lassoSelection]);
+
+  const showAiWorkspace = open && !isVaultBlocked && activeAi.configured;
+  const scopeIndicator = useMorphingIndicator(
+    scopeTrackRef,
+    showAiWorkspace ? scope : null,
+    [open, showAiWorkspace, activePageIndex, activeNotebook?.mode],
+  );
+  const modeIndicator = useMorphingIndicator(
+    modeTrackRef,
+    showAiWorkspace ? mode : null,
+    [open, showAiWorkspace],
+  );
+
   if (!open) return null;
 
   const canUseLasso = hasLiveLasso || Boolean(lassoPreview);
   const canUseMulti = pages.length > 1;
+
+  const handleToggleHandwritingCorrection = () => {
+    setHandwritingCorrectionEnabled(!handwritingCorrectionEnabled);
+  };
+
+  const renderHandwritingCorrectionCard = () => {
+    const statusLabel = isVaultBlocked
+      ? 'Vault Locked · Blocked'
+      : activeAi.configured
+        ? `${activeAi.shortLabel} · Ready`
+        : 'No AI Key';
+
+    const statusBadgeClass = isVaultBlocked
+      ? 'folio-badge-warning'
+      : activeAi.configured
+        ? 'folio-badge-success'
+        : 'folio-badge-warning';
+
+    return (
+      <div
+        data-testid="ai-handwriting-correction-card"
+        className="space-y-2.5 rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-canvas)] p-3 text-xs"
+      >
+        <div className="flex items-start justify-between gap-2">
+          <div className="min-w-0">
+            <div className="flex items-center gap-1.5 font-bold text-[#072D59]">
+              <Sparkles className="h-3.5 w-3.5 shrink-0 text-[#FD6E88]" />
+              <span className="truncate">Auto AI Handwriting Correction</span>
+            </div>
+            <span
+              data-testid="ai-handwriting-status-badge"
+              className={`mt-1 inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-bold ${statusBadgeClass}`}
+            >
+              {statusLabel}
+            </span>
+          </div>
+
+          <button
+            type="button"
+            role="switch"
+            data-testid="ai-sidebar-handwriting-toggle"
+            aria-checked={handwritingCorrectionEnabled}
+            aria-label="Toggle Auto AI Handwriting Correction"
+            onClick={handleToggleHandwritingCorrection}
+            className={`inline-flex h-5 w-10 shrink-0 items-center rounded-full p-0.5 transition-colors duration-150 ${
+              handwritingCorrectionEnabled
+                ? 'folio-glass-toggle-on'
+                : 'bg-[var(--navy-900)]/14 ring-1 ring-inset ring-[var(--border-subtle)]'
+            }`}
+          >
+            <span
+              className={`pointer-events-none block h-4 w-4 rounded-full bg-white shadow ring-1 ring-[var(--navy-900)]/12 transition-transform duration-150 ${
+                handwritingCorrectionEnabled ? 'translate-x-5' : 'translate-x-0'
+              }`}
+            />
+          </button>
+        </div>
+
+        <p className="text-[11px] leading-relaxed text-[#072D59]/70">
+          Cleans completed words live as you write into neat ink strokes (keeps them as drawings; Ctrl+Z reverts).
+        </p>
+
+        <button
+          type="button"
+          data-testid="ai-sidebar-tidy-handwriting-btn"
+          disabled={
+            tidyingHandwriting ||
+            isVaultBlocked ||
+            !hasUnlockedSelectedPenStrokes ||
+            !onTidyHandwritingAi
+          }
+          onClick={onTidyHandwritingAi}
+          title={
+            isVaultBlocked
+              ? 'Blocked while notebook is Vault locked'
+              : hasUnlockedSelectedPenStrokes
+                ? 'Clean selected handwritten pen strokes into neat ink strokes (Ctrl+Z reverts)'
+                : 'Select handwritten pen strokes with Lasso (L) or Select (V) first'
+          }
+          className="folio-btn-navy flex w-full items-center justify-center gap-1.5 rounded-xl px-3 py-1.5 text-[11px] font-semibold disabled:cursor-not-allowed disabled:opacity-45"
+        >
+          {tidyingHandwriting ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin text-[#FD6E88]" />
+          ) : (
+            <Sparkles className="h-3.5 w-3.5 text-[#FD6E88]" />
+          )}
+          <span>
+            {tidyingHandwriting ? 'Tidying Selection…' : 'Tidy Selected Handwriting (AI)'}
+          </span>
+        </button>
+
+        {!hasUnlockedSelectedPenStrokes && !isVaultBlocked && (
+          <div className="text-[10px] font-medium text-[#072D59]/55">
+            Circle or select unlocked handwritten pen strokes first for on demand tidying.
+          </div>
+        )}
+      </div>
+    );
+  };
 
   // Derived Flashcards view values
   const flashcards = studyResult?.kind === 'flashcards' ? studyResult.cards : [];
@@ -535,19 +726,28 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
   return (
     <aside
       data-testid="ai-sidebar"
-      aria-label="Gemini AI Study Suite"
-      className="z-20 flex h-full w-80 shrink-0 flex-col border-l border-[#072D59]/12 bg-white text-[#072D59] shadow-xl sm:w-[340px]"
+      aria-label="AI Study Suite"
+      className="z-20 flex h-full w-80 shrink-0 flex-col border-l border-[var(--border-subtle)] bg-[var(--surface-elevated)] text-[var(--navy-900)] shadow-[var(--shadow-floating)] sm:w-[340px]"
     >
       {/* Header */}
-      <div className="flex items-center justify-between border-b border-[#072D59]/10 bg-[linear-gradient(135deg,#DBF2FC_0%,#F6FAFE_65%,#FCE7EE_100%)] px-3.5 py-2.5">
+      <div className="flex items-center justify-between border-b border-[var(--border-subtle)] bg-[linear-gradient(135deg,#DBF2FC_0%,#F6FAFE_65%,#FCE7EE_100%)] px-3.5 py-2.5">
         <div className="flex min-w-0 items-center gap-2">
-          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-[#072D59] text-[#DBF2FC] shadow-xs">
-            <Sparkles className="h-4 w-4 text-[#FD6E88]" />
+          <div className="folio-glass-badge flex h-8 w-8 shrink-0 items-center justify-center rounded-xl">
+            <Sparkles className="h-4 w-4 text-[var(--crimson-500)]" />
           </div>
           <div className="min-w-0">
-            <h2 className="truncate text-sm font-bold text-[#072D59]">Gemini Study Suite</h2>
-            <div className="truncate font-mono text-[10px] font-semibold text-[#072D59]/65">
-              {mode === 'visual' ? IMAGE_GEMINI_MODEL : activeModel}
+            <h2 className="truncate text-sm font-bold text-[var(--navy-900)]">AI Study Suite</h2>
+            <div
+              data-testid="ai-active-provider-pill"
+              className="mt-0.5 inline-flex max-w-full items-center gap-1 truncate rounded-full bg-[var(--surface-elevated)]/90 px-2 py-0.5 font-mono text-[10px] font-semibold text-[var(--navy-900)] ring-1 ring-[var(--border-subtle)]"
+            >
+              <span className="font-sans font-bold text-[var(--navy-900)]">{activeAi.shortLabel}</span>
+              <span>·</span>
+              <span className="truncate">
+                {mode === 'visual' && activeAi.provider === 'gemini'
+                  ? IMAGE_GEMINI_MODEL
+                  : activeAi.model}
+              </span>
             </div>
           </div>
         </div>
@@ -555,18 +755,18 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
         <div className="flex items-center gap-1">
           <button
             type="button"
-            title="Gemini API Settings"
-            aria-label="Open Gemini Settings"
+            title="AI Provider Settings"
+            aria-label="Open AI Provider Settings"
             onClick={onOpenSettings}
-            className="rounded-lg p-1.5 text-[#072D59]/65 transition duration-150 hover:bg-white/80 hover:text-[#072D59]"
+            className="folio-press rounded-lg p-1.5 text-[var(--navy-600)] hover:bg-[var(--surface-elevated)] hover:text-[var(--navy-900)]"
           >
             <Settings className="h-3.5 w-3.5" />
           </button>
           <button
             type="button"
-            aria-label="Close Gemini AI Sidebar"
+            aria-label="Close AI Study Suite Sidebar"
             onClick={onClose}
-            className="rounded-lg p-1.5 text-[#072D59]/65 transition duration-150 hover:bg-white/80 hover:text-[#072D59]"
+            className="folio-press rounded-lg p-1.5 text-[var(--navy-600)] hover:bg-[var(--surface-elevated)] hover:text-[var(--navy-900)]"
           >
             <X className="h-4 w-4" />
           </button>
@@ -575,19 +775,21 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
 
       {/* Guardrails & Onboarding Gates */}
       {isVaultBlocked ? (
-        <div className="flex-1 overflow-y-auto p-4">
+        <div className="flex-1 space-y-3 overflow-y-auto p-4">
           <div
             data-testid="ai-vault-blocked-notice"
-            className="space-y-3 rounded-2xl border border-amber-300/80 bg-amber-50 p-4 text-xs text-amber-950"
+            className="folio-badge-warning space-y-3 rounded-2xl p-4 text-xs"
           >
             <div className="flex items-center gap-2">
-              <ShieldAlert className="h-5 w-5 shrink-0 text-amber-700" />
-              <h3 className="text-sm font-bold">Vault Privacy Protection Active</h3>
+              <ShieldAlert className="h-5 w-5 shrink-0 text-[var(--state-warning)]" />
+              <h3 className="text-sm font-bold text-[var(--navy-900)]">
+                Vault Privacy Protection Active
+              </h3>
             </div>
-            <p className="leading-relaxed text-amber-900/90">
-              This notebook is <strong>Vault-locked</strong>, and &ldquo;Block AI on Vault-Locked
-              Notebooks&rdquo; is enabled. Outbound Gemini API calls and canvas snapshots are blocked
-              to keep encrypted notes 100% local.
+            <p className="leading-relaxed text-[var(--state-warning-text)]">
+              This notebook is <strong>Vault locked</strong>, and &ldquo;Block AI on Vault Locked
+              Notebooks&rdquo; is enabled. Outbound AI requests and canvas snapshots are blocked
+              across all providers to keep encrypted notes 100% local.
             </p>
             <button
               type="button"
@@ -599,24 +801,26 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
               Open Privacy Settings
             </button>
           </div>
+          {renderHandwritingCorrectionCard()}
         </div>
-      ) : !geminiApiKey.trim() ? (
-        <div className="flex-1 overflow-y-auto p-4">
+      ) : !activeAi.configured ? (
+        <div className="flex-1 space-y-3.5 overflow-y-auto p-4">
           <div
             data-testid="ai-onboarding-card"
-            className="space-y-3.5 rounded-2xl border border-[#072D59]/12 bg-[#DBF2FC]/35 p-4 text-xs"
+            className="space-y-3.5 rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-tint)]/65 p-4 text-xs"
           >
-            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#072D59] text-white shadow-xs">
-              <KeyRound className="h-5 w-5 text-[#FD6E88]" />
+            <div className="folio-glass-badge flex h-10 w-10 items-center justify-center rounded-xl">
+              <KeyRound className="h-5 w-5 text-[var(--crimson-500)]" />
             </div>
             <div>
-              <h3 className="text-sm font-bold text-[#072D59]">
-                Connect Your Gemini API Key (BYOK)
+              <h3 className="text-sm font-bold text-[var(--navy-900)]">
+                Connect an AI Provider (BYOK)
               </h3>
-              <p className="mt-1 leading-relaxed text-[#072D59]/75">
-                Folio Notes connects directly from your device using Google&apos;s{' '}
-                <code>@google/genai</code> SDK. Your key stays in your local{' '}
-                <code>localStorage</code> with no intermediary servers.
+              <p className="mt-1 leading-relaxed text-[var(--navy-600)]">
+                Bring your own key for <strong>Google Gemini</strong>, <strong>xAI (Grok)</strong>,{' '}
+                <strong>OpenAI</strong>, <strong>Anthropic (Claude)</strong>, or{' '}
+                <strong>OpenRouter / Local Models</strong>. Keys stay only in your{' '}
+                <code>localStorage</code>.
               </p>
             </div>
             <div className="space-y-2">
@@ -624,84 +828,122 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                 type="button"
                 data-testid="ai-open-settings-btn"
                 onClick={onOpenSettings}
-                className="folio-btn-crimson flex w-full items-center justify-center gap-1.5 rounded-xl px-3.5 py-2.5 text-xs font-semibold shadow-xs"
+                className="folio-btn-crimson flex w-full items-center justify-center gap-1.5 rounded-xl px-3.5 py-2.5 text-xs font-semibold"
               >
                 <KeyRound className="h-3.5 w-3.5" />
-                <span>Open Settings → Gemini API Key</span>
+                <span>Open Settings → AI &amp; Providers</span>
               </button>
               <a
-                href={GEMINI_API_STUDIO_URL}
+                href={activeMeta.keyConsoleUrl}
                 target="_blank"
                 rel="noopener noreferrer"
                 data-testid="ai-get-key-link"
                 className="folio-btn-secondary flex w-full items-center justify-center gap-1.5 rounded-xl px-3.5 py-2 text-xs font-semibold"
               >
-                <span>Open Google AI Studio</span>
+                <span>Open {activeMeta.keyConsoleLabel}</span>
                 <ExternalLink className="h-3.5 w-3.5" />
               </a>
             </div>
           </div>
+          {renderHandwritingCorrectionCard()}
         </div>
       ) : (
         <>
           {/* Context Scope Bar */}
-          <div className="border-b border-[#072D59]/10 bg-[#F4F8FB] px-3 py-2">
+          <div className="border-b border-[var(--border-subtle)] bg-[var(--surface-canvas)] px-3 py-2">
             <div
+              ref={scopeTrackRef}
               data-testid="ai-context-scope"
-              className="grid grid-cols-3 gap-1 rounded-xl border border-[#072D59]/10 bg-white p-0.5"
+              className="folio-segmented-track relative grid grid-cols-4 gap-1 rounded-xl p-0.5"
             >
+              <MorphingPill indicator={scopeIndicator} className="rounded-lg" />
               <button
                 type="button"
-                data-testid="ai-scope-page"
-                aria-pressed={scope === 'page'}
-                onClick={() => setScope('page')}
-                className={`inline-flex items-center justify-center gap-1 rounded-lg px-2 py-1 text-[11px] font-semibold transition duration-150 ${
-                  scope === 'page'
-                    ? 'bg-[#072D59] text-white'
-                    : 'text-[#072D59]/75 hover:bg-[#DBF2FC]/55'
+                data-morph-key="view"
+                data-testid="ai-scope-view"
+                title="See only what's currently visible on screen"
+                aria-pressed={scope === 'view'}
+                onClick={() => setScope('view')}
+                className={`folio-press relative z-10 inline-flex items-center justify-center gap-1 rounded-lg px-1.5 py-1 text-[11px] font-semibold ${
+                  scope === 'view'
+                    ? scopeIndicator.ready
+                      ? 'bg-transparent text-white'
+                      : 'folio-glass-active'
+                    : 'text-[var(--navy-600)] hover:text-[var(--navy-900)]'
                 }`}
               >
-                <FileText className="h-3 w-3" />
-                <span>Page {activePageIndex + 1}</span>
+                <Eye className="h-3 w-3 shrink-0" />
+                <span>Screen</span>
               </button>
               <button
                 type="button"
+                data-morph-key="page"
+                data-testid="ai-scope-page"
+                title="See the entire page"
+                aria-pressed={scope === 'page'}
+                onClick={() => setScope('page')}
+                className={`folio-press relative z-10 inline-flex items-center justify-center gap-1 rounded-lg px-1.5 py-1 text-[11px] font-semibold ${
+                  scope === 'page'
+                    ? scopeIndicator.ready
+                      ? 'bg-transparent text-white'
+                      : 'folio-glass-active'
+                    : 'text-[var(--navy-600)] hover:text-[var(--navy-900)]'
+                }`}
+              >
+                <FileText className="h-3 w-3 shrink-0" />
+                <span className="truncate">
+                  {activeNotebook?.mode === 'whiteboard' ? 'All' : `Pg ${activePageIndex + 1}`}
+                </span>
+              </button>
+              <button
+                type="button"
+                data-morph-key="lasso"
                 data-testid="ai-scope-lasso"
                 disabled={!canUseLasso}
                 aria-pressed={scope === 'lasso'}
                 onClick={() => setScope('lasso')}
-                className={`inline-flex items-center justify-center gap-1 rounded-lg px-2 py-1 text-[11px] font-semibold transition duration-150 disabled:cursor-not-allowed disabled:opacity-40 ${
+                className={`folio-press relative z-10 inline-flex items-center justify-center gap-1 rounded-lg px-1.5 py-1 text-[11px] font-semibold disabled:cursor-not-allowed disabled:opacity-40 ${
                   scope === 'lasso'
-                    ? 'bg-[#FD6E88] text-white'
-                    : 'text-[#072D59]/75 hover:bg-[#DBF2FC]/55'
+                    ? scopeIndicator.ready
+                      ? 'bg-transparent text-white'
+                      : 'folio-glass-active'
+                    : 'text-[var(--navy-600)] hover:text-[var(--navy-900)]'
                 }`}
               >
-                <Sparkles className="h-3 w-3" />
+                <Sparkles
+                  className={`h-3 w-3 shrink-0 ${
+                    scope === 'lasso' ? 'text-[var(--crimson-500)]' : 'text-[var(--crimson-500)]'
+                  }`}
+                />
                 <span>Lasso</span>
               </button>
               <button
                 type="button"
+                data-morph-key="multi"
                 data-testid="ai-scope-multi"
+                title="Multi page (up to 5 pages)"
                 disabled={!canUseMulti}
                 aria-pressed={scope === 'multi'}
                 onClick={() => setScope('multi')}
-                className={`inline-flex items-center justify-center gap-1 rounded-lg px-2 py-1 text-[11px] font-semibold transition duration-150 disabled:cursor-not-allowed disabled:opacity-40 ${
+                className={`folio-press relative z-10 inline-flex items-center justify-center gap-1 rounded-lg px-1.5 py-1 text-[11px] font-semibold disabled:cursor-not-allowed disabled:opacity-40 ${
                   scope === 'multi'
-                    ? 'bg-[#072D59] text-white'
-                    : 'text-[#072D59]/75 hover:bg-[#DBF2FC]/55'
+                    ? scopeIndicator.ready
+                      ? 'bg-transparent text-white'
+                      : 'folio-glass-active'
+                    : 'text-[var(--navy-600)] hover:text-[var(--navy-900)]'
                 }`}
               >
-                <Layers className="h-3 w-3" />
-                <span>Multi (≤5)</span>
+                <Layers className="h-3 w-3 shrink-0" />
+                <span>Multi</span>
               </button>
             </div>
 
             {scope === 'lasso' && lassoPreview && (
-              <div className="mt-1.5 flex items-center gap-2 rounded-lg border border-[#FD6E88]/30 bg-white px-2 py-1 text-[10px] font-semibold text-[#072D59]/75">
+              <div className="mt-1.5 flex items-center gap-2 rounded-lg border border-[var(--crimson-border)] bg-[var(--surface-elevated)] px-2 py-1 text-[10px] font-semibold text-[var(--navy-600)]">
                 <img
                   src={lassoPreview.dataUrl}
                   alt="Lasso crop preview"
-                  className="h-7 w-10 rounded border border-[#072D59]/12 object-contain"
+                  className="h-7 w-10 rounded border border-[var(--border-subtle)] object-contain"
                 />
                 <span className="truncate">{lassoPreview.label}</span>
               </div>
@@ -710,25 +952,30 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
 
           {/* 5 Mode Tabs */}
           <div
+            ref={modeTrackRef}
             data-testid="ai-mode-tabs"
-            className="grid grid-cols-5 gap-1 border-b border-[#072D59]/10 bg-white px-2.5 py-2"
+            className="relative grid grid-cols-5 gap-1 border-b border-[var(--border-subtle)] bg-[var(--surface-elevated)] px-2.5 py-2"
           >
+            <MorphingPill indicator={modeIndicator} className="rounded-xl" />
             {MODE_TABS.map((tab) => {
               const active = mode === tab.id;
               return (
                 <button
                   key={tab.id}
                   type="button"
+                  data-morph-key={tab.id}
                   data-testid={`ai-mode-${tab.id}`}
                   aria-pressed={active}
                   onClick={() => {
                     setMode(tab.id);
                     setErrorMsg(null);
                   }}
-                  className={`flex flex-col items-center gap-0.5 rounded-xl py-1.5 text-[10px] font-bold transition duration-150 ${
+                  className={`folio-press relative z-10 flex flex-col items-center gap-0.5 rounded-xl py-1.5 text-[10px] font-bold ${
                     active
-                      ? 'bg-[#072D59] text-white shadow-2xs'
-                      : 'text-[#072D59]/70 hover:bg-[#DBF2FC]/55 hover:text-[#072D59]'
+                      ? modeIndicator.ready
+                        ? 'bg-transparent text-white'
+                        : 'folio-glass-active'
+                      : 'text-[var(--navy-600)] hover:bg-[var(--surface-tint)] hover:text-[var(--navy-900)]'
                   }`}
                 >
                   {tab.icon}
@@ -742,14 +989,14 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
           {errorMsg && (
             <div
               data-testid="ai-error-banner"
-              className="mx-3 mt-2.5 flex items-start justify-between gap-2 rounded-xl border border-[#FD6E88]/40 bg-[#FD6E88]/10 px-3 py-2 text-xs font-medium text-[#F95573]"
+              className="folio-badge-danger mx-3 mt-2.5 flex items-start justify-between gap-2 rounded-xl px-3 py-2 text-xs font-medium"
             >
               <span>{errorMsg}</span>
               <button
                 type="button"
                 aria-label="Dismiss AI error"
                 onClick={() => setErrorMsg(null)}
-                className="rounded p-0.5 hover:bg-white/60"
+                className="folio-press rounded p-0.5 hover:bg-[var(--surface-elevated)]"
               >
                 <X className="h-3 w-3" />
               </button>
@@ -791,11 +1038,15 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                       }
                       className={`rounded-2xl p-3 text-xs leading-relaxed ${
                         msg.role === 'user'
-                          ? 'ml-6 bg-[#072D59] text-white'
+                          ? 'ml-6 folio-glass-badge'
                           : 'mr-2 border border-[#072D59]/10 bg-[#F4F8FB] text-[#072D59]'
                       }`}
                     >
-                      <div className="whitespace-pre-wrap">{msg.text}</div>
+                      {msg.role === 'assistant' ? (
+                        <AiRichText content={msg.text} />
+                      ) : (
+                        <div className="whitespace-pre-wrap">{msg.text}</div>
+                      )}
                       {msg.role === 'assistant' && (
                         <div className="mt-2.5 flex flex-wrap gap-1.5 border-t border-[#072D59]/10 pt-2">
                           <button
@@ -806,7 +1057,7 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                           >
                             {copiedId === msg.id ? (
                               <>
-                                <Check className="h-3 w-3 text-emerald-600" />
+                                <Check className="h-3 w-3 text-[var(--state-success)]" />
                                 Copied
                               </>
                             ) : (
@@ -819,7 +1070,9 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                           <button
                             type="button"
                             data-testid="ai-insert-textbox-btn"
-                            onClick={() => onInsertTextbox(msg.text, msg.cropRect)}
+                            onClick={() =>
+                              onInsertTextbox(formatAiMarkdownForTextbox(msg.text), msg.cropRect)
+                            }
                             className="inline-flex items-center gap-1 rounded-lg bg-[#FD6E88] px-2.5 py-1 text-[10px] font-semibold text-white shadow-2xs hover:bg-[#F95573]"
                           >
                             <TypeIcon className="h-3 w-3" />
@@ -833,7 +1086,7 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                   {busy && (
                     <div className="flex items-center gap-2 rounded-xl border border-[#072D59]/10 bg-[#DBF2FC]/35 px-3 py-2 text-xs font-semibold text-[#072D59]">
                       <Loader2 className="h-3.5 w-3.5 animate-spin text-[#FD6E88]" />
-                      <span>Thinking with {activeModel}…</span>
+                      <span>Thinking with {activeAi.shortLabel} ({activeAi.model})…</span>
                     </div>
                   )}
                 </div>
@@ -885,7 +1138,7 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                     onClick={() => setMathMode('teach')}
                     className={`rounded-lg py-1.5 text-xs font-bold transition duration-150 ${
                       mathMode === 'teach'
-                        ? 'bg-[#072D59] text-white shadow-2xs'
+                        ? 'folio-glass-active'
                         : 'text-[#072D59]/75 hover:bg-white'
                     }`}
                   >
@@ -898,7 +1151,7 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                     onClick={() => setMathMode('solve')}
                     className={`rounded-lg py-1.5 text-xs font-bold transition duration-150 ${
                       mathMode === 'solve'
-                        ? 'bg-[#072D59] text-white shadow-2xs'
+                        ? 'folio-glass-active'
                         : 'text-[#072D59]/75 hover:bg-white'
                     }`}
                   >
@@ -931,15 +1184,17 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                     {busy
                       ? 'Analyzing problem…'
                       : mathMode === 'teach'
-                        ? 'Get Step-by-Step Hints'
+                        ? 'Get Step by Step Hints'
                         : 'Solve Problem Completely'}
                   </span>
                 </button>
 
                 {mathResult && (
                   <div className="space-y-2.5 rounded-2xl border border-[#072D59]/12 bg-[#F4F8FB] p-3">
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-bold text-[#072D59]">{mathResult.topic}</span>
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-xs font-bold text-[#072D59]">
+                        <AiRichText content={mathResult.topic} inline />
+                      </span>
                       <span className="rounded-full bg-[#DBF2FC] px-2 py-0.5 text-[10px] font-bold text-[#072D59]">
                         {mathResult.mode === 'teach' ? 'Teach Me' : 'Solved'}
                       </span>
@@ -959,13 +1214,15 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                           className="rounded-xl border border-[#072D59]/10 bg-white p-2.5 text-xs"
                         >
                           <div className="font-bold text-[#072D59]">
-                            {idx + 1}. {step.title}
+                            {idx + 1}. <AiRichText content={step.title} inline />
                           </div>
-                          <p className="mt-1 leading-relaxed text-[#072D59]/85">{step.hint}</p>
+                          <div className="mt-1 leading-relaxed text-[#072D59]/85">
+                            <AiRichText content={step.hint} />
+                          </div>
                           {step.explanation && (
-                            <p className="mt-1 border-t border-[#072D59]/10 pt-1 text-[11px] text-[#072D59]/65">
-                              {step.explanation}
-                            </p>
+                            <div className="mt-1 border-t border-[#072D59]/10 pt-1 text-[11px] text-[#072D59]/65">
+                              <AiRichText content={step.explanation} />
+                            </div>
                           )}
                         </div>
                       ))}
@@ -996,12 +1253,14 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                     {mathResult.mode === 'solve' && mathResult.finalAnswer && (
                       <div
                         data-testid="math-final-answer"
-                        className="rounded-xl border border-emerald-200 bg-emerald-50 p-2.5 text-xs text-emerald-950"
+                        className="folio-badge-success rounded-xl p-2.5 text-xs"
                       >
-                        <div className="text-[10px] font-bold uppercase tracking-wide text-emerald-700">
+                        <div className="text-[10px] font-bold uppercase tracking-wide text-[var(--state-success)]">
                           Final Answer
                         </div>
-                        <div className="mt-0.5 font-bold">{mathResult.finalAnswer}</div>
+                        <div className="mt-0.5 font-bold text-[var(--navy-900)]">
+                          <AiRichText content={mathResult.finalAnswer} />
+                        </div>
                       </div>
                     )}
 
@@ -1037,7 +1296,7 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                     onClick={() => setStudyKind('quiz')}
                     className={`rounded-lg py-1.5 text-xs font-bold transition duration-150 ${
                       studyKind === 'quiz'
-                        ? 'bg-[#072D59] text-white'
+                        ? 'folio-glass-active'
                         : 'text-[#072D59]/75 hover:bg-white'
                     }`}
                   >
@@ -1050,7 +1309,7 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                     onClick={() => setStudyKind('flashcards')}
                     className={`rounded-lg py-1.5 text-xs font-bold transition duration-150 ${
                       studyKind === 'flashcards'
-                        ? 'bg-[#072D59] text-white'
+                        ? 'folio-glass-active'
                         : 'text-[#072D59]/75 hover:bg-white'
                     }`}
                   >
@@ -1068,7 +1327,7 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                         onClick={() => setStudyCount(cnt)}
                         className={`rounded-md px-2.5 py-1 text-xs font-bold transition duration-150 ${
                           studyCount === cnt
-                            ? 'bg-[#072D59] text-white'
+                            ? 'folio-glass-active'
                             : 'text-[#072D59]/70 hover:bg-[#DBF2FC]/50'
                         }`}
                       >
@@ -1102,10 +1361,12 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                 {studyResult?.kind === 'quiz' && (
                   <div className="space-y-3">
                     <div className="flex items-center justify-between rounded-xl border border-[#072D59]/10 bg-[#DBF2FC]/45 px-3 py-2 text-xs">
-                      <span className="font-bold text-[#072D59]">{studyResult.title}</span>
+                      <span className="font-bold text-[#072D59]">
+                        <AiRichText content={studyResult.title} inline />
+                      </span>
                       <span
                         data-testid="quiz-score-badge"
-                        className="rounded-full bg-[#072D59] px-2 py-0.5 text-[10px] font-bold text-white tabular-nums"
+                        className="folio-glass-badge rounded-full px-2 py-0.5 text-[10px] font-bold tabular-nums"
                       >
                         {correctCount} / {quizQuestions.length} ({answeredCount} answered)
                       </span>
@@ -1121,7 +1382,7 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                           className="space-y-2 rounded-2xl border border-[#072D59]/12 bg-[#F4F8FB] p-3 text-xs"
                         >
                           <div className="font-bold text-[#072D59]">
-                            {qIdx + 1}. {q.question}
+                            {qIdx + 1}. <AiRichText content={q.question} inline />
                           </div>
                           <div className="space-y-1">
                             {q.options.map((opt, optIdx) => {
@@ -1132,12 +1393,13 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                               if (isAnswered) {
                                 if (isCorrect) {
                                   cls =
-                                    'border-emerald-400 bg-emerald-50 font-semibold text-emerald-950';
+                                    'border-[var(--state-success-border)] bg-[var(--state-success-bg)] font-semibold text-[var(--state-success-text)]';
                                 } else if (isPicked) {
                                   cls =
-                                    'border-[#FD6E88] bg-[#FD6E88]/12 font-semibold text-[#F95573]';
+                                    'border-[var(--state-danger-border)] bg-[var(--state-danger-bg)] font-semibold text-[var(--state-danger-text)]';
                                 } else {
-                                  cls = 'border-[#072D59]/10 bg-white/60 text-[#072D59]/55';
+                                  cls =
+                                    'border-[var(--border-subtle)] bg-[var(--surface-elevated)]/60 text-[var(--navy-600)]';
                                 }
                               }
                               return (
@@ -1154,14 +1416,14 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                                   <span className="font-mono text-[10px] font-bold opacity-70">
                                     {String.fromCharCode(65 + optIdx)}.
                                   </span>
-                                  <span>{opt}</span>
+                                  <AiRichText content={opt} inline />
                                 </button>
                               );
                             })}
                           </div>
                           {isAnswered && q.explanation && (
                             <div className="rounded-lg bg-white px-2.5 py-1.5 text-[11px] text-[#072D59]/80">
-                              {q.explanation}
+                              <AiRichText content={q.explanation} />
                             </div>
                           )}
                         </div>
@@ -1205,7 +1467,10 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                         {cardFlipped ? 'Back (Click to Flip)' : 'Front (Click to Flip)'}
                       </span>
                       <div className="text-sm font-bold leading-snug text-[#072D59]">
-                        {cardFlipped ? activeCard.back : activeCard.front}
+                        <AiRichText
+                          content={cardFlipped ? activeCard.back : activeCard.front}
+                          inline
+                        />
                       </div>
                       {activeCard.tag && !cardFlipped && (
                         <span className="mt-2 rounded-full bg-[#072D59]/10 px-2 py-0.5 text-[10px] font-semibold text-[#072D59]/70">
@@ -1263,7 +1528,7 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                           setCardFlipped(false);
                           setDeckPos((p) => (p + 1) % flashcards.length);
                         }}
-                        className="rounded-xl bg-[#072D59] py-1.5 text-[11px] font-bold text-white hover:bg-[#0A3D7A]"
+                        className="folio-btn-navy rounded-xl py-1.5 text-[11px] font-bold"
                       >
                         Got It ✓
                       </button>
@@ -1273,14 +1538,18 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
               </div>
             )}
 
-            {/* Mode 4: Transcribe Handwriting */}
+            {/* Mode 4: Transcribe & Handwriting */}
             {mode === 'transcribe' && (
               <div className="space-y-3">
-                <p className="text-xs text-[#072D59]/75">
-                  Convert handwritten ink from the{' '}
-                  <strong>{scope === 'lasso' ? 'lasso selection' : 'active page'}</strong> into
-                  editable typed text.
-                </p>
+                {renderHandwritingCorrectionCard()}
+
+                <div className="border-t border-[#072D59]/10 pt-2.5">
+                  <p className="text-xs text-[#072D59]/75">
+                    Convert handwritten ink from the{' '}
+                    <strong>{scope === 'lasso' ? 'lasso selection' : 'active page'}</strong> into
+                    editable typed text.
+                  </p>
+                </div>
 
                 <button
                   type="button"
@@ -1315,7 +1584,7 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                     >
                       {copiedId === 'transcribe' ? (
                         <>
-                          <Check className="h-3.5 w-3.5 text-emerald-600" />
+                          <Check className="h-3.5 w-3.5 text-[var(--state-success)]" />
                           Copied
                         </>
                       ) : (
@@ -1339,12 +1608,31 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
               </div>
             )}
 
-            {/* Mode 5: Create Visual (Diagram / Sticker via gemini-nano-banana-2.1) */}
+            {/* Mode 5: Create Visual (Diagram / Sticker) */}
             {mode === 'visual' && (
               <div className="space-y-3">
                 <div className="rounded-xl border border-[#072D59]/10 bg-[#DBF2FC]/35 px-3 py-2 text-[11px] font-medium text-[#072D59]/80">
-                  Uses <code className="font-bold">{IMAGE_GEMINI_MODEL}</code> to create diagrams
-                  and study visuals directly as editable Canva-style photos on your page.
+                  {activeAi.provider === 'gemini' ? (
+                    <>
+                      Uses <code className="font-bold">{IMAGE_GEMINI_MODEL}</code> to create
+                      diagrams and study visuals directly as editable Canva-style photos on your
+                      page.
+                    </>
+                  ) : activeAi.provider === 'openai' || activeAi.provider === 'grok' ? (
+                    <>
+                      Uses{' '}
+                      <code className="font-bold">
+                        {activeAi.provider === 'openai' ? 'gpt-image-1' : 'grok-2-image'}
+                      </code>{' '}
+                      via {activeAi.label} to create study visuals directly on your page.
+                    </>
+                  ) : (
+                    <>
+                      Image generation is supported on <strong>Google Gemini</strong>,{' '}
+                      <strong>OpenAI</strong>, and <strong>xAI (Grok)</strong>. Switch providers in
+                      Settings → AI &amp; Providers to generate visuals.
+                    </>
+                  )}
                 </div>
 
                 <textarea
@@ -1390,7 +1678,9 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                       className="max-h-56 w-full rounded-xl border border-[#072D59]/10 bg-white object-contain"
                     />
                     {generatedVisual.caption && (
-                      <p className="text-[11px] text-[#072D59]/75">{generatedVisual.caption}</p>
+                      <div className="text-[11px] text-[#072D59]/75">
+                        <AiRichText content={generatedVisual.caption} />
+                      </div>
                     )}
                     <button
                       type="button"

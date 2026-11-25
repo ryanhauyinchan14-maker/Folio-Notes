@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import {
   cloneStrokeWithNewId,
+  getCombinedBounds,
   scaleStroke,
   translateStroke,
 } from '../canvas/geometry';
@@ -17,19 +18,26 @@ import {
   generatePdfAwarePageThumbnail,
 } from '../canvas/thumbnail';
 import {
+  clampNotebookZoom,
+  clampWhiteboardZoom,
+  getNotebookMinZoom,
+} from '../canvas/whiteboard';
+import {
   COVER_PRESETS,
-  HIGHLIGHTER_DEFAULT_SWATCHES,
+  DEFAULT_ERASER_SIZE,
   HIGHLIGHTER_THICKNESS_PRESETS,
-  PEN_DEFAULT_SWATCHES,
   PEN_THICKNESS_PRESETS,
+  UNIFIED_INK_SWATCHES,
 } from '../constants/covers';
 import { db } from '../db/database';
-import { repository } from '../db/repository';
+import { NOTEBOOK_UNDO_WINDOW_MS, repository } from '../db/repository';
 import type {
   BoundingBox,
   CoverConfig,
+  CustomFontRecord,
   Folder,
   Notebook,
+  NotebookMode,
   Page,
   PageImage,
   PaperConfig,
@@ -39,6 +47,8 @@ import type {
   Stroke,
   Textbox,
   ToolType,
+  TrashedNotebookRecord,
+  UploadedInterfaceFontMeta,
 } from '../types/notes';
 import {
   type FolioWorkspaceBackup,
@@ -52,22 +62,47 @@ import {
   type PdfImportProgress,
 } from '../utils/pdfEngine';
 import {
+  type AiProviderId,
+  clearAiProviderKey,
   clearGeminiApiKey,
+  type CtrlScrollBehavior,
+  DEFAULT_GEMINI_MODEL,
   DEFAULT_HERO_HEADLINE,
   DEFAULT_PEN_SLOTS,
   type DefaultToolPreference,
   type DefaultZoomMode,
   type DeskBackdropPresetId,
   type DockPosition,
+  type EraserMode,
+  FAST_GEMINI_MODEL,
   type GeminiModelPresetId,
+  getAllAiProviderKeys,
   getGeminiApiKey,
   getHandwritingCorrectionEnabled,
   getWorkspacePreferences,
   type PenFavoriteSlot,
+  resolveActiveGeminiModel,
+  saveAiProviderKey,
   saveGeminiApiKey,
   saveHandwritingCorrectionEnabled,
   saveWorkspacePreferences,
 } from '../utils/settings';
+import {
+  DEFAULT_KEYBOARD_SHORTCUTS,
+  type KeyboardShortcutsMap,
+  normalizeShortcutCombo,
+  type ShortcutActionId,
+} from '../utils/shortcuts';
+import { playUiSound, setUiSoundEnabled } from '../utils/uiSound';
+import {
+  DEFAULT_INTERFACE_FONT_ID,
+  deriveFontDisplayNameFromFile,
+  isSupportedFontFile,
+  isValidInterfaceFontId,
+  registerUploadedFontFace,
+  sanitizeCustomFontName,
+} from '../utils/uiFonts';
+import { applyUiScaleToRuntime, clampUiScale } from '../utils/uiZoom';
 import {
   initializeVault,
   resetVaultPasswordWithRecoveryKey,
@@ -126,8 +161,16 @@ export interface LassoSelection {
   strokeIds: string[];
 }
 
+export interface EditorToast {
+  message: string;
+  tone?: 'navy' | 'crimson';
+  actionLabel?: string;
+  actionTab?: 'ai' | 'general' | 'appearance';
+}
+
 const thumbnailTimers = new Map<string, number>();
 let tidyToastTimer: number | null = null;
+let editorToastTimer: number | null = null;
 let activePdfImportAbort: AbortController | null = null;
 
 function schedulePageThumbnailUpdate(
@@ -137,6 +180,7 @@ function schedulePageThumbnailUpdate(
   textboxes: Textbox[] = [],
   images: PageImage[] = [],
   pdfBackground?: PdfPageBackground | null,
+  isWhiteboard = false,
 ): void {
   if (typeof window === 'undefined') return;
   const existing = thumbnailTimers.get(pageId);
@@ -162,12 +206,32 @@ function schedulePageThumbnailUpdate(
               updatedAt: 0,
             },
             240,
+            undefined,
+            isWhiteboard,
           )
-        : generatePageThumbnail(paper, strokes, 240, textboxes, images);
+        : generatePageThumbnail(
+            paper,
+            strokes,
+            240,
+            textboxes,
+            images,
+            undefined,
+            isWhiteboard,
+          );
       if (thumbnailDataUrl) {
         await db.pages.update(pageId, { thumbnailDataUrl });
         useAppStore.setState((s) => ({
           pages: s.pages.map((p) => (p.id === pageId ? { ...p, thumbnailDataUrl } : p)),
+          ...(s.splitPane && s.splitPane.pages.some((p) => p.id === pageId)
+            ? {
+                splitPane: {
+                  ...s.splitPane,
+                  pages: s.splitPane.pages.map((p) =>
+                    p.id === pageId ? { ...p, thumbnailDataUrl } : p,
+                  ),
+                },
+              }
+            : {}),
         }));
       }
     })();
@@ -200,7 +264,62 @@ function persistPageContentChange(
       onSaveState?.('saved');
     });
   if (!notebook.isLocked) {
-    schedulePageThumbnailUpdate(pageId, paper, strokes, textboxes, images);
+    schedulePageThumbnailUpdate(
+      pageId,
+      paper,
+      strokes,
+      textboxes,
+      images,
+      undefined,
+      notebook.mode === 'whiteboard',
+    );
+  }
+}
+
+export interface RecentDeletedNotebookUndo {
+  notebookId: string;
+  title: string;
+  deletedAt: number;
+  expiresAt: number;
+}
+
+export interface SplitPaneSnapshot {
+  notebook: Notebook;
+  pages: Page[];
+  activePageId: string | null;
+  undoStack: HistoryCommand[];
+  redoStack: HistoryCommand[];
+  zoom: number;
+  unlockedMasterKey: CryptoKey | null;
+}
+
+async function persistNotebookLastPageAndThumbnail(
+  notebook: Notebook,
+  pages: Page[],
+  activePageId: string | null,
+  masterKey: CryptoKey | null,
+): Promise<void> {
+  if (activePageId) {
+    await repository.updateNotebook(notebook.id, {
+      lastOpenedPageId: activePageId,
+    });
+  }
+  if (!notebook.isLocked) {
+    const firstPage = pages[0];
+    if (firstPage && typeof document !== 'undefined') {
+      const thumb = firstPage.pdfBackground
+        ? await generatePdfAwarePageThumbnail(firstPage, 240, masterKey)
+        : generatePageThumbnail(
+            firstPage.paper,
+            firstPage.strokes,
+            240,
+            firstPage.textboxes ?? [],
+            firstPage.images ?? [],
+          );
+      if (thumb) {
+        await db.pages.update(firstPage.id, { thumbnailDataUrl: thumb });
+      }
+    }
   }
 }
 
@@ -212,6 +331,8 @@ interface AppState {
   breadcrumbs: Folder[];
   coverThumbnails: Record<string, string | undefined>;
   customTemplates: PaperTemplate[];
+  trashedNotebooks: TrashedNotebookRecord[];
+  recentDeletedNotebooks: RecentDeletedNotebookUndo[];
   lockedNotebookCount: number;
   shelfLoading: boolean;
 
@@ -225,20 +346,28 @@ interface AppState {
   undoStack: HistoryCommand[];
   redoStack: HistoryCommand[];
   saveStatus: 'saved' | 'saving';
+  splitPane: SplitPaneSnapshot | null;
+  activePaneSide: 'left' | 'right';
 
   // Tool & Canvas settings
   activeTool: ToolType;
+  inkColor: string;
+  inkSwatches: string[];
   penColor: string;
   penSize: number;
   penSwatches: string[];
   highlighterColor: string;
   highlighterSize: number;
   highlighterSwatches: string[];
+  eraserMode: EraserMode;
   eraserSize: number;
   holdToSnapEnabled: boolean;
   handwritingCorrectionEnabled: boolean;
   handwritingTidyToast: string | null;
+  editorToast: EditorToast | null;
   zoom: number;
+  uiScale: number;
+  ctrlScrollBehavior: CtrlScrollBehavior;
 
   // Workspace Customizability & Power Options
   penSlots: PenFavoriteSlot[];
@@ -247,15 +376,24 @@ interface AppState {
   deskCustomColor: string;
   darkPaperView: boolean;
   highContrastUi: boolean;
+  uiSoundsEnabled: boolean;
   dockPosition: DockPosition;
   heroHeadline: string;
+  interfaceFontId: string;
+  interfaceCustomFont: string;
+  uploadedFonts: UploadedInterfaceFontMeta[];
   defaultZoomMode: DefaultZoomMode;
   defaultTool: DefaultToolPreference;
   defaultPaperPattern: PaperPattern;
+  activeAiProvider: AiProviderId;
+  aiProviderKeys: Record<AiProviderId, string>;
+  aiProviderModels: Record<AiProviderId, string>;
+  aiCustomBaseUrl: string;
   geminiApiKey: string;
   geminiModelPreset: GeminiModelPresetId;
   geminiCustomModelId: string;
   blockAiOnVaultLocked: boolean;
+  keyboardShortcuts: KeyboardShortcutsMap;
 
   // Lasso state
   lassoSelection: LassoSelection | null;
@@ -283,6 +421,7 @@ interface AppState {
   deleteFolder: (id: string) => Promise<void>;
   createNotebook: (params: {
     title: string;
+    mode?: NotebookMode;
     folderId: string | null;
     cover: CoverConfig;
     paper: PaperConfig;
@@ -297,6 +436,12 @@ interface AppState {
   ) => Promise<void>;
   duplicateNotebook: (id: string) => Promise<void>;
   deleteNotebook: (id: string) => Promise<void>;
+  refreshTrash: () => Promise<void>;
+  restoreTrashedNotebook: (notebookId: string) => Promise<Notebook | null>;
+  undoLastNotebookDelete: () => Promise<Notebook | null>;
+  dismissNotebookDeleteUndo: (notebookId?: string) => void;
+  permanentlyDeleteTrashedNotebook: (notebookId: string) => Promise<void>;
+  emptyTrash: () => Promise<void>;
 
   // Actions — Vault Lock
   setupVaultAndMaybeLockNotebook: (
@@ -316,6 +461,18 @@ interface AppState {
     newPassword: string,
     mode: 'open' | 'remove-lock',
   ) => Promise<void>;
+  deleteLockedNotebookWithPassword: (notebookId: string, password: string) => Promise<void>;
+  deleteLockedNotebookWithRecoveryKey: (
+    notebookId: string,
+    recoveryKey: string,
+    newPassword: string,
+  ) => Promise<void>;
+  deleteFolderWithPassword: (folderId: string, password: string) => Promise<void>;
+  deleteFolderWithRecoveryKey: (
+    folderId: string,
+    recoveryKey: string,
+    newPassword: string,
+  ) => Promise<void>;
   lockNow: () => Promise<void>;
   lockAllNotebooksNow: () => Promise<void>;
 
@@ -323,6 +480,12 @@ interface AppState {
   openNotebook: (notebookId: string, masterKey?: CryptoKey | null) => Promise<void>;
   closeNotebook: () => Promise<void>;
   setActivePageId: (pageId: string) => void;
+  openSplitNotebook: (notebookId: string, masterKey?: CryptoKey | null) => Promise<void>;
+  focusSplitPane: (side: 'left' | 'right') => void;
+  swapSplitPanes: () => void;
+  closeSplitPane: (sideToClose?: 'left' | 'right') => Promise<void>;
+  setSplitPaneActivePageId: (pageId: string) => void;
+  setSplitPaneZoom: (zoom: number) => void;
   addPageFromTemplate: (
     paper: PaperConfig,
     initialStrokes?: Stroke[],
@@ -339,38 +502,66 @@ interface AppState {
   setActiveColor: (color: string) => void;
   replaceToolSwatch: (index: number, color: string) => void;
   setActiveSize: (size: number) => void;
+  setEraserMode: (mode: EraserMode) => void;
   setEraserSize: (size: number) => void;
   setHoldToSnapEnabled: (enabled: boolean) => void;
   setHandwritingCorrectionEnabled: (enabled: boolean) => void;
+  showEditorToast: (toast: EditorToast | null, durationMs?: number) => void;
   setZoom: (zoom: number) => void;
+  setUiScale: (scale: number) => void;
+  setCtrlScrollBehavior: (behavior: CtrlScrollBehavior) => void;
   activatePenSlot: (index: number) => void;
   saveCurrentToolToSlot: (index: number, customName?: string) => void;
   resetPenSlots: () => void;
   setDeskBackdrop: (preset: DeskBackdropPresetId, customColor?: string) => void;
   setDarkPaperView: (enabled: boolean) => void;
   setHighContrastUi: (enabled: boolean) => void;
+  setUiSoundsEnabled: (enabled: boolean) => void;
   setDockPosition: (pos: DockPosition) => void;
   setHeroHeadline: (headline: string) => void;
+  setInterfaceFont: (fontId: string, customFontName?: string) => void;
+  importCustomInterfaceFont: (
+    file: File,
+  ) => Promise<{ ok: boolean; fontId?: string; name?: string; error?: string }>;
+  deleteCustomInterfaceFont: (id: string) => Promise<void>;
   setDefaultZoomMode: (mode: DefaultZoomMode) => void;
   setDefaultTool: (tool: DefaultToolPreference) => void;
   setDefaultPaperPattern: (pattern: PaperPattern) => void;
+  setActiveAiProvider: (provider: AiProviderId) => void;
+  setAiProviderKey: (provider: AiProviderId, apiKey: string) => void;
+  clearAiProviderKey: (provider: AiProviderId) => void;
+  setAiProviderModel: (provider: AiProviderId, model: string) => void;
+  setAiCustomBaseUrl: (url: string) => void;
   setGeminiApiKey: (apiKey: string) => void;
   clearStoredGeminiApiKey: () => void;
   setGeminiModelConfig: (preset: GeminiModelPresetId, customModelId?: string) => void;
   setBlockAiOnVaultLocked: (enabled: boolean) => void;
+  setKeyboardShortcut: (
+    id: ShortcutActionId,
+    rawCombo: string,
+  ) => {
+    ok: boolean;
+    combo?: string;
+    swappedWith?: ShortcutActionId;
+    swappedCombo?: string;
+  };
+  resetKeyboardShortcut: (id: ShortcutActionId) => {
+    swappedWith?: ShortcutActionId;
+    swappedCombo?: string;
+  };
+  resetAllKeyboardShortcuts: () => void;
 
   // Actions — Strokes, Handwriting Correction, Textboxes, Paper, Lasso, Undo/Redo
   commitNewStroke: (pageId: string, stroke: Stroke) => void;
+  discardRecentPenStrokes: (pageId: string, strokeIds: string[]) => void;
   commitEraseStrokes: (pageId: string, strokeIdsToDelete: string[]) => void;
-  commitHandwritingCorrection: (
-    pageId: string,
-    rawStrokeIds: string[],
-    tidiedStrokes: Stroke[],
-  ) => void;
+  commitPrecisionErase: (pageId: string, prevStrokes: Stroke[], nextStrokes: Stroke[]) => void;
   applyPaperToPage: (pageId: string, paper: PaperConfig) => Promise<void>;
   setLassoSelection: (selection: LassoSelection | null) => void;
   setIsDraggingLasso: (dragging: boolean) => void;
   commitLassoMove: (pageId: string, strokeIds: string[], dx: number, dy: number) => void;
+  updateLassoRecolorLive: (pageId: string, strokeIds: string[], color: string) => void;
+  commitStrokeHistorySnapshot: (pageId: string, prevStrokes: Stroke[]) => void;
   commitLassoRecolor: (pageId: string, strokeIds: string[], color: string) => void;
   commitLassoDelete: (pageId: string, strokeIds: string[]) => void;
   commitLassoDuplicate: (pageId: string, strokeIds: string[]) => void;
@@ -387,6 +578,8 @@ interface AppState {
   beginEditTextbox: (pageId: string, textboxId: string) => void;
   selectTextbox: (textboxId: string | null) => void;
   updateTextboxLive: (pageId: string, textboxId: string, patch: Partial<Textbox>) => void;
+  updateTextboxesLive: (pageId: string, textboxIds: string[], patch: Partial<Textbox>) => void;
+  commitTextboxHistorySnapshot: (pageId: string, prevTextboxes: Textbox[]) => void;
   commitTextboxSession: (pageId: string, textboxId: string, keepSelected?: boolean) => void;
   commitTextboxMutation: (
     pageId: string,
@@ -489,6 +682,23 @@ interface AppState {
     originBounds: BoundingBox,
     targetBounds: BoundingBox,
   ) => void;
+  deleteElementsOffPage: (pageId: string, sel: PageElementSelection) => void;
+  revertAltCloneSnapshot: (
+    pageId: string,
+    prev: { strokes?: Stroke[]; textboxes?: Textbox[]; images?: PageImage[] },
+  ) => void;
+  commitAiHandwritingReplacement: (
+    pageId: string,
+    rawStrokeIds: string[],
+    replacementStrokes: Stroke[],
+    opts?: {
+      selectResult?: boolean;
+      requireAllPresent?: boolean;
+      toastMessage?: string | null;
+      alignWithAdjacentLine?: boolean;
+      sourceBounds?: BoundingBox;
+    },
+  ) => Stroke[] | null;
 
   undo: () => void;
   redo: () => void;
@@ -514,6 +724,34 @@ interface AppState {
 
 const MAX_HISTORY = 60;
 const initialPrefs = getWorkspacePreferences();
+setUiSoundEnabled(initialPrefs.uiSoundsEnabled);
+
+function applyShortcutBinding(
+  current: KeyboardShortcutsMap,
+  id: ShortcutActionId,
+  normalized: string,
+): {
+  next: KeyboardShortcutsMap;
+  swappedWith?: ShortcutActionId;
+  swappedCombo?: string;
+} {
+  const prevCombo = current[id];
+  const next: KeyboardShortcutsMap = { ...current };
+  if (normalized === prevCombo) {
+    return { next };
+  }
+  const conflictId = (Object.keys(next) as ShortcutActionId[]).find(
+    (k) => k !== id && next[k] === normalized,
+  );
+  if (conflictId) {
+    next[conflictId] = prevCombo;
+  }
+  next[id] = normalized;
+  return {
+    next,
+    ...(conflictId ? { swappedWith: conflictId, swappedCombo: prevCombo } : {}),
+  };
+}
 
 function persistWorkspacePrefsSnapshot(state: AppState): void {
   saveWorkspacePreferences({
@@ -522,14 +760,24 @@ function persistWorkspacePrefsSnapshot(state: AppState): void {
     deskCustomColor: state.deskCustomColor,
     darkPaperView: state.darkPaperView,
     highContrastUi: state.highContrastUi,
+    uiSoundsEnabled: state.uiSoundsEnabled,
     dockPosition: state.dockPosition,
     heroHeadline: state.heroHeadline,
+    interfaceFontId: state.interfaceFontId,
+    interfaceCustomFont: state.interfaceCustomFont,
     defaultZoomMode: state.defaultZoomMode,
     defaultTool: state.defaultTool,
     defaultPaperPattern: state.defaultPaperPattern,
+    uiScale: state.uiScale,
+    ctrlScrollBehavior: state.ctrlScrollBehavior,
+    eraserMode: state.eraserMode,
+    activeAiProvider: state.activeAiProvider,
+    aiProviderModels: state.aiProviderModels,
+    aiCustomBaseUrl: state.aiCustomBaseUrl,
     geminiModelPreset: state.geminiModelPreset,
     geminiCustomModelId: state.geminiCustomModelId,
     blockAiOnVaultLocked: state.blockAiOnVaultLocked,
+    keyboardShortcuts: state.keyboardShortcuts,
   });
 }
 
@@ -595,6 +843,114 @@ function applyPageContentMutation(
   );
 }
 
+let recentDeleteExpiryTimer: ReturnType<typeof setTimeout> | null = null;
+
+function clearRecentDeleteExpiryTimer(): void {
+  if (recentDeleteExpiryTimer !== null) {
+    clearTimeout(recentDeleteExpiryTimer);
+    recentDeleteExpiryTimer = null;
+  }
+}
+
+function scheduleRecentDeleteCleanup(
+  get: () => AppState,
+  set: (partial: Partial<AppState>) => void,
+): void {
+  clearRecentDeleteExpiryTimer();
+  const now = Date.now();
+  const active = get().recentDeletedNotebooks.filter((entry) => entry.expiresAt > now);
+  if (active.length !== get().recentDeletedNotebooks.length) {
+    set({ recentDeletedNotebooks: active });
+  }
+  if (active.length === 0) return;
+
+  const earliestExpiry = Math.min(...active.map((entry) => entry.expiresAt));
+  const delayMs = Math.max(0, earliestExpiry - now + 15);
+  recentDeleteExpiryTimer = setTimeout(() => {
+    recentDeleteExpiryTimer = null;
+    const cutoff = Date.now();
+    const remaining = get().recentDeletedNotebooks.filter((entry) => entry.expiresAt > cutoff);
+    if (remaining.length !== get().recentDeletedNotebooks.length) {
+      set({ recentDeletedNotebooks: remaining });
+    }
+    if (remaining.length > 0) {
+      scheduleRecentDeleteCleanup(get, set);
+    }
+  }, delayMs);
+}
+
+function recordDeletedNotebooksForUndo(
+  records: TrashedNotebookRecord[],
+  get: () => AppState,
+  set: (partial: Partial<AppState>) => void,
+): void {
+  if (records.length === 0) return;
+  const now = Date.now();
+  const existing = get().recentDeletedNotebooks.filter((entry) => entry.expiresAt > now);
+  const additions: RecentDeletedNotebookUndo[] = records.map((r) => ({
+    notebookId: r.id,
+    title: r.notebook.title,
+    deletedAt: r.deletedAt,
+    expiresAt: r.deletedAt + NOTEBOOK_UNDO_WINDOW_MS,
+  }));
+  set({ recentDeletedNotebooks: [...existing, ...additions] });
+  scheduleRecentDeleteCleanup(get, set);
+}
+
+const CLEARED_EDITOR_RUNTIME_STATE = {
+  activeNotebook: null,
+  pages: [] as Page[],
+  activePageId: null,
+  undoStack: [] as HistoryCommand[],
+  redoStack: [] as HistoryCommand[],
+  lassoSelection: null,
+  isDraggingLasso: false,
+  activeTextboxId: null,
+  selectedTextboxId: null,
+  selectedTextboxIds: [] as string[],
+  textboxSessionBaseline: null,
+  selectedImageIds: [] as string[],
+  croppingImageId: null,
+  unlockedMasterKey: null,
+  splitPane: null as SplitPaneSnapshot | null,
+  activePaneSide: 'left' as const,
+};
+
+async function finalizeDeletedFolderState(
+  get: () => AppState,
+  set: (partial: Partial<AppState>) => void,
+): Promise<void> {
+  clearPdfDocumentCache();
+  const { currentFolderId, activeNotebook } = get();
+  const currentFolderStillExists = currentFolderId
+    ? Boolean(await db.folders.get(currentFolderId))
+    : true;
+  const activeNotebookStillExists = activeNotebook
+    ? Boolean(await db.notebooks.get(activeNotebook.id))
+    : true;
+  set({
+    unlockedMasterKey: null,
+    ...(currentFolderStillExists ? {} : { currentFolderId: null }),
+    ...(activeNotebookStillExists ? {} : CLEARED_EDITOR_RUNTIME_STATE),
+  });
+  await get().refreshShelf();
+}
+
+async function finalizeDeletedNotebookState(
+  notebookId: string,
+  clearMasterKey: boolean,
+  get: () => AppState,
+  set: (partial: Partial<AppState>) => void,
+): Promise<void> {
+  clearPdfDocumentCache();
+  if (get().activeNotebook?.id === notebookId) {
+    set(CLEARED_EDITOR_RUNTIME_STATE);
+  } else if (clearMasterKey) {
+    set({ unlockedMasterKey: null });
+  }
+  await get().refreshShelf();
+}
+
 export const useAppStore = create<AppState>((set, get) => ({
   currentFolderId: null,
   folders: [],
@@ -602,6 +958,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   breadcrumbs: [],
   coverThumbnails: {},
   customTemplates: [],
+  trashedNotebooks: [],
+  recentDeletedNotebooks: [],
   lockedNotebookCount: 0,
   shelfLoading: true,
   pdfImportProgress: null,
@@ -614,19 +972,27 @@ export const useAppStore = create<AppState>((set, get) => ({
   undoStack: [],
   redoStack: [],
   saveStatus: 'saved',
+  splitPane: null,
+  activePaneSide: 'left',
 
   activeTool: initialPrefs.defaultTool,
-  penColor: PEN_DEFAULT_SWATCHES[0],
+  inkColor: UNIFIED_INK_SWATCHES[0],
+  inkSwatches: [...UNIFIED_INK_SWATCHES],
+  penColor: UNIFIED_INK_SWATCHES[0],
   penSize: PEN_THICKNESS_PRESETS[1],
-  penSwatches: [...PEN_DEFAULT_SWATCHES],
-  highlighterColor: HIGHLIGHTER_DEFAULT_SWATCHES[0],
+  penSwatches: [...UNIFIED_INK_SWATCHES],
+  highlighterColor: UNIFIED_INK_SWATCHES[0],
   highlighterSize: HIGHLIGHTER_THICKNESS_PRESETS[1],
-  highlighterSwatches: [...HIGHLIGHTER_DEFAULT_SWATCHES],
-  eraserSize: 16,
+  highlighterSwatches: [...UNIFIED_INK_SWATCHES],
+  eraserMode: initialPrefs.eraserMode,
+  eraserSize: DEFAULT_ERASER_SIZE,
   holdToSnapEnabled: true,
   handwritingCorrectionEnabled: getHandwritingCorrectionEnabled(),
   handwritingTidyToast: null,
+  editorToast: null,
   zoom: 1,
+  uiScale: initialPrefs.uiScale,
+  ctrlScrollBehavior: initialPrefs.ctrlScrollBehavior,
 
   penSlots: initialPrefs.penSlots,
   activePenSlotIndex: null,
@@ -634,15 +1000,24 @@ export const useAppStore = create<AppState>((set, get) => ({
   deskCustomColor: initialPrefs.deskCustomColor,
   darkPaperView: initialPrefs.darkPaperView,
   highContrastUi: initialPrefs.highContrastUi,
+  uiSoundsEnabled: initialPrefs.uiSoundsEnabled,
   dockPosition: initialPrefs.dockPosition,
   heroHeadline: initialPrefs.heroHeadline,
+  interfaceFontId: initialPrefs.interfaceFontId,
+  interfaceCustomFont: initialPrefs.interfaceCustomFont,
+  uploadedFonts: [],
   defaultZoomMode: initialPrefs.defaultZoomMode,
   defaultTool: initialPrefs.defaultTool,
   defaultPaperPattern: initialPrefs.defaultPaperPattern,
+  activeAiProvider: initialPrefs.activeAiProvider,
+  aiProviderKeys: getAllAiProviderKeys(),
+  aiProviderModels: initialPrefs.aiProviderModels,
+  aiCustomBaseUrl: initialPrefs.aiCustomBaseUrl,
   geminiApiKey: getGeminiApiKey(),
   geminiModelPreset: initialPrefs.geminiModelPreset,
   geminiCustomModelId: initialPrefs.geminiCustomModelId,
   blockAiOnVaultLocked: initialPrefs.blockAiOnVaultLocked,
+  keyboardShortcuts: initialPrefs.keyboardShortcuts,
 
   lassoSelection: null,
   isDraggingLasso: false,
@@ -658,7 +1033,20 @@ export const useAppStore = create<AppState>((set, get) => ({
   copiedTextboxStyle: null,
 
   initApp: async () => {
-    await Promise.all([get().refreshShelf(), get().refreshTemplates()]);
+    const [, , , storedFonts] = await Promise.all([
+      get().refreshShelf(),
+      get().refreshTemplates(),
+      get().refreshTrash(),
+      db.customFonts.orderBy('createdAt').toArray().catch(() => [] as CustomFontRecord[]),
+    ]);
+    set({
+      uploadedFonts: storedFonts.map((f) => ({
+        id: f.id,
+        name: f.name,
+        fileName: f.fileName,
+        createdAt: f.createdAt,
+      })),
+    });
   },
 
   refreshShelf: async () => {
@@ -704,15 +1092,34 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   deleteFolder: async (id) => {
-    await repository.deleteFolderRecursive(id);
+    const trashedRecords = await repository.deleteFolderRecursive(id);
+    recordDeletedNotebooksForUndo(trashedRecords, get, set);
     if (get().currentFolderId === id) {
       set({ currentFolderId: null });
     }
-    await get().refreshShelf();
+    await Promise.all([get().refreshShelf(), get().refreshTrash()]);
+    playUiSound('delete');
+  },
+
+  deleteFolderWithPassword: async (folderId, password) => {
+    const masterKey = await unlockMasterKeyWithPassword(password, false);
+    const trashedRecords = await repository.deleteFolderRecursive(folderId, masterKey);
+    recordDeletedNotebooksForUndo(trashedRecords, get, set);
+    await finalizeDeletedFolderState(get, set);
+    await get().refreshTrash();
+  },
+
+  deleteFolderWithRecoveryKey: async (folderId, recoveryKey, newPassword) => {
+    const masterKey = await resetVaultPasswordWithRecoveryKey(recoveryKey, newPassword);
+    const trashedRecords = await repository.deleteFolderRecursive(folderId, masterKey);
+    recordDeletedNotebooksForUndo(trashedRecords, get, set);
+    await finalizeDeletedFolderState(get, set);
+    await get().refreshTrash();
   },
 
   createNotebook: async ({
     title,
+    mode = 'notebook',
     folderId,
     cover,
     paper,
@@ -723,6 +1130,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   }) => {
     const { notebook } = await repository.createNotebook({
       title,
+      mode,
       folderId,
       cover,
       paper,
@@ -740,12 +1148,25 @@ export const useAppStore = create<AppState>((set, get) => ({
   updateNotebookMeta: async (id, patch) => {
     await repository.updateNotebook(id, patch);
     const active = get().activeNotebook;
+    const split = get().splitPane;
+    const now = Date.now();
     if (active && active.id === id) {
       set({
         activeNotebook: {
           ...active,
           ...patch,
-          updatedAt: Date.now(),
+          updatedAt: now,
+        },
+      });
+    } else if (split && split.notebook.id === id) {
+      set({
+        splitPane: {
+          ...split,
+          notebook: {
+            ...split.notebook,
+            ...patch,
+            updatedAt: now,
+          },
         },
       });
     }
@@ -758,27 +1179,103 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   deleteNotebook: async (id) => {
-    await repository.deleteNotebook(id);
-    clearPdfDocumentCache();
-    if (get().activeNotebook?.id === id) {
+    const trashedRecord = await repository.deleteNotebook(id);
+    if (trashedRecord) {
+      recordDeletedNotebooksForUndo([trashedRecord], get, set);
+    }
+    await finalizeDeletedNotebookState(id, false, get, set);
+    await get().refreshTrash();
+    playUiSound('delete');
+  },
+
+  refreshTrash: async () => {
+    const trashedNotebooks = await repository.getTrashedNotebooks();
+    set({ trashedNotebooks });
+  },
+
+  restoreTrashedNotebook: async (notebookId) => {
+    const restored = await repository.restoreTrashedNotebook(notebookId);
+    const remaining = get().recentDeletedNotebooks.filter(
+      (entry) => entry.notebookId !== notebookId,
+    );
+    set({
+      recentDeletedNotebooks: remaining,
+      trashedNotebooks: get().trashedNotebooks.filter((t) => t.id !== notebookId),
+    });
+    scheduleRecentDeleteCleanup(get, set);
+    await Promise.all([get().refreshShelf(), get().refreshTrash()]);
+    return restored;
+  },
+
+  undoLastNotebookDelete: async () => {
+    const now = Date.now();
+    const valid = get().recentDeletedNotebooks.filter((entry) => entry.expiresAt >= now);
+    if (valid.length === 0) {
+      set({ recentDeletedNotebooks: [] });
+      clearRecentDeleteExpiryTimer();
+      return null;
+    }
+    const target = valid[valid.length - 1];
+    set({ recentDeletedNotebooks: valid.slice(0, -1) });
+    scheduleRecentDeleteCleanup(get, set);
+    const restored = await repository.restoreTrashedNotebook(target.notebookId, now);
+    if (restored) {
       set({
-        activeNotebook: null,
-        pages: [],
-        activePageId: null,
-        undoStack: [],
-        redoStack: [],
-        lassoSelection: null,
-        isDraggingLasso: false,
-        activeTextboxId: null,
-        selectedTextboxId: null,
-        selectedTextboxIds: [],
-        textboxSessionBaseline: null,
-        selectedImageIds: [],
-        croppingImageId: null,
-        unlockedMasterKey: null,
+        trashedNotebooks: get().trashedNotebooks.filter((t) => t.id !== target.notebookId),
       });
     }
-    await get().refreshShelf();
+    await Promise.all([get().refreshShelf(), get().refreshTrash()]);
+    return restored;
+  },
+
+  dismissNotebookDeleteUndo: (notebookId) => {
+    if (!notebookId) {
+      set({ recentDeletedNotebooks: [] });
+      clearRecentDeleteExpiryTimer();
+      return;
+    }
+    const remaining = get().recentDeletedNotebooks.filter(
+      (entry) => entry.notebookId !== notebookId,
+    );
+    set({ recentDeletedNotebooks: remaining });
+    scheduleRecentDeleteCleanup(get, set);
+  },
+
+  permanentlyDeleteTrashedNotebook: async (notebookId) => {
+    await repository.permanentlyDeleteTrashedNotebook(notebookId);
+    const remaining = get().recentDeletedNotebooks.filter(
+      (entry) => entry.notebookId !== notebookId,
+    );
+    set({ recentDeletedNotebooks: remaining });
+    scheduleRecentDeleteCleanup(get, set);
+    await get().refreshTrash();
+  },
+
+  emptyTrash: async () => {
+    await repository.emptyTrash();
+    set({ recentDeletedNotebooks: [] });
+    clearRecentDeleteExpiryTimer();
+    await get().refreshTrash();
+  },
+
+  deleteLockedNotebookWithPassword: async (notebookId, password) => {
+    const masterKey = await unlockMasterKeyWithPassword(password, false);
+    const trashedRecord = await repository.deleteNotebook(notebookId, masterKey);
+    if (trashedRecord) {
+      recordDeletedNotebooksForUndo([trashedRecord], get, set);
+    }
+    await finalizeDeletedNotebookState(notebookId, true, get, set);
+    await get().refreshTrash();
+  },
+
+  deleteLockedNotebookWithRecoveryKey: async (notebookId, recoveryKey, newPassword) => {
+    const masterKey = await resetVaultPasswordWithRecoveryKey(recoveryKey, newPassword);
+    const trashedRecord = await repository.deleteNotebook(notebookId, masterKey);
+    if (trashedRecord) {
+      recordDeletedNotebooksForUndo([trashedRecord], get, set);
+    }
+    await finalizeDeletedNotebookState(notebookId, true, get, set);
+    await get().refreshTrash();
   },
 
   setupVaultAndMaybeLockNotebook: async (password, recoveryKey, notebookIdToLock) => {
@@ -831,10 +1328,13 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   lockAllNotebooksNow: async () => {
     clearPdfDocumentCache();
-    const { activeNotebook } = get();
+    const { activeNotebook, splitPane } = get();
     if (activeNotebook?.isLocked) {
       await get().closeNotebook();
       return;
+    }
+    if (splitPane?.notebook.isLocked) {
+      await get().closeSplitPane();
     }
     set({ unlockedMasterKey: null });
     await get().refreshShelf();
@@ -850,6 +1350,11 @@ export const useAppStore = create<AppState>((set, get) => ({
         ? notebook.lastOpenedPageId
         : pages[0]?.id ?? null;
 
+    if (typeof window !== 'undefined' && tidyToastTimer !== null) {
+      window.clearTimeout(tidyToastTimer);
+      tidyToastTimer = null;
+    }
+
     const { defaultTool, defaultZoomMode } = get();
     set({
       activeNotebook: notebook,
@@ -860,6 +1365,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       undoStack: [],
       redoStack: [],
       saveStatus: 'saved',
+      handwritingTidyToast: null,
       lassoSelection: null,
       isDraggingLasso: false,
       activeTextboxId: null,
@@ -869,52 +1375,45 @@ export const useAppStore = create<AppState>((set, get) => ({
       selectedImageIds: [],
       croppingImageId: null,
       unlockedMasterKey: notebook.isLocked ? effectiveKey ?? null : null,
+      splitPane: null,
+      activePaneSide: 'left',
     });
   },
 
   closeNotebook: async () => {
-    const { activeNotebook, pages, activePageId, unlockedMasterKey } = get();
+    if (typeof window !== 'undefined') {
+      for (const t of thumbnailTimers.values()) {
+        window.clearTimeout(t);
+      }
+      thumbnailTimers.clear();
+      if (tidyToastTimer !== null) {
+        window.clearTimeout(tidyToastTimer);
+        tidyToastTimer = null;
+      }
+    }
+
+    const { activeNotebook, pages, activePageId, unlockedMasterKey, splitPane } = get();
     if (activeNotebook) {
-      if (activePageId) {
-        await repository.updateNotebook(activeNotebook.id, {
-          lastOpenedPageId: activePageId,
-        });
-      }
-      if (!activeNotebook.isLocked) {
-        const firstPage = pages[0];
-        if (firstPage && typeof document !== 'undefined') {
-          const thumb = firstPage.pdfBackground
-            ? await generatePdfAwarePageThumbnail(firstPage, 240, unlockedMasterKey)
-            : generatePageThumbnail(
-                firstPage.paper,
-                firstPage.strokes,
-                240,
-                firstPage.textboxes ?? [],
-                firstPage.images ?? [],
-              );
-          if (thumb) {
-            await db.pages.update(firstPage.id, { thumbnailDataUrl: thumb });
-          }
-        }
-      }
+      await persistNotebookLastPageAndThumbnail(
+        activeNotebook,
+        pages,
+        activePageId,
+        unlockedMasterKey,
+      );
+    }
+    if (splitPane) {
+      await persistNotebookLastPageAndThumbnail(
+        splitPane.notebook,
+        splitPane.pages,
+        splitPane.activePageId,
+        splitPane.unlockedMasterKey,
+      );
     }
 
     clearPdfDocumentCache();
     set({
-      activeNotebook: null,
-      pages: [],
-      activePageId: null,
-      undoStack: [],
-      redoStack: [],
-      lassoSelection: null,
-      isDraggingLasso: false,
-      activeTextboxId: null,
-      selectedTextboxId: null,
-      selectedTextboxIds: [],
-      textboxSessionBaseline: null,
-      selectedImageIds: [],
-      croppingImageId: null,
-      unlockedMasterKey: null,
+      ...CLEARED_EDITOR_RUNTIME_STATE,
+      handwritingTidyToast: null,
     });
     await get().refreshShelf();
   },
@@ -936,6 +1435,139 @@ export const useAppStore = create<AppState>((set, get) => ({
     if (activeNotebook) {
       void db.notebooks.update(activeNotebook.id, { lastOpenedPageId: pageId });
     }
+  },
+
+  openSplitNotebook: async (notebookId, masterKey) => {
+    const state = get();
+    if (!state.activeNotebook) return;
+    if (state.activeNotebook.id === notebookId || state.splitPane?.notebook.id === notebookId) {
+      return;
+    }
+
+    const effectiveKey = masterKey ?? state.unlockedMasterKey;
+    const result = await repository.getNotebookWithPages(notebookId, effectiveKey);
+    if (!result) return;
+
+    const prevSplit = get().splitPane;
+    if (prevSplit) {
+      await persistNotebookLastPageAndThumbnail(
+        prevSplit.notebook,
+        prevSplit.pages,
+        prevSplit.activePageId,
+        prevSplit.unlockedMasterKey,
+      );
+    }
+
+    const { notebook, pages } = result;
+    const targetPageId =
+      notebook.lastOpenedPageId && pages.some((p) => p.id === notebook.lastOpenedPageId)
+        ? notebook.lastOpenedPageId
+        : pages[0]?.id ?? null;
+
+    set({
+      splitPane: {
+        notebook,
+        pages,
+        activePageId: targetPageId,
+        undoStack: [],
+        redoStack: [],
+        zoom: get().zoom,
+        unlockedMasterKey: notebook.isLocked ? effectiveKey ?? null : null,
+      },
+    });
+  },
+
+  focusSplitPane: (side) => {
+    const state = get();
+    if (!state.splitPane || !state.activeNotebook || state.activePaneSide === side) {
+      return;
+    }
+    if (state.activeTextboxId && state.activePageId) {
+      get().commitTextboxSession(state.activePageId, state.activeTextboxId, false);
+    }
+    const latest = get();
+    if (!latest.splitPane || !latest.activeNotebook || latest.activePaneSide === side) {
+      return;
+    }
+    const outgoing: SplitPaneSnapshot = {
+      notebook: latest.activeNotebook,
+      pages: latest.pages,
+      activePageId: latest.activePageId,
+      undoStack: latest.undoStack,
+      redoStack: latest.redoStack,
+      zoom: latest.zoom,
+      unlockedMasterKey: latest.unlockedMasterKey,
+    };
+    const incoming = latest.splitPane;
+    set({
+      activeNotebook: incoming.notebook,
+      pages: incoming.pages,
+      activePageId: incoming.activePageId,
+      undoStack: incoming.undoStack,
+      redoStack: incoming.redoStack,
+      zoom: incoming.zoom,
+      unlockedMasterKey: incoming.unlockedMasterKey,
+      splitPane: outgoing,
+      activePaneSide: side,
+      lassoSelection: null,
+      isDraggingLasso: false,
+      activeTextboxId: null,
+      selectedTextboxId: null,
+      selectedTextboxIds: [],
+      textboxSessionBaseline: null,
+      selectedImageIds: [],
+      croppingImageId: null,
+    });
+  },
+
+  swapSplitPanes: () => {
+    const { splitPane, activePaneSide } = get();
+    if (!splitPane) return;
+    set({ activePaneSide: activePaneSide === 'left' ? 'right' : 'left' });
+  },
+
+  closeSplitPane: async (sideToClose) => {
+    if (!get().splitPane) return;
+    if (sideToClose && sideToClose === get().activePaneSide) {
+      get().focusSplitPane(sideToClose === 'left' ? 'right' : 'left');
+    }
+    const closing = get().splitPane;
+    if (closing) {
+      await persistNotebookLastPageAndThumbnail(
+        closing.notebook,
+        closing.pages,
+        closing.activePageId,
+        closing.unlockedMasterKey,
+      );
+    }
+    set({ splitPane: null, activePaneSide: 'left' });
+  },
+
+  setSplitPaneActivePageId: (pageId) => {
+    const split = get().splitPane;
+    if (!split || split.activePageId === pageId) return;
+    set({
+      splitPane: {
+        ...split,
+        activePageId: pageId,
+      },
+    });
+    void db.notebooks.update(split.notebook.id, { lastOpenedPageId: pageId });
+  },
+
+  setSplitPaneZoom: (zoom) => {
+    const split = get().splitPane;
+    if (!split) return;
+    const isWb = split.notebook.mode === 'whiteboard';
+    const clamped = isWb
+      ? clampWhiteboardZoom(zoom)
+      : clampNotebookZoom(zoom, getNotebookMinZoom(split.pages));
+    set({
+      splitPane: {
+        ...split,
+        zoom: clamped,
+      },
+    });
   },
 
   addPageFromTemplate: async (
@@ -976,6 +1608,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         croppingImageId: null,
       });
     }
+    playUiSound('paper');
     return created;
   },
 
@@ -1005,6 +1638,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         croppingImageId: null,
       });
     }
+    playUiSound('paper');
   },
 
   deletePage: async (pageId) => {
@@ -1036,6 +1670,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       selectedImageIds: [],
       croppingImageId: null,
     });
+    playUiSound('delete');
   },
 
   reorderPages: async (newOrder) => {
@@ -1054,6 +1689,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   setActiveTool: (tool) => {
+    const prevTool = get().activeTool;
     const keepText = tool === 'text' || tool === 'pan';
     const keepImages = tool === 'pan';
     const keepStrokes = tool === 'lasso' || tool === 'pan';
@@ -1067,31 +1703,34 @@ export const useAppStore = create<AppState>((set, get) => ({
       selectedImageIds: keepImages ? get().selectedImageIds : [],
       croppingImageId: null,
     });
+    if (prevTool !== tool) {
+      playUiSound('switch');
+    }
   },
 
   setActiveColor: (color) => {
     const { activeTool, lassoSelection } = get();
-    if (activeTool === 'highlighter') {
-      set({ highlighterColor: color });
-    } else if (activeTool === 'lasso' && lassoSelection && lassoSelection.strokeIds.length > 0) {
+    if (activeTool === 'lasso' && lassoSelection && lassoSelection.strokeIds.length > 0) {
       get().commitLassoRecolor(lassoSelection.pageId, lassoSelection.strokeIds, color);
-      set({ penColor: color });
-    } else {
-      set({ penColor: color });
     }
+    set({
+      inkColor: color,
+      penColor: color,
+      highlighterColor: color,
+    });
   },
 
   replaceToolSwatch: (index, color) => {
-    const { activeTool, penSwatches, highlighterSwatches } = get();
-    if (activeTool === 'highlighter') {
-      const next = [...highlighterSwatches];
-      next[index] = color;
-      set({ highlighterSwatches: next, highlighterColor: color });
-    } else {
-      const next = [...penSwatches];
-      next[index] = color;
-      set({ penSwatches: next, penColor: color });
-    }
+    const next = [...get().inkSwatches];
+    next[index] = color;
+    set({
+      inkSwatches: next,
+      penSwatches: next,
+      highlighterSwatches: next,
+      inkColor: color,
+      penColor: color,
+      highlighterColor: color,
+    });
   },
 
   setActiveSize: (size) => {
@@ -1100,6 +1739,11 @@ export const useAppStore = create<AppState>((set, get) => ({
     } else {
       set({ penSize: size });
     }
+  },
+
+  setEraserMode: (mode) => {
+    set({ eraserMode: mode });
+    persistWorkspacePrefsSnapshot(get());
   },
 
   setEraserSize: (size) => set({ eraserSize: size }),
@@ -1111,9 +1755,38 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({ handwritingCorrectionEnabled: enabled });
   },
 
+  showEditorToast: (toast, durationMs = 2800) => {
+    if (typeof window !== 'undefined' && editorToastTimer !== null) {
+      window.clearTimeout(editorToastTimer);
+      editorToastTimer = null;
+    }
+    set({ editorToast: toast });
+    if (toast && typeof window !== 'undefined' && durationMs > 0) {
+      editorToastTimer = window.setTimeout(() => {
+        editorToastTimer = null;
+        set({ editorToast: null });
+      }, durationMs);
+    }
+  },
+
   setZoom: (zoom) => {
-    const clamped = Math.max(0.35, Math.min(3.5, Number(zoom.toFixed(2))));
+    const { activeNotebook, pages } = get();
+    const isWhiteboard = activeNotebook?.mode === 'whiteboard';
+    const clamped = isWhiteboard
+      ? clampWhiteboardZoom(zoom)
+      : clampNotebookZoom(zoom, getNotebookMinZoom(pages));
     set({ zoom: clamped });
+  },
+
+  setUiScale: (scale) => {
+    const clamped = applyUiScaleToRuntime(clampUiScale(scale));
+    set({ uiScale: clamped });
+    persistWorkspacePrefsSnapshot(get());
+  },
+
+  setCtrlScrollBehavior: (behavior) => {
+    set({ ctrlScrollBehavior: behavior });
+    persistWorkspacePrefsSnapshot(get());
   },
 
   activatePenSlot: (index) => {
@@ -1122,9 +1795,12 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({
       activeTool: slot.tool,
       activePenSlotIndex: index,
+      inkColor: slot.color,
+      penColor: slot.color,
+      highlighterColor: slot.color,
       ...(slot.tool === 'highlighter'
-        ? { highlighterColor: slot.color, highlighterSize: slot.size }
-        : { penColor: slot.color, penSize: slot.size }),
+        ? { highlighterSize: slot.size }
+        : { penSize: slot.size }),
       lassoSelection: null,
       isDraggingLasso: false,
       activeTextboxId: null,
@@ -1133,6 +1809,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       selectedImageIds: [],
       croppingImageId: null,
     });
+    playUiSound('switch');
   },
 
   saveCurrentToolToSlot: (index, customName) => {
@@ -1140,7 +1817,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     if (index < 0 || index >= state.penSlots.length) return;
     const isHighlighter = state.activeTool === 'highlighter';
     const tool: 'pen' | 'highlighter' = isHighlighter ? 'highlighter' : 'pen';
-    const color = isHighlighter ? state.highlighterColor : state.penColor;
+    const color = state.inkColor;
     const size = isHighlighter ? state.highlighterSize : state.penSize;
     const existing = state.penSlots[index];
     const nextSlots = state.penSlots.map((s, i) =>
@@ -1183,6 +1860,15 @@ export const useAppStore = create<AppState>((set, get) => ({
     persistWorkspacePrefsSnapshot(get());
   },
 
+  setUiSoundsEnabled: (enabled) => {
+    setUiSoundEnabled(enabled);
+    set({ uiSoundsEnabled: enabled });
+    persistWorkspacePrefsSnapshot(get());
+    if (enabled) {
+      playUiSound('switch', true);
+    }
+  },
+
   setDockPosition: (pos) => {
     set({ dockPosition: pos });
     persistWorkspacePrefsSnapshot(get());
@@ -1191,6 +1877,81 @@ export const useAppStore = create<AppState>((set, get) => ({
   setHeroHeadline: (headline) => {
     const cleaned = headline.trim().slice(0, 80) || DEFAULT_HERO_HEADLINE;
     set({ heroHeadline: cleaned });
+    persistWorkspacePrefsSnapshot(get());
+  },
+
+  setInterfaceFont: (fontId, customFontName) => {
+    const cleanCustom =
+      customFontName !== undefined
+        ? sanitizeCustomFontName(customFontName)
+        : get().interfaceCustomFont;
+    let nextId = isValidInterfaceFontId(fontId) ? fontId : DEFAULT_INTERFACE_FONT_ID;
+    if (nextId === 'custom' && !cleanCustom) {
+      nextId = DEFAULT_INTERFACE_FONT_ID;
+    }
+    set({
+      interfaceFontId: nextId,
+      interfaceCustomFont: nextId === 'custom' ? cleanCustom : customFontName !== undefined ? cleanCustom : get().interfaceCustomFont,
+    });
+    persistWorkspacePrefsSnapshot(get());
+  },
+
+  importCustomInterfaceFont: async (file) => {
+    const check = isSupportedFontFile(file);
+    if (!check.ok) {
+      return { ok: false, error: check.error };
+    }
+    try {
+      const data = await file.arrayBuffer();
+      const id = createId();
+      const name = deriveFontDisplayNameFromFile(file.name);
+      const record: CustomFontRecord = {
+        id,
+        name,
+        fileName: file.name,
+        mimeType: file.type || 'font/ttf',
+        data,
+        createdAt: Date.now(),
+      };
+      await db.customFonts.put(record);
+      await registerUploadedFontFace(record);
+      const fontId = `uploaded:${id}`;
+      set((state) => ({
+        uploadedFonts: [
+          ...state.uploadedFonts,
+          { id, name, fileName: file.name, createdAt: record.createdAt },
+        ],
+        interfaceFontId: fontId,
+        interfaceCustomFont: name,
+      }));
+      persistWorkspacePrefsSnapshot(get());
+      return { ok: true, fontId, name };
+    } catch (err) {
+      return {
+        ok: false,
+        error: err instanceof Error ? err.message : 'Unable to import font file.',
+      };
+    }
+  },
+
+  deleteCustomInterfaceFont: async (id) => {
+    try {
+      await db.customFonts.delete(id);
+    } catch {
+      // Ignore deletion errors if missing
+    }
+    set((state) => {
+      const removingActive = state.interfaceFontId === `uploaded:${id}`;
+      return {
+        uploadedFonts: state.uploadedFonts.filter((f) => f.id !== id),
+        ...(removingActive
+          ? {
+              interfaceFontId: DEFAULT_INTERFACE_FONT_ID,
+              interfaceCustomFont: '',
+            }
+          : {}),
+      };
+    });
     persistWorkspacePrefsSnapshot(get());
   },
 
@@ -1209,24 +1970,142 @@ export const useAppStore = create<AppState>((set, get) => ({
     persistWorkspacePrefsSnapshot(get());
   },
 
+  setKeyboardShortcut: (id, rawCombo) => {
+    const normalized = normalizeShortcutCombo(rawCombo);
+    if (!normalized) {
+      return { ok: false };
+    }
+    const { next, swappedWith, swappedCombo } = applyShortcutBinding(
+      get().keyboardShortcuts,
+      id,
+      normalized,
+    );
+    set({ keyboardShortcuts: next });
+    persistWorkspacePrefsSnapshot(get());
+    return {
+      ok: true,
+      combo: normalized,
+      ...(swappedWith ? { swappedWith, swappedCombo } : {}),
+    };
+  },
+
+  resetKeyboardShortcut: (id) => {
+    const { next, swappedWith, swappedCombo } = applyShortcutBinding(
+      get().keyboardShortcuts,
+      id,
+      DEFAULT_KEYBOARD_SHORTCUTS[id],
+    );
+    set({ keyboardShortcuts: next });
+    persistWorkspacePrefsSnapshot(get());
+    return swappedWith ? { swappedWith, swappedCombo } : {};
+  },
+
+  resetAllKeyboardShortcuts: () => {
+    set({ keyboardShortcuts: { ...DEFAULT_KEYBOARD_SHORTCUTS } });
+    persistWorkspacePrefsSnapshot(get());
+  },
+
+  setActiveAiProvider: (provider) => {
+    set({ activeAiProvider: provider });
+    persistWorkspacePrefsSnapshot(get());
+  },
+
+  setAiProviderKey: (provider, apiKey) => {
+    const trimmed = apiKey.trim();
+    saveAiProviderKey(provider, trimmed);
+    set((state) => ({
+      aiProviderKeys: {
+        ...state.aiProviderKeys,
+        [provider]: trimmed,
+      },
+      ...(provider === 'gemini' ? { geminiApiKey: trimmed } : {}),
+    }));
+  },
+
+  clearAiProviderKey: (provider) => {
+    clearAiProviderKey(provider);
+    set((state) => ({
+      aiProviderKeys: {
+        ...state.aiProviderKeys,
+        [provider]: '',
+      },
+      ...(provider === 'gemini' ? { geminiApiKey: '' } : {}),
+    }));
+  },
+
+  setAiProviderModel: (provider, model) => {
+    const trimmed = model.trim().slice(0, 120);
+    set((state) => {
+      const nextModels = {
+        ...state.aiProviderModels,
+        [provider]: trimmed,
+      };
+      if (provider !== 'gemini') {
+        return { aiProviderModels: nextModels };
+      }
+      const preset: GeminiModelPresetId =
+        trimmed === DEFAULT_GEMINI_MODEL || trimmed === ''
+          ? DEFAULT_GEMINI_MODEL
+          : trimmed === FAST_GEMINI_MODEL
+            ? FAST_GEMINI_MODEL
+            : 'custom';
+      return {
+        aiProviderModels: nextModels,
+        geminiModelPreset: preset,
+        geminiCustomModelId: preset === 'custom' ? trimmed : state.geminiCustomModelId,
+      };
+    });
+    persistWorkspacePrefsSnapshot(get());
+  },
+
+  setAiCustomBaseUrl: (url) => {
+    const trimmed = url.trim().slice(0, 300);
+    set({ aiCustomBaseUrl: trimmed });
+    persistWorkspacePrefsSnapshot(get());
+  },
+
   setGeminiApiKey: (apiKey) => {
-    saveGeminiApiKey(apiKey);
-    set({ geminiApiKey: apiKey.trim() });
+    const trimmed = apiKey.trim();
+    saveGeminiApiKey(trimmed);
+    set((state) => ({
+      geminiApiKey: trimmed,
+      aiProviderKeys: {
+        ...state.aiProviderKeys,
+        gemini: trimmed,
+      },
+    }));
   },
 
   clearStoredGeminiApiKey: () => {
     clearGeminiApiKey();
-    set({ geminiApiKey: '' });
+    set((state) => ({
+      geminiApiKey: '',
+      aiProviderKeys: {
+        ...state.aiProviderKeys,
+        gemini: '',
+      },
+    }));
   },
 
   setGeminiModelConfig: (preset, customModelId) => {
-    set((state) => ({
-      geminiModelPreset: preset,
-      geminiCustomModelId:
+    set((state) => {
+      const nextCustom =
         customModelId !== undefined
           ? customModelId.trim().slice(0, 100)
-          : state.geminiCustomModelId,
-    }));
+          : state.geminiCustomModelId;
+      const resolved = resolveActiveGeminiModel({
+        geminiModelPreset: preset,
+        geminiCustomModelId: nextCustom,
+      });
+      return {
+        geminiModelPreset: preset,
+        geminiCustomModelId: nextCustom,
+        aiProviderModels: {
+          ...state.aiProviderModels,
+          gemini: resolved,
+        },
+      };
+    });
     persistWorkspacePrefsSnapshot(get());
   },
 
@@ -1258,6 +2137,53 @@ export const useAppStore = create<AppState>((set, get) => ({
       pages: nextPages,
       undoStack: [...undoStack.slice(-(MAX_HISTORY - 1)), cmd],
       redoStack: [],
+    });
+
+    persistPageContentChange(
+      activeNotebook,
+      pageId,
+      targetPage.paper,
+      nextStrokes,
+      targetPage.textboxes ?? [],
+      targetPage.images ?? [],
+      unlockedMasterKey,
+      (status) => set({ saveStatus: status }),
+    );
+  },
+
+  discardRecentPenStrokes: (pageId, strokeIds) => {
+    if (strokeIds.length === 0) return;
+    const { activeNotebook, pages, undoStack, unlockedMasterKey } = get();
+    const targetPage = pages.find((p) => p.id === pageId);
+    if (!targetPage || !activeNotebook) return;
+
+    const idSet = new Set(strokeIds);
+    const nextStrokes = targetPage.strokes.filter((s) => !idSet.has(s.id));
+    if (nextStrokes.length === targetPage.strokes.length) return;
+
+    const nextUndoStack = [...undoStack];
+    while (nextUndoStack.length > 0) {
+      const top = nextUndoStack[nextUndoStack.length - 1];
+      if (
+        top.type === 'strokes' &&
+        top.pageId === pageId &&
+        top.nextStrokes.length === top.prevStrokes.length + 1 &&
+        idSet.has(top.nextStrokes[top.nextStrokes.length - 1].id) &&
+        top.prevStrokes.every((s, idx) => s.id === top.nextStrokes[idx]?.id)
+      ) {
+        nextUndoStack.pop();
+      } else {
+        break;
+      }
+    }
+
+    const nextPages = pages.map((p) =>
+      p.id === pageId ? { ...p, strokes: nextStrokes, updatedAt: Date.now() } : p,
+    );
+
+    set({
+      pages: nextPages,
+      undoStack: nextUndoStack,
     });
 
     persistPageContentChange(
@@ -1312,28 +2238,15 @@ export const useAppStore = create<AppState>((set, get) => ({
     );
   },
 
-  commitHandwritingCorrection: (pageId, rawStrokeIds, tidiedStrokes) => {
-    if (rawStrokeIds.length === 0 || tidiedStrokes.length === 0) return;
+  commitPrecisionErase: (pageId, prevStrokes, nextStrokes) => {
     const { activeNotebook, pages, undoStack, unlockedMasterKey } = get();
     const targetPage = pages.find((p) => p.id === pageId);
     if (!targetPage || !activeNotebook) return;
-
-    const replaceSet = new Set(rawStrokeIds);
-    const prevStrokes = targetPage.strokes;
-    const firstIdx = prevStrokes.findIndex((s) => replaceSet.has(s.id));
-    if (firstIdx === -1) return;
-
-    const nextStrokes: Stroke[] = [];
-    let inserted = false;
-    for (const s of prevStrokes) {
-      if (replaceSet.has(s.id)) {
-        if (!inserted) {
-          nextStrokes.push(...tidiedStrokes);
-          inserted = true;
-        }
-      } else {
-        nextStrokes.push(s);
-      }
+    if (
+      prevStrokes.length === nextStrokes.length &&
+      prevStrokes.every((s, idx) => s === nextStrokes[idx])
+    ) {
+      return;
     }
 
     const cmd: HistoryCommand = {
@@ -1343,21 +2256,14 @@ export const useAppStore = create<AppState>((set, get) => ({
       nextStrokes,
     };
 
-    if (typeof window !== 'undefined') {
-      if (tidyToastTimer !== null) window.clearTimeout(tidyToastTimer);
-      tidyToastTimer = window.setTimeout(() => {
-        set({ handwritingTidyToast: null });
-        tidyToastTimer = null;
-      }, 1800);
-    }
+    const nextPages = pages.map((p) =>
+      p.id === pageId ? { ...p, strokes: nextStrokes, updatedAt: Date.now() } : p,
+    );
 
     set({
-      pages: pages.map((p) =>
-        p.id === pageId ? { ...p, strokes: nextStrokes, updatedAt: Date.now() } : p,
-      ),
+      pages: nextPages,
       undoStack: [...undoStack.slice(-(MAX_HISTORY - 1)), cmd],
       redoStack: [],
-      handwritingTidyToast: 'Handwriting tidied',
     });
 
     persistPageContentChange(
@@ -1402,9 +2308,14 @@ export const useAppStore = create<AppState>((set, get) => ({
         ? { ...p, paper: nextPaper, thumbnailDataUrl, updatedAt: Date.now() }
         : p,
     );
+    const nextZoom =
+      activeNotebook.mode === 'whiteboard'
+        ? get().zoom
+        : clampNotebookZoom(get().zoom, getNotebookMinZoom(nextPages));
 
     set({
       pages: nextPages,
+      zoom: nextZoom,
       undoStack: [...undoStack.slice(-(MAX_HISTORY - 1)), cmd],
       redoStack: [],
     });
@@ -1445,6 +2356,75 @@ export const useAppStore = create<AppState>((set, get) => ({
       pages: pages.map((p) =>
         p.id === pageId ? { ...p, strokes: nextStrokes, updatedAt: Date.now() } : p,
       ),
+      undoStack: [...undoStack.slice(-(MAX_HISTORY - 1)), cmd],
+      redoStack: [],
+    });
+
+    persistPageContentChange(
+      activeNotebook,
+      pageId,
+      targetPage.paper,
+      nextStrokes,
+      targetPage.textboxes ?? [],
+      targetPage.images ?? [],
+      unlockedMasterKey,
+      (status) => set({ saveStatus: status }),
+    );
+  },
+
+  updateLassoRecolorLive: (pageId, strokeIds, color) => {
+    const { pages } = get();
+    const targetPage = pages.find((p) => p.id === pageId);
+    if (!targetPage) return;
+
+    const idSet = new Set(strokeIds);
+    let changed = false;
+    const nextStrokes = targetPage.strokes.map((s) => {
+      if (idSet.has(s.id) && !s.locked && s.color !== color) {
+        changed = true;
+        return { ...s, color };
+      }
+      return s;
+    });
+    if (!changed) return;
+
+    const now = Date.now();
+    set({
+      pages: pages.map((p) =>
+        p.id === pageId ? { ...p, strokes: nextStrokes, updatedAt: now } : p,
+      ),
+    });
+  },
+
+  commitStrokeHistorySnapshot: (pageId, prevStrokes) => {
+    const { activeNotebook, pages, undoStack, unlockedMasterKey } = get();
+    const targetPage = pages.find((p) => p.id === pageId);
+    if (!targetPage || !activeNotebook) return;
+
+    const nextStrokes = targetPage.strokes;
+    const unchanged =
+      prevStrokes.length === nextStrokes.length &&
+      prevStrokes.every((prev, idx) => {
+        const next = nextStrokes[idx];
+        return (
+          prev === next ||
+          (prev.id === next.id &&
+            prev.color === next.color &&
+            prev.size === next.size &&
+            prev.opacity === next.opacity &&
+            prev.points === next.points)
+        );
+      });
+    if (unchanged) return;
+
+    const cmd: HistoryCommand = {
+      type: 'strokes',
+      pageId,
+      prevStrokes,
+      nextStrokes,
+    };
+
+    set({
       undoStack: [...undoStack.slice(-(MAX_HISTORY - 1)), cmd],
       redoStack: [],
     });
@@ -1562,8 +2542,9 @@ export const useAppStore = create<AppState>((set, get) => ({
 
     const prevTextboxes = targetPage.textboxes ?? [];
     const now = Date.now();
-    const clampedX = Math.max(8, Math.min(targetPage.paper.width - 40, x));
-    const clampedY = Math.max(8, Math.min(targetPage.paper.height - 30, y));
+    const isWhiteboard = activeNotebook.mode === 'whiteboard';
+    const clampedX = isWhiteboard ? x : Math.max(8, Math.min(targetPage.paper.width - 40, x));
+    const clampedY = isWhiteboard ? y : Math.max(8, Math.min(targetPage.paper.height - 30, y));
 
     const tb: Textbox = {
       id: createId(),
@@ -1670,6 +2651,76 @@ export const useAppStore = create<AppState>((set, get) => ({
       pages: pages.map((p) =>
         p.id === pageId ? { ...p, textboxes: nextTextboxes, updatedAt: now } : p,
       ),
+    });
+
+    persistPageContentChange(
+      activeNotebook,
+      pageId,
+      targetPage.paper,
+      targetPage.strokes,
+      nextTextboxes,
+      targetPage.images ?? [],
+      unlockedMasterKey,
+      (status) => set({ saveStatus: status }),
+    );
+  },
+
+  updateTextboxesLive: (pageId, textboxIds, patch) => {
+    const { pages } = get();
+    const targetPage = pages.find((p) => p.id === pageId);
+    if (!targetPage) return;
+
+    const idSet = new Set(textboxIds);
+    const prevTextboxes = targetPage.textboxes ?? [];
+    const now = Date.now();
+    let changed = false;
+    const nextTextboxes = prevTextboxes.map((tb) => {
+      if (!idSet.has(tb.id) || tb.locked) return tb;
+      changed = true;
+      return { ...tb, ...patch, updatedAt: now };
+    });
+    if (!changed) return;
+
+    set({
+      pages: pages.map((p) =>
+        p.id === pageId ? { ...p, textboxes: nextTextboxes, updatedAt: now } : p,
+      ),
+    });
+  },
+
+  commitTextboxHistorySnapshot: (pageId, prevTextboxes) => {
+    const { activeNotebook, pages, undoStack, unlockedMasterKey } = get();
+    const targetPage = pages.find((p) => p.id === pageId);
+    if (!targetPage || !activeNotebook) return;
+
+    const nextTextboxes = targetPage.textboxes ?? [];
+    const unchanged =
+      prevTextboxes.length === nextTextboxes.length &&
+      prevTextboxes.every((prev, idx) => {
+        const next = nextTextboxes[idx];
+        return (
+          prev === next ||
+          (prev.id === next.id &&
+            prev.color === next.color &&
+            prev.text === next.text &&
+            prev.fontSize === next.fontSize &&
+            prev.fontFamily === next.fontFamily &&
+            prev.bold === next.bold &&
+            prev.italic === next.italic)
+        );
+      });
+    if (unchanged) return;
+
+    const cmd: HistoryCommand = {
+      type: 'textboxes',
+      pageId,
+      prevTextboxes,
+      nextTextboxes,
+    };
+
+    set({
+      undoStack: [...undoStack.slice(-(MAX_HISTORY - 1)), cmd],
+      redoStack: [],
     });
 
     persistPageContentChange(
@@ -2409,6 +3460,7 @@ export const useAppStore = create<AppState>((set, get) => ({
           })
         : prevStrokes;
 
+    const isWhiteboard = activeNotebook.mode === 'whiteboard';
     const now = Date.now();
     const nextTextboxes =
       tbSet.size > 0
@@ -2417,8 +3469,12 @@ export const useAppStore = create<AppState>((set, get) => ({
               movedAny = true;
               return {
                 ...tb,
-                x: Math.max(4, Math.min(targetPage.paper.width - 20, tb.x + dx)),
-                y: Math.max(4, Math.min(targetPage.paper.height - 16, tb.y + dy)),
+                x: isWhiteboard
+                  ? tb.x + dx
+                  : Math.max(4, Math.min(targetPage.paper.width - 20, tb.x + dx)),
+                y: isWhiteboard
+                  ? tb.y + dy
+                  : Math.max(4, Math.min(targetPage.paper.height - 16, tb.y + dy)),
                 updatedAt: now,
               };
             }
@@ -2433,8 +3489,12 @@ export const useAppStore = create<AppState>((set, get) => ({
               movedAny = true;
               return {
                 ...im,
-                x: Math.max(-im.width + 20, Math.min(targetPage.paper.width - 20, im.x + dx)),
-                y: Math.max(-im.height + 20, Math.min(targetPage.paper.height - 20, im.y + dy)),
+                x: isWhiteboard
+                  ? im.x + dx
+                  : Math.max(-im.width + 20, Math.min(targetPage.paper.width - 20, im.x + dx)),
+                y: isWhiteboard
+                  ? im.y + dy
+                  : Math.max(-im.height + 20, Math.min(targetPage.paper.height - 20, im.y + dy)),
                 updatedAt: now,
               };
             }
@@ -2507,6 +3567,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     const prevImages = targetPage.images ?? [];
     const now = Date.now();
     const maxZ = prevImages.reduce((m, im) => Math.max(m, im.zIndex), 0);
+    const isWhiteboard = activeNotebook.mode === 'whiteboard';
 
     const remappedClones = remapGroupIdsForClones(
       prevStrokes
@@ -2517,8 +3578,8 @@ export const useAppStore = create<AppState>((set, get) => ({
         .map((tb) => ({
           ...tb,
           id: createId(),
-          x: Math.min(targetPage.paper.width - 40, tb.x + 16),
-          y: Math.min(targetPage.paper.height - 24, tb.y + 16),
+          x: isWhiteboard ? tb.x + 16 : Math.min(targetPage.paper.width - 40, tb.x + 16),
+          y: isWhiteboard ? tb.y + 16 : Math.min(targetPage.paper.height - 24, tb.y + 16),
           createdAt: now,
           updatedAt: now,
         })),
@@ -2528,8 +3589,8 @@ export const useAppStore = create<AppState>((set, get) => ({
           ...im,
           crop: { ...im.crop },
           id: createId(),
-          x: Math.min(targetPage.paper.width - 40, im.x + 16),
-          y: Math.min(targetPage.paper.height - 40, im.y + 16),
+          x: isWhiteboard ? im.x + 16 : Math.min(targetPage.paper.width - 40, im.x + 16),
+          y: isWhiteboard ? im.y + 16 : Math.min(targetPage.paper.height - 40, im.y + 16),
           zIndex: maxZ + idx + 1,
           createdAt: now,
           updatedAt: now,
@@ -2646,14 +3707,19 @@ export const useAppStore = create<AppState>((set, get) => ({
     const prevTextboxes = targetPage.textboxes ?? [];
     const prevImages = targetPage.images ?? [];
     const maxZ = prevImages.reduce((m, im) => Math.max(m, im.zIndex), 0);
+    const isWhiteboard = activeNotebook.mode === 'whiteboard';
 
     const remappedPasted = remapGroupIdsForClones(
       clipboard.strokes.map((s) => cloneStrokeWithNewId(s, offset, offset)),
       clipboard.textboxes.map((tb) => ({
         ...tb,
         id: createId(),
-        x: Math.max(8, Math.min(targetPage.paper.width - 40, tb.x + offset)),
-        y: Math.max(8, Math.min(targetPage.paper.height - 24, tb.y + offset)),
+        x: isWhiteboard
+          ? tb.x + offset
+          : Math.max(8, Math.min(targetPage.paper.width - 40, tb.x + offset)),
+        y: isWhiteboard
+          ? tb.y + offset
+          : Math.max(8, Math.min(targetPage.paper.height - 24, tb.y + offset)),
         createdAt: now,
         updatedAt: now,
       })),
@@ -2661,8 +3727,12 @@ export const useAppStore = create<AppState>((set, get) => ({
         ...im,
         crop: { ...im.crop },
         id: createId(),
-        x: Math.max(8, Math.min(targetPage.paper.width - 40, im.x + offset)),
-        y: Math.max(8, Math.min(targetPage.paper.height - 40, im.y + offset)),
+        x: isWhiteboard
+          ? im.x + offset
+          : Math.max(8, Math.min(targetPage.paper.width - 40, im.x + offset)),
+        y: isWhiteboard
+          ? im.y + offset
+          : Math.max(8, Math.min(targetPage.paper.height - 40, im.y + offset)),
         zIndex: maxZ + idx + 1,
         createdAt: now,
         updatedAt: now,
@@ -2857,6 +3927,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       unlockedMasterKey,
       (status) => set({ saveStatus: status }),
     );
+    playUiSound('delete');
   },
 
   copyTextboxStyle: (pageId, textboxId) => {
@@ -3147,9 +4218,11 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   commitMultiElementMove: (pageId, sel, dx, dy) => {
     if (Math.abs(dx) < 0.25 && Math.abs(dy) < 0.25) return;
-    const targetPage = get().pages.find((p) => p.id === pageId);
+    const { pages, activeNotebook } = get();
+    const targetPage = pages.find((p) => p.id === pageId);
     if (!targetPage) return;
 
+    const isWhiteboard = activeNotebook?.mode === 'whiteboard';
     const strokeSet = new Set(sel.strokeIds);
     const tbSet = new Set(sel.textboxIds);
     const imgSet = new Set(sel.imageIds);
@@ -3171,8 +4244,12 @@ export const useAppStore = create<AppState>((set, get) => ({
         movedAny = true;
         return {
           ...tb,
-          x: Math.max(4, Math.min(targetPage.paper.width - 20, tb.x + dx)),
-          y: Math.max(4, Math.min(targetPage.paper.height - 16, tb.y + dy)),
+          x: isWhiteboard
+            ? tb.x + dx
+            : Math.max(4, Math.min(targetPage.paper.width - 20, tb.x + dx)),
+          y: isWhiteboard
+            ? tb.y + dy
+            : Math.max(4, Math.min(targetPage.paper.height - 16, tb.y + dy)),
           updatedAt: now,
         };
       }
@@ -3183,8 +4260,12 @@ export const useAppStore = create<AppState>((set, get) => ({
         movedAny = true;
         return {
           ...im,
-          x: Math.max(-im.width + 20, Math.min(targetPage.paper.width - 20, im.x + dx)),
-          y: Math.max(-im.height + 20, Math.min(targetPage.paper.height - 20, im.y + dy)),
+          x: isWhiteboard
+            ? im.x + dx
+            : Math.max(-im.width + 20, Math.min(targetPage.paper.width - 20, im.x + dx)),
+          y: isWhiteboard
+            ? im.y + dy
+            : Math.max(-im.height + 20, Math.min(targetPage.paper.height - 20, im.y + dy)),
           updatedAt: now,
         };
       }
@@ -3274,9 +4355,11 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   commitAltMultiMove: (pageId, prev, sel, dx, dy) => {
-    const targetPage = get().pages.find((p) => p.id === pageId);
+    const { pages, activeNotebook } = get();
+    const targetPage = pages.find((p) => p.id === pageId);
     if (!targetPage) return;
 
+    const isWhiteboard = activeNotebook?.mode === 'whiteboard';
     const strokeSet = new Set(sel.strokeIds);
     const tbSet = new Set(sel.textboxIds);
     const imgSet = new Set(sel.imageIds);
@@ -3289,8 +4372,12 @@ export const useAppStore = create<AppState>((set, get) => ({
       tbSet.has(tb.id)
         ? {
             ...tb,
-            x: Math.max(4, Math.min(targetPage.paper.width - 20, tb.x + dx)),
-            y: Math.max(4, Math.min(targetPage.paper.height - 16, tb.y + dy)),
+            x: isWhiteboard
+              ? tb.x + dx
+              : Math.max(4, Math.min(targetPage.paper.width - 20, tb.x + dx)),
+            y: isWhiteboard
+              ? tb.y + dy
+              : Math.max(4, Math.min(targetPage.paper.height - 16, tb.y + dy)),
             updatedAt: now,
           }
         : tb,
@@ -3299,8 +4386,12 @@ export const useAppStore = create<AppState>((set, get) => ({
       imgSet.has(im.id)
         ? {
             ...im,
-            x: Math.max(-im.width + 20, Math.min(targetPage.paper.width - 20, im.x + dx)),
-            y: Math.max(-im.height + 20, Math.min(targetPage.paper.height - 20, im.y + dy)),
+            x: isWhiteboard
+              ? im.x + dx
+              : Math.max(-im.width + 20, Math.min(targetPage.paper.width - 20, im.x + dx)),
+            y: isWhiteboard
+              ? im.y + dy
+              : Math.max(-im.height + 20, Math.min(targetPage.paper.height - 20, im.y + dy)),
             updatedAt: now,
           }
         : im,
@@ -3357,6 +4448,269 @@ export const useAppStore = create<AppState>((set, get) => ({
       unlockedMasterKey,
       (status) => set({ saveStatus: status }),
     );
+  },
+
+  deleteElementsOffPage: (pageId, sel) => {
+    const { activeNotebook, pages } = get();
+    const targetPage = pages.find((p) => p.id === pageId);
+    if (!targetPage || !activeNotebook) return;
+
+    const strokeSet = new Set(sel.strokeIds);
+    const tbSet = new Set(sel.textboxIds);
+    const imgSet = new Set(sel.imageIds);
+    if (strokeSet.size === 0 && tbSet.size === 0 && imgSet.size === 0) return;
+
+    const prevStrokes = targetPage.strokes;
+    const prevTextboxes = targetPage.textboxes ?? [];
+    const prevImages = targetPage.images ?? [];
+    const nextStrokes = prevStrokes.filter((s) => !strokeSet.has(s.id) || s.locked);
+    const nextTextboxes = prevTextboxes.filter((tb) => !tbSet.has(tb.id) || tb.locked);
+    const nextImages = prevImages.filter((im) => !imgSet.has(im.id) || im.locked);
+
+    const removedCount =
+      (prevStrokes.length - nextStrokes.length) +
+      (prevTextboxes.length - nextTextboxes.length) +
+      (prevImages.length - nextImages.length);
+    if (removedCount === 0) return;
+
+    applyPageContentMutation(
+      get,
+      set,
+      pageId,
+      { strokes: prevStrokes, textboxes: prevTextboxes, images: prevImages },
+      { strokes: nextStrokes, textboxes: nextTextboxes, images: nextImages },
+      {
+        lassoSelection: null,
+        isDraggingLasso: false,
+        activeTextboxId: null,
+        selectedTextboxId: null,
+        selectedTextboxIds: [],
+        textboxSessionBaseline: null,
+        selectedImageIds: [],
+        croppingImageId: null,
+      },
+    );
+
+    get().showEditorToast(
+      {
+        message:
+          removedCount > 1
+            ? `Deleted ${removedCount} off-page items · Ctrl+Z to undo`
+            : 'Deleted off-page item · Ctrl+Z to undo',
+        tone: 'navy',
+      },
+      2600,
+    );
+  },
+
+  revertAltCloneSnapshot: (pageId, prev) => {
+    const { activeNotebook, pages, unlockedMasterKey } = get();
+    const targetPage = pages.find((p) => p.id === pageId);
+    if (!targetPage || !activeNotebook) return;
+
+    const nextStrokes = prev.strokes ?? targetPage.strokes;
+    const nextTextboxes = prev.textboxes ?? (targetPage.textboxes ?? []);
+    const nextImages = prev.images ?? (targetPage.images ?? []);
+    const now = Date.now();
+
+    set({
+      pages: pages.map((p) =>
+        p.id === pageId
+          ? {
+              ...p,
+              strokes: nextStrokes,
+              textboxes: nextTextboxes,
+              images: nextImages,
+              updatedAt: now,
+            }
+          : p,
+      ),
+      lassoSelection: null,
+      isDraggingLasso: false,
+      activeTextboxId: null,
+      selectedTextboxId: null,
+      selectedTextboxIds: [],
+      textboxSessionBaseline: null,
+      selectedImageIds: [],
+      croppingImageId: null,
+    });
+
+    persistPageContentChange(
+      activeNotebook,
+      pageId,
+      targetPage.paper,
+      nextStrokes,
+      nextTextboxes,
+      nextImages,
+      unlockedMasterKey,
+      (status) => set({ saveStatus: status }),
+    );
+  },
+
+  commitAiHandwritingReplacement: (pageId, rawStrokeIds, replacementStrokes, opts) => {
+    const { activeNotebook, pages, splitPane } = get();
+    const inPrimary = pages.some((p) => p.id === pageId);
+    const targetPage = inPrimary
+      ? pages.find((p) => p.id === pageId)
+      : splitPane?.pages.find((p) => p.id === pageId);
+    const targetNotebook = inPrimary ? activeNotebook : splitPane?.notebook ?? null;
+    if (
+      !targetPage ||
+      !targetNotebook ||
+      rawStrokeIds.length === 0 ||
+      replacementStrokes.length === 0
+    ) {
+      return null;
+    }
+
+    const rawSet = new Set(rawStrokeIds);
+    const prevStrokes = targetPage.strokes;
+    if (opts?.requireAllPresent) {
+      const existingIds = new Set(prevStrokes.map((s) => s.id));
+      for (const id of rawStrokeIds) {
+        if (!existingIds.has(id)) return null;
+      }
+    }
+
+    const remainingStrokes = prevStrokes.filter((s) => !rawSet.has(s.id) || s.locked);
+    if (remainingStrokes.length === prevStrokes.length) return null;
+
+    const prevTextboxes = targetPage.textboxes ?? [];
+    const prevImages = targetPage.images ?? [];
+    let finalStrokes = replacementStrokes;
+
+    if (opts?.alignWithAdjacentLine) {
+      const newBounds = getCombinedBounds(replacementStrokes);
+      if (newBounds) {
+        const newCenterY = (newBounds.minY + newBounds.maxY) / 2;
+        const groups = new Map<string, Stroke[]>();
+        for (const s of remainingStrokes) {
+          if (s.locked || !s.isTidied || s.tool !== 'pen') continue;
+          const key = s.groupId ?? s.id;
+          const list = groups.get(key);
+          if (list) list.push(s);
+          else groups.set(key, [s]);
+        }
+
+        const dominantColor = replacementStrokes[0]?.color;
+        let leftNeighbor: { bounds: BoundingBox; dist: number } | null = null;
+
+        for (const groupStrokes of groups.values()) {
+          if (dominantColor && groupStrokes[0]?.color !== dominantColor) continue;
+          const gBounds = getCombinedBounds(groupStrokes);
+          if (!gBounds) continue;
+          const gHeight = Math.max(16, gBounds.maxY - gBounds.minY);
+          const gCenterY = (gBounds.minY + gBounds.maxY) / 2;
+          if (Math.abs(gCenterY - newCenterY) > Math.max(24, gHeight * 0.75)) continue;
+
+          const maxGap = Math.max(85, gHeight * 2.5);
+          if (newBounds.minX >= gBounds.maxX - 24 && newBounds.minX <= gBounds.maxX + maxGap) {
+            const dist = Math.abs(newBounds.minX - gBounds.maxX);
+            if (!leftNeighbor || dist < leftNeighbor.dist) {
+              leftNeighbor = { bounds: gBounds, dist };
+            }
+          }
+        }
+
+        if (leftNeighbor) {
+          const gBounds = leftNeighbor.bounds;
+          const gHeight = Math.max(16, gBounds.maxY - gBounds.minY);
+          const rawDy = Number((gBounds.maxY - newBounds.maxY).toFixed(2));
+          const dy = Math.abs(rawDy) <= Math.max(16, gHeight * 0.35) ? rawDy : 0;
+          const minGap = Math.max(10, gHeight * 0.35);
+          const dx =
+            newBounds.minX < gBounds.maxX + minGap
+              ? Number((gBounds.maxX + minGap - newBounds.minX).toFixed(2))
+              : 0;
+          if (dx !== 0 || dy !== 0) {
+            finalStrokes = replacementStrokes.map((s) => translateStroke(s, dx, dy));
+          }
+        }
+      }
+    }
+
+    const nextStrokes = [...remainingStrokes, ...finalStrokes];
+
+    const showToast = opts?.toastMessage !== null;
+    const toastText = opts?.toastMessage ?? 'Handwriting cleaned by AI';
+
+    if (showToast && typeof window !== 'undefined') {
+      if (tidyToastTimer !== null) window.clearTimeout(tidyToastTimer);
+      tidyToastTimer = window.setTimeout(() => {
+        set({ handwritingTidyToast: null });
+        tidyToastTimer = null;
+      }, 2200);
+    }
+
+    const extraPatch: Partial<AppState> = {
+      ...(showToast ? { handwritingTidyToast: toastText } : {}),
+      ...(opts?.selectResult
+        ? {
+            lassoSelection: { pageId, strokeIds: finalStrokes.map((s) => s.id) },
+            isDraggingLasso: false,
+            activeTextboxId: null,
+            selectedTextboxId: null,
+            selectedTextboxIds: [],
+            selectedImageIds: [],
+            croppingImageId: null,
+          }
+        : {}),
+    };
+
+    if (inPrimary) {
+      applyPageContentMutation(
+        get,
+        set,
+        pageId,
+        { strokes: prevStrokes, textboxes: prevTextboxes, images: prevImages },
+        { strokes: nextStrokes, textboxes: prevTextboxes, images: prevImages },
+        extraPatch,
+      );
+    } else if (splitPane) {
+      const cmd: HistoryCommand = {
+        type: 'page-content',
+        pageId,
+        prevStrokes,
+        nextStrokes,
+        prevTextboxes,
+        nextTextboxes: prevTextboxes,
+        prevImages,
+        nextImages: prevImages,
+      };
+      const now = Date.now();
+      set({
+        splitPane: {
+          ...splitPane,
+          pages: splitPane.pages.map((p) =>
+            p.id === pageId
+              ? {
+                  ...p,
+                  strokes: nextStrokes,
+                  textboxes: prevTextboxes,
+                  images: prevImages,
+                  updatedAt: now,
+                }
+              : p,
+          ),
+          undoStack: [...splitPane.undoStack.slice(-(MAX_HISTORY - 1)), cmd],
+          redoStack: [],
+        },
+        ...extraPatch,
+      });
+
+      persistPageContentChange(
+        splitPane.notebook,
+        pageId,
+        targetPage.paper,
+        nextStrokes,
+        prevTextboxes,
+        prevImages,
+        splitPane.unlockedMasterKey,
+        (status) => set({ saveStatus: status }),
+      );
+    }
+
+    return finalStrokes;
   },
 
   undo: () => {
@@ -3431,6 +4785,8 @@ export const useAppStore = create<AppState>((set, get) => ({
           updatedPage.strokes,
           updatedPage.textboxes ?? [],
           updatedPage.images ?? [],
+          undefined,
+          activeNotebook.mode === 'whiteboard',
         );
       }
     }
@@ -3508,15 +4864,27 @@ export const useAppStore = create<AppState>((set, get) => ({
           updatedPage.strokes,
           updatedPage.textboxes ?? [],
           updatedPage.images ?? [],
+          undefined,
+          activeNotebook.mode === 'whiteboard',
         );
       }
     }
   },
 
   savePresetTemplate: async (name, paper) => {
-    const thumbnailDataUrl = generatePageThumbnail(paper, []);
+    const isWhiteboard = get().activeNotebook?.mode === 'whiteboard';
+    const thumbnailDataUrl = generatePageThumbnail(
+      paper,
+      [],
+      240,
+      [],
+      [],
+      null,
+      isWhiteboard,
+    );
     const created = await repository.saveCustomTemplate({
       name,
+      mode: isWhiteboard ? 'whiteboard' : 'notebook',
       category: 'paper-preset',
       paper,
       strokes: [],
@@ -3531,6 +4899,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   saveCurrentPageAsTemplate: async (pageId, name) => {
     const page = get().pages.find((p) => p.id === pageId);
     if (!page) return null;
+    const isWhiteboard = get().activeNotebook?.mode === 'whiteboard';
     const textboxes = page.textboxes ?? [];
     const images = page.images ?? [];
     const thumbnailDataUrl = generatePageThumbnail(
@@ -3539,9 +4908,12 @@ export const useAppStore = create<AppState>((set, get) => ({
       240,
       textboxes,
       images,
+      null,
+      isWhiteboard,
     );
     const created = await repository.saveCustomTemplate({
       name,
+      mode: isWhiteboard ? 'whiteboard' : 'notebook',
       category: 'page-template',
       paper: page.paper,
       strokes: page.strokes,

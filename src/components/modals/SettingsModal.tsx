@@ -1,20 +1,18 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertCircle,
-  Archive,
   Check,
-  Contrast,
   Copy,
   Database,
   Download,
   ExternalLink,
   Eye,
   EyeOff,
-  KeyRound,
+  FolderOpen,
+  Globe,
   Layout,
   Loader2,
   Lock,
-  Moon,
   Palette,
   RefreshCw,
   RotateCcw,
@@ -24,22 +22,41 @@ import {
   Sparkles,
   Trash2,
   Upload,
+  Volume2,
   X,
+  ZoomIn,
 } from 'lucide-react';
-import { testGeminiConnection } from '../../ai/geminiClient';
+import { DebouncedColorInput } from '../common/DebouncedColorInput';
+import { DraggableRangeSlider } from '../common/DraggableRangeSlider';
+import { MorphingPill, useMorphingIndicator } from '../common/MorphingIndicator';
+import { PaperShaderBackdrop } from '../common/PaperShaderBackdrop';
+import { testAiConnection } from '../../ai/aiClient';
 import { type LocalStorageSummary, repository } from '../../db/repository';
 import { useAppStore } from '../../store/useAppStore';
+import { useUpdaterStore } from '../../store/useUpdaterStore';
 import type { PaperPattern } from '../../types/notes';
 import { triggerBlobDownload } from '../../utils/exportNotebook';
 import {
+  AI_PROVIDER_META,
+  AI_PROVIDER_ORDER,
+  type AiProviderId,
   DESK_BACKDROP_PRESETS,
   type DeskBackdropPresetId,
   type DockPosition,
-  GEMINI_API_STUDIO_URL,
   type GeminiModelPresetId,
-  getGeminiApiKey,
-  resolveActiveGeminiModel,
+  isLocalhostUrl,
+  resolveActiveAiConfig,
 } from '../../utils/settings';
+import {
+  applyInterfaceFontToRuntime,
+  DEFAULT_INTERFACE_FONT_ID,
+  ensureCuratedPreviewFontsLoaded,
+  getActiveInterfaceFontLabel,
+  INTERFACE_FONT_PRESETS,
+  type InterfaceFontCategory,
+  sanitizeCustomFontName,
+} from '../../utils/uiFonts';
+import { DEFAULT_UI_SCALE } from '../../utils/uiZoom';
 import {
   buildRecoveryKeyFileText,
   changeVaultPassword,
@@ -49,7 +66,7 @@ import {
 } from '../../utils/vaultCrypto';
 import { VaultSetupModal } from './VaultSetupModal';
 
-export type SettingsTabId = 'general' | 'appearance' | 'ai' | 'vault' | 'data';
+export type SettingsTabId = 'general' | 'appearance' | 'ai' | 'vault' | 'data' | 'updates';
 
 interface SettingsModalProps {
   open: boolean;
@@ -72,13 +89,13 @@ const SETTINGS_TABS: Array<{
   {
     id: 'appearance',
     label: 'Appearance',
-    desc: 'Backdrop & dark view',
+    desc: 'Backdrop & UI scale',
     icon: <Palette className="h-4 w-4" />,
   },
   {
     id: 'ai',
-    label: 'AI & Gemini',
-    desc: 'BYOK key & model',
+    label: 'AI & Providers',
+    desc: '5-provider BYOK keys',
     icon: <Sparkles className="h-4 w-4" />,
   },
   {
@@ -92,6 +109,12 @@ const SETTINGS_TABS: Array<{
     label: 'Backup & Data',
     desc: 'Storage & exports',
     icon: <Database className="h-4 w-4" />,
+  },
+  {
+    id: 'updates',
+    label: 'App Updates',
+    desc: 'Auto update & version',
+    icon: <RefreshCw className="h-4 w-4" />,
   },
 ];
 
@@ -112,13 +135,19 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const lockAllNotebooksNow = useAppStore((s) => s.lockAllNotebooksNow);
   const handwritingCorrectionEnabled = useAppStore((s) => s.handwritingCorrectionEnabled);
   const setHandwritingCorrectionEnabled = useAppStore((s) => s.setHandwritingCorrectionEnabled);
+  const uiScale = useAppStore((s) => s.uiScale);
+  const setUiScale = useAppStore((s) => s.setUiScale);
   const deskBackdrop = useAppStore((s) => s.deskBackdrop);
   const deskCustomColor = useAppStore((s) => s.deskCustomColor);
   const setDeskBackdrop = useAppStore((s) => s.setDeskBackdrop);
-  const darkPaperView = useAppStore((s) => s.darkPaperView);
-  const setDarkPaperView = useAppStore((s) => s.setDarkPaperView);
-  const highContrastUi = useAppStore((s) => s.highContrastUi);
-  const setHighContrastUi = useAppStore((s) => s.setHighContrastUi);
+  const interfaceFontId = useAppStore((s) => s.interfaceFontId);
+  const interfaceCustomFont = useAppStore((s) => s.interfaceCustomFont);
+  const uploadedFonts = useAppStore((s) => s.uploadedFonts);
+  const setInterfaceFont = useAppStore((s) => s.setInterfaceFont);
+  const importCustomInterfaceFont = useAppStore((s) => s.importCustomInterfaceFont);
+  const deleteCustomInterfaceFont = useAppStore((s) => s.deleteCustomInterfaceFont);
+  const uiSoundsEnabled = useAppStore((s) => s.uiSoundsEnabled);
+  const setUiSoundsEnabled = useAppStore((s) => s.setUiSoundsEnabled);
   const dockPosition = useAppStore((s) => s.dockPosition);
   const setDockPosition = useAppStore((s) => s.setDockPosition);
   const heroHeadline = useAppStore((s) => s.heroHeadline);
@@ -132,14 +161,30 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const resetPenSlots = useAppStore((s) => s.resetPenSlots);
   const exportWorkspaceBackup = useAppStore((s) => s.exportWorkspaceBackup);
   const importWorkspaceBackup = useAppStore((s) => s.importWorkspaceBackup);
-  const storedGeminiApiKey = useAppStore((s) => s.geminiApiKey);
-  const setGeminiApiKeyStore = useAppStore((s) => s.setGeminiApiKey);
-  const clearStoredGeminiApiKey = useAppStore((s) => s.clearStoredGeminiApiKey);
+  const activeAiProvider = useAppStore((s) => s.activeAiProvider);
+  const setActiveAiProvider = useAppStore((s) => s.setActiveAiProvider);
+  const aiProviderKeys = useAppStore((s) => s.aiProviderKeys);
+  const setAiProviderKey = useAppStore((s) => s.setAiProviderKey);
+  const clearAiProviderKey = useAppStore((s) => s.clearAiProviderKey);
+  const aiProviderModels = useAppStore((s) => s.aiProviderModels);
+  const setAiProviderModel = useAppStore((s) => s.setAiProviderModel);
+  const aiCustomBaseUrl = useAppStore((s) => s.aiCustomBaseUrl);
+  const setAiCustomBaseUrl = useAppStore((s) => s.setAiCustomBaseUrl);
   const geminiModelPreset = useAppStore((s) => s.geminiModelPreset);
   const geminiCustomModelId = useAppStore((s) => s.geminiCustomModelId);
   const setGeminiModelConfig = useAppStore((s) => s.setGeminiModelConfig);
   const blockAiOnVaultLocked = useAppStore((s) => s.blockAiOnVaultLocked);
   const setBlockAiOnVaultLocked = useAppStore((s) => s.setBlockAiOnVaultLocked);
+  const updateStatus = useUpdaterStore((s) => s.status);
+  const updateRestarting = useUpdaterStore((s) => s.restarting);
+  const updateActionError = useUpdaterStore((s) => s.actionError);
+  const initUpdater = useUpdaterStore((s) => s.initUpdater);
+  const checkForUpdates = useUpdaterStore((s) => s.checkForUpdates);
+  const restartAndInstall = useUpdaterStore((s) => s.restartAndInstall);
+  const setLocalUpdateConfig = useUpdaterStore((s) => s.setLocalConfig);
+  const pickLocalUpdateDir = useUpdaterStore((s) => s.pickLocalDir);
+  const hasDesktopUpdater =
+    typeof window !== 'undefined' && Boolean(window.folioDesktop?.updater);
 
   const [activeTab, setActiveTab] = useState<SettingsTabId>(initialTab);
   const [apiKey, setApiKey] = useState('');
@@ -149,6 +194,18 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [testingKey, setTestingKey] = useState(false);
   const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null);
   const [headlineDraft, setHeadlineDraft] = useState(heroHeadline);
+  const [uiScaleDraftPct, setUiScaleDraftPct] = useState<number | null>(null);
+
+  // Interface Font picker state
+  const [fontSearch, setFontSearch] = useState('');
+  const [fontCategory, setFontCategory] = useState<
+    'all' | InterfaceFontCategory | 'system' | 'imported'
+  >('all');
+  const [systemFonts, setSystemFonts] = useState<string[]>([]);
+  const [systemFontsLoaded, setSystemFontsLoaded] = useState(false);
+  const [fontStatusMessage, setFontStatusMessage] = useState<string | null>(null);
+  const [fontError, setFontError] = useState<string | null>(null);
+  const fontFileInputRef = useRef<HTMLInputElement | null>(null);
 
   // Vault state
   const [vaultConfigured, setVaultConfigured] = useState(false);
@@ -172,14 +229,40 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [workspaceError, setWorkspaceError] = useState<string | null>(null);
   const [storageSummary, setStorageSummary] = useState<LocalStorageSummary | null>(null);
 
+  const navTrackRef = useRef<HTMLElement | null>(null);
+  const defaultToolTrackRef = useRef<HTMLDivElement | null>(null);
+  const defaultZoomTrackRef = useRef<HTMLDivElement | null>(null);
+  const dockPosTrackRef = useRef<HTMLDivElement | null>(null);
+
+  const navIndicator = useMorphingIndicator(navTrackRef, open ? activeTab : null, [open]);
+  const defaultToolIndicator = useMorphingIndicator(
+    defaultToolTrackRef,
+    open && activeTab === 'general' ? defaultTool : null,
+    [open, activeTab],
+  );
+  const defaultZoomIndicator = useMorphingIndicator(
+    defaultZoomTrackRef,
+    open && activeTab === 'general' ? defaultZoomMode : null,
+    [open, activeTab],
+  );
+  const dockPosIndicator = useMorphingIndicator(
+    dockPosTrackRef,
+    open && activeTab === 'general' ? dockPosition : null,
+    [open, activeTab],
+  );
+
   useEffect(() => {
     if (!open) return;
     setActiveTab(initialTab);
-    setApiKey(storedGeminiApiKey || getGeminiApiKey());
+    setApiKey(aiProviderKeys[activeAiProvider] ?? '');
     setCustomModelDraft(geminiCustomModelId);
     setTestingKey(false);
     setTestResult(null);
     setHeadlineDraft(heroHeadline);
+    setUiScaleDraftPct(null);
+    setFontSearch('');
+    setFontStatusMessage(null);
+    setFontError(null);
     setShowKey(false);
     setStatusMessage(null);
     setVaultConfigured(hasVaultSetup());
@@ -204,6 +287,41 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       cancelled = true;
     };
   }, [open, initialTab]);
+
+  useEffect(() => {
+    if (!open || activeTab !== 'appearance') return;
+    ensureCuratedPreviewFontsLoaded();
+    if (systemFontsLoaded) return;
+    let cancelled = false;
+    const loader = window.folioDesktop?.fonts?.listSystemFonts;
+    if (typeof loader === 'function') {
+      void loader()
+        .then((fonts) => {
+          if (!cancelled && Array.isArray(fonts)) {
+            setSystemFonts(fonts);
+            setSystemFontsLoaded(true);
+          }
+        })
+        .catch(() => {
+          if (!cancelled) setSystemFontsLoaded(true);
+        });
+    } else {
+      setSystemFontsLoaded(true);
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, [open, activeTab, systemFontsLoaded]);
+
+  useEffect(() => {
+    if (!open || !hasDesktopUpdater || updateStatus) return;
+    return initUpdater();
+  }, [open, hasDesktopUpdater, updateStatus, initUpdater]);
+
+  useEffect(() => {
+    if (!open) return;
+    setApiKey(aiProviderKeys[activeAiProvider] ?? '');
+  }, [activeAiProvider, aiProviderKeys, open]);
 
   useEffect(() => {
     if (!open) return;
@@ -240,7 +358,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       const skipped = backup.skippedLockedTitles ?? [];
       const skippedNote =
         skipped.length > 0
-          ? ` Skipped ${skipped.length} Vault-locked notebook(s): ${skipped.join(', ')}.`
+          ? ` Skipped ${skipped.length} Vault locked notebook(s): ${skipped.join(', ')}.`
           : '';
       setWorkspaceMessage(
         `Exported ${backup.folders.length} folder(s), ${backup.notebooks.length} notebook(s), and ${backup.templates.length} custom template(s).${skippedNote}`,
@@ -273,48 +391,69 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     }
   };
 
+  const handleSelectProvider = (provider: AiProviderId) => {
+    setActiveAiProvider(provider);
+    setApiKey(aiProviderKeys[provider] ?? '');
+    setStatusMessage(null);
+    setTestResult(null);
+  };
+
   const handleSave = (e: React.FormEvent) => {
     e.preventDefault();
-    setGeminiApiKeyStore(apiKey);
-    if (geminiModelPreset === 'custom') {
+    setAiProviderKey(activeAiProvider, apiKey);
+    if (activeAiProvider === 'gemini' && geminiModelPreset === 'custom') {
       setGeminiModelConfig('custom', customModelDraft);
     }
     setTestResult(null);
+    const meta = AI_PROVIDER_META[activeAiProvider];
     setStatusMessage(
       apiKey.trim()
-        ? 'API key saved locally in localStorage.'
-        : 'Empty key cleared from localStorage.',
+        ? `${meta.label} API key saved locally in localStorage.`
+        : `${meta.label} key cleared from localStorage.`,
     );
   };
 
   const handleClear = () => {
-    clearStoredGeminiApiKey();
+    clearAiProviderKey(activeAiProvider);
     setApiKey('');
     setTestResult(null);
-    setStatusMessage('API key removed from localStorage.');
+    setStatusMessage(`${AI_PROVIDER_META[activeAiProvider].label} key removed from localStorage.`);
   };
 
   const handleTestKey = async () => {
-    const keyToTest = apiKey.trim() || storedGeminiApiKey || getGeminiApiKey();
-    if (!keyToTest) {
-      setTestResult({
-        ok: false,
-        message: 'Enter or save a Gemini API key first before testing.',
-      });
-      return;
-    }
-    const model = resolveActiveGeminiModel({
+    const resolved = resolveActiveAiConfig({
+      activeAiProvider,
+      aiProviderKeys: { ...aiProviderKeys, [activeAiProvider]: apiKey.trim() || aiProviderKeys[activeAiProvider] || '' },
+      aiProviderModels,
+      aiCustomBaseUrl,
       geminiModelPreset,
       geminiCustomModelId:
         geminiModelPreset === 'custom' ? customModelDraft : geminiCustomModelId,
     });
+    const meta = AI_PROVIDER_META[activeAiProvider];
+    const keyRequired =
+      activeAiProvider !== 'custom' || !isLocalhostUrl(resolved.baseUrl ?? '');
+
+    if (keyRequired && !resolved.apiKey) {
+      setTestResult({
+        ok: false,
+        message: `Enter or save a ${meta.label} API key first before testing.`,
+      });
+      return;
+    }
+
     setTestingKey(true);
     setTestResult(null);
     try {
-      const res = await testGeminiConnection({ apiKey: keyToTest, model });
+      const res = await testAiConnection({
+        provider: resolved.provider,
+        apiKey: resolved.apiKey,
+        model: resolved.model,
+        baseUrl: resolved.baseUrl,
+      });
       setTestResult(
         res.ok
-          ? { ok: true, message: `Connected! Model "${res.model}" responded cleanly.` }
+          ? { ok: true, message: `Connected to ${meta.label}! Model "${res.model}" responded cleanly.` }
           : { ok: false, message: res.message },
       );
     } finally {
@@ -407,10 +546,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
   const strengthColors = [
     'bg-[#072D59]/12',
-    'bg-[#F95573]',
-    'bg-amber-500',
-    'bg-[#0A3D7A]',
-    'bg-emerald-600',
+    'bg-[var(--state-danger)]',
+    'bg-[var(--state-warning)]',
+    'bg-[#38BDF8]',
+    'bg-[var(--state-success)]',
   ];
 
   const renderToggleSwitch = (props: {
@@ -426,13 +565,15 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       aria-checked={props.checked}
       aria-label={props.label}
       onClick={props.onToggle}
-      className={`relative h-6 w-11 shrink-0 rounded-full transition-colors duration-150 ${
-        props.checked ? 'bg-[#072D59]' : 'bg-[#072D59]/22'
+      className={`folio-press inline-flex h-6 w-11 shrink-0 items-center rounded-full p-0.5 transition-colors duration-150 ${
+        props.checked
+          ? 'folio-glass-toggle-on'
+          : 'bg-[var(--navy-900)]/14 ring-1 ring-inset ring-[var(--border-subtle)]'
       }`}
     >
       <span
-        className={`block h-5 w-5 translate-y-0.5 rounded-full bg-white shadow transition-transform duration-150 ${
-          props.checked ? 'translate-x-5.5' : 'translate-x-0.5'
+        className={`pointer-events-none block h-5 w-5 rounded-full bg-white shadow ring-1 ring-[var(--navy-900)]/12 transition-transform duration-150 ${
+          props.checked ? 'translate-x-5' : 'translate-x-0'
         }`}
       />
     </button>
@@ -449,29 +590,24 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           aria-modal="true"
           aria-labelledby="settings-modal-title"
           data-testid="settings-modal"
-          className="folio-modal-card flex max-h-[88vh] w-full max-w-[740px] flex-col overflow-hidden rounded-2xl text-[#072D59] sm:h-[580px]"
+          className="folio-modal-card flex max-h-[88vh] w-full max-w-[740px] flex-col overflow-hidden rounded-2xl text-[var(--navy-900)] sm:h-[580px]"
           onClick={(e) => e.stopPropagation()}
         >
           {/* Modal Header */}
           <div className="folio-modal-header flex shrink-0 items-center justify-between px-5 py-3.5">
-            <div className="flex items-center gap-2.5">
-              <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-[#DBF2FC] text-[#072D59]">
-                <KeyRound className="h-4 w-4" />
-              </div>
-              <div>
-                <h2 id="settings-modal-title" className="text-base font-bold text-[#072D59]">
-                  Preferences
-                </h2>
-                <p className="text-xs text-[#072D59]/65">
-                  Workspace defaults, appearance, Gemini BYOK &amp; local backups
-                </p>
-              </div>
+            <div>
+              <h2 id="settings-modal-title" className="text-base font-bold text-[var(--navy-900)]">
+                Preferences
+              </h2>
+              <p className="text-xs text-[var(--navy-600)]">
+                Workspace defaults, UI scale, multi provider AI &amp; local backups
+              </p>
             </div>
             <button
               type="button"
               aria-label="Close settings"
               onClick={onClose}
-              className="rounded-lg p-1.5 text-[#072D59]/55 transition duration-150 hover:bg-[#DBF2FC]/70 hover:text-[#072D59]"
+              className="folio-press rounded-lg p-1.5 text-[var(--navy-600)] hover:bg-[var(--surface-tint)] hover:text-[var(--navy-900)]"
             >
               <X className="h-4 w-4" />
             </button>
@@ -481,10 +617,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           <div className="flex min-h-0 flex-1 flex-col md:flex-row">
             {/* Sidebar Navigation */}
             <nav
+              ref={navTrackRef}
               role="tablist"
               aria-label="Preferences sections"
-              className="custom-scrollbar flex shrink-0 gap-1 overflow-x-auto border-b border-[#072D59]/10 bg-[#F4F8FB] p-2.5 md:w-52 md:flex-col md:overflow-y-auto md:border-b-0 md:border-r md:p-3"
+              className="custom-scrollbar relative flex shrink-0 gap-1 overflow-x-auto border-b border-[var(--border-subtle)] bg-[var(--surface-canvas)] p-2.5 md:w-52 md:flex-col md:overflow-y-auto md:border-b-0 md:border-r md:p-3"
             >
+              <MorphingPill indicator={navIndicator} className="rounded-xl" />
               {SETTINGS_TABS.map((tab) => {
                 const selected = activeTab === tab.id;
                 return (
@@ -492,29 +630,38 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     key={tab.id}
                     type="button"
                     role="tab"
+                    data-morph-key={tab.id}
                     data-testid={`settings-tab-${tab.id}`}
                     aria-selected={selected}
                     onClick={() => setActiveTab(tab.id)}
-                    className={`flex shrink-0 items-center gap-2.5 rounded-xl px-3 py-2 text-left transition duration-150 md:w-full ${
+                    className={`folio-press relative z-10 flex shrink-0 items-center gap-2.5 rounded-xl px-3 py-2 text-left md:w-full ${
                       selected
-                        ? 'bg-[#072D59] text-white shadow-xs'
-                        : 'text-[#072D59]/75 hover:bg-[#DBF2FC]/65 hover:text-[#072D59]'
+                        ? navIndicator.ready
+                          ? 'bg-transparent text-white'
+                          : 'folio-glass-active'
+                        : 'text-[var(--navy-600)] hover:bg-[var(--surface-tint)] hover:text-[var(--navy-900)]'
                     }`}
                   >
                     <span
                       className={`shrink-0 ${
-                        selected ? 'text-[#FD6E88]' : 'text-[#072D59]/70'
+                        selected ? 'text-[var(--crimson-500)]' : 'text-[var(--navy-600)]'
                       }`}
                     >
                       {tab.icon}
                     </span>
-                    <span className="min-w-0">
-                      <span className="block truncate text-xs font-bold leading-tight">
-                        {tab.label}
+                    <span className="min-w-0 flex-1">
+                      <span className="flex items-center gap-1.5 text-xs font-bold leading-tight">
+                        <span className="truncate">{tab.label}</span>
+                        {tab.id === 'updates' && updateStatus?.phase === 'ready' && (
+                          <span
+                            data-testid="settings-tab-updates-dot"
+                            className="h-2 w-2 shrink-0 rounded-full bg-[var(--crimson-500)]"
+                          />
+                        )}
                       </span>
                       <span
                         className={`hidden truncate text-[10px] md:block ${
-                          selected ? 'text-[#DBF2FC]/85' : 'text-[#072D59]/55'
+                          selected ? 'text-[#DBF2FC]/90' : 'text-[var(--navy-600)]'
                         }`}
                       >
                         {tab.desc}
@@ -524,12 +671,17 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 );
               })}
 
-              <div className="mt-auto hidden rounded-xl border border-[#072D59]/10 bg-white/80 p-2.5 text-[11px] text-[#072D59]/75 md:block">
-                <div className="flex items-center gap-1.5 font-bold text-[#072D59]">
-                  <ShieldCheck className="h-3.5 w-3.5 text-[#FD6E88]" />
-                  <span>100% Local-First</span>
+              <div className="relative z-10 mt-auto hidden overflow-hidden rounded-xl border border-[var(--border-subtle)] p-2.5 text-[11px] text-[var(--navy-900)] md:block">
+                <PaperShaderBackdrop variant="static-accent" />
+                <div
+                  aria-hidden="true"
+                  className="pointer-events-none absolute inset-0 bg-[var(--surface-elevated)]/82"
+                />
+                <div className="relative z-10 flex items-center gap-1.5 font-bold text-[var(--navy-900)]">
+                  <ShieldCheck className="h-3.5 w-3.5 text-[var(--crimson-500)]" />
+                  <span>100% Local First</span>
                 </div>
-                <p className="mt-1 leading-relaxed text-[10px] text-[#072D59]/65">
+                <p className="relative z-10 mt-1 leading-relaxed text-[10px] text-[var(--navy-600)]">
                   All notebooks, PDFs &amp; ink live locally in IndexedDB with zero cloud accounts.
                 </p>
               </div>
@@ -545,38 +697,48 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               {activeTab === 'general' && (
                 <div data-testid="settings-defaults-section" className="space-y-4">
                   <div>
-                    <h3 className="text-sm font-bold text-[#072D59]">General &amp; Editor</h3>
-                    <p className="text-xs text-[#072D59]/65">
+                    <h3 className="text-sm font-bold text-[var(--navy-900)]">General &amp; Editor</h3>
+                    <p className="text-xs text-[var(--navy-600)]">
                       Configure opening tool behavior, default templates, and workspace dock.
                     </p>
                   </div>
 
                   <div className="grid gap-3 sm:grid-cols-2">
-                    <div className="rounded-xl border border-[#072D59]/10 bg-[#F4F8FB] p-3">
-                      <div className="mb-1.5 text-xs font-bold uppercase tracking-wide text-[#072D59]/65">
+                    <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-canvas)] p-3">
+                      <div className="folio-section-label mb-1.5">
                         Default Tool on Open
                       </div>
-                      <div className="flex rounded-xl border border-[#072D59]/12 bg-white p-0.5">
+                      <div
+                        ref={defaultToolTrackRef}
+                        className="folio-segmented-track flex rounded-xl p-0.5"
+                      >
+                        <MorphingPill indicator={defaultToolIndicator} className="rounded-lg" />
                         <button
                           type="button"
+                          data-morph-key="pen"
                           data-testid="settings-tool-pen"
                           onClick={() => setDefaultTool('pen')}
-                          className={`flex-1 rounded-lg py-1.5 text-xs font-semibold transition duration-150 ${
+                          className={`folio-press relative z-10 flex-1 rounded-lg py-1.5 text-xs font-semibold ${
                             defaultTool === 'pen'
-                              ? 'bg-[#072D59] text-white'
-                              : 'text-[#072D59]/75 hover:bg-[#DBF2FC]/55'
+                              ? defaultToolIndicator.ready
+                                ? 'bg-transparent text-white'
+                                : 'folio-glass-active'
+                              : 'text-[var(--navy-600)] hover:text-[var(--navy-900)]'
                           }`}
                         >
                           Pen
                         </button>
                         <button
                           type="button"
+                          data-morph-key="pan"
                           data-testid="settings-tool-pan"
                           onClick={() => setDefaultTool('pan')}
-                          className={`flex-1 rounded-lg py-1.5 text-xs font-semibold transition duration-150 ${
+                          className={`folio-press relative z-10 flex-1 rounded-lg py-1.5 text-xs font-semibold ${
                             defaultTool === 'pan'
-                              ? 'bg-[#072D59] text-white'
-                              : 'text-[#072D59]/75 hover:bg-[#DBF2FC]/55'
+                              ? defaultToolIndicator.ready
+                                ? 'bg-transparent text-white'
+                                : 'folio-glass-active'
+                              : 'text-[var(--navy-600)] hover:text-[var(--navy-900)]'
                           }`}
                         >
                           Select (V)
@@ -584,31 +746,41 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                       </div>
                     </div>
 
-                    <div className="rounded-xl border border-[#072D59]/10 bg-[#F4F8FB] p-3">
-                      <div className="mb-1.5 text-xs font-bold uppercase tracking-wide text-[#072D59]/65">
+                    <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-canvas)] p-3">
+                      <div className="folio-section-label mb-1.5">
                         Default Zoom on Open
                       </div>
-                      <div className="flex rounded-xl border border-[#072D59]/12 bg-white p-0.5">
+                      <div
+                        ref={defaultZoomTrackRef}
+                        className="folio-segmented-track flex rounded-xl p-0.5"
+                      >
+                        <MorphingPill indicator={defaultZoomIndicator} className="rounded-lg" />
                         <button
                           type="button"
+                          data-morph-key="100"
                           data-testid="settings-zoom-100"
                           onClick={() => setDefaultZoomMode('100')}
-                          className={`flex-1 rounded-lg py-1.5 text-xs font-semibold transition duration-150 ${
+                          className={`folio-press relative z-10 flex-1 rounded-lg py-1.5 text-xs font-semibold ${
                             defaultZoomMode === '100'
-                              ? 'bg-[#072D59] text-white'
-                              : 'text-[#072D59]/75 hover:bg-[#DBF2FC]/55'
+                              ? defaultZoomIndicator.ready
+                                ? 'bg-transparent text-white'
+                                : 'folio-glass-active'
+                              : 'text-[var(--navy-600)] hover:text-[var(--navy-900)]'
                           }`}
                         >
                           100%
                         </button>
                         <button
                           type="button"
+                          data-morph-key="fit-width"
                           data-testid="settings-zoom-fit"
                           onClick={() => setDefaultZoomMode('fit-width')}
-                          className={`flex-1 rounded-lg py-1.5 text-xs font-semibold transition duration-150 ${
+                          className={`folio-press relative z-10 flex-1 rounded-lg py-1.5 text-xs font-semibold ${
                             defaultZoomMode === 'fit-width'
-                              ? 'bg-[#072D59] text-white'
-                              : 'text-[#072D59]/75 hover:bg-[#DBF2FC]/55'
+                              ? defaultZoomIndicator.ready
+                                ? 'bg-transparent text-white'
+                                : 'folio-glass-active'
+                              : 'text-[var(--navy-600)] hover:text-[var(--navy-900)]'
                           }`}
                         >
                           Fit Width
@@ -620,7 +792,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   <div>
                     <label
                       htmlFor="settings-default-paper-select"
-                      className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-[#072D59]/65"
+                      className="folio-section-label mb-1.5 block"
                     >
                       Default Paper Pattern (New Notebooks)
                     </label>
@@ -631,52 +803,31 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                       onChange={(e) => setDefaultPaperPattern(e.target.value as PaperPattern)}
                       className="folio-input w-full rounded-xl px-3 py-2 text-xs font-semibold"
                     >
-                      <option value="ruled">Ruled</option>
-                      <option value="blank">Blank Sheet</option>
-                      <option value="grid">Square Grid</option>
-                      <option value="dotted">Dot Grid</option>
-                      <option value="cornell">Cornell Notes</option>
+                      <option value="ruled">Lined</option>
+                      <option value="blank">Blank</option>
+                      <option value="grid">Graph</option>
+                      <option value="dotted">Dotted</option>
+                      <option value="cornell">Study Notes (Cornell)</option>
                     </select>
                   </div>
 
-                  {/* Handwriting Correction Toggle */}
-                  <div className="flex items-center justify-between gap-3 rounded-xl border border-[#072D59]/10 bg-white p-3.5">
-                    <div className="flex items-start gap-2.5">
-                      <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-[#DBF2FC]/70 text-[#072D59]">
-                        <Sparkles className="h-4 w-4 text-[#FD6E88]" />
-                      </div>
-                      <div>
-                        <div className="text-xs font-bold text-[#072D59]">
-                          Handwriting Correction
-                        </div>
-                        <p className="mt-0.5 text-[11px] text-[#072D59]/65">
-                          Automatically straighten tilted baselines and smooth jitter after a pause
-                          (Ctrl+Z reverts).
-                        </p>
-                      </div>
-                    </div>
-                    {renderToggleSwitch({
-                      testId: 'settings-handwriting-toggle',
-                      label: 'Toggle Handwriting Correction',
-                      checked: handwritingCorrectionEnabled,
-                      onToggle: () =>
-                        setHandwritingCorrectionEnabled(!handwritingCorrectionEnabled),
-                    })}
-                  </div>
-
                   {/* Tool Dock Position */}
-                  <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-[#072D59]/10 bg-[#F4F8FB] p-3.5">
+                  <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-canvas)] p-3.5">
                     <div>
-                      <div className="flex items-center gap-1.5 text-xs font-bold text-[#072D59]">
+                      <div className="flex items-center gap-1.5 text-xs font-bold text-[var(--navy-900)]">
                         <Layout className="h-3.5 w-3.5" />
                         Tool Dock Position
                       </div>
-                      <div className="text-[11px] text-[#072D59]/60">
+                      <div className="text-[11px] text-[var(--navy-600)]">
                         Press Tab in the editor anytime for Zen Mode
                       </div>
                     </div>
 
-                    <div className="flex rounded-xl border border-[#072D59]/12 bg-white p-0.5">
+                    <div
+                      ref={dockPosTrackRef}
+                      className="folio-segmented-track flex rounded-xl p-0.5"
+                    >
+                      <MorphingPill indicator={dockPosIndicator} className="rounded-lg" />
                       {(
                         [
                           { id: 'bottom', label: 'Bottom' },
@@ -687,13 +838,16 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                         <button
                           key={pos.id}
                           type="button"
+                          data-morph-key={pos.id}
                           data-testid={`settings-dock-${pos.id}`}
                           aria-pressed={dockPosition === pos.id}
                           onClick={() => setDockPosition(pos.id)}
-                          className={`rounded-lg px-2.5 py-1 text-xs font-semibold transition duration-150 ${
+                          className={`folio-press relative z-10 rounded-lg px-2.5 py-1 text-xs font-semibold ${
                             dockPosition === pos.id
-                              ? 'bg-[#072D59] text-white'
-                              : 'text-[#072D59]/75 hover:bg-[#DBF2FC]/55'
+                              ? dockPosIndicator.ready
+                                ? 'bg-transparent text-white'
+                                : 'folio-glass-active'
+                              : 'text-[var(--navy-600)] hover:text-[var(--navy-900)]'
                           }`}
                         >
                           {pos.label}
@@ -705,7 +859,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   <div>
                     <label
                       htmlFor="settings-hero-headline-input"
-                      className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-[#072D59]/65"
+                      className="folio-section-label mb-1.5 block"
                     >
                       Home Shelf Headline
                     </label>
@@ -731,15 +885,15 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     />
                   </div>
 
-                  <div className="flex items-center justify-between border-t border-[#072D59]/10 pt-3 text-xs">
-                    <span className="font-medium text-[#072D59]/75">
+                  <div className="flex items-center justify-between border-t border-[var(--border-subtle)] pt-3 text-xs">
+                    <span className="font-medium text-[var(--navy-600)]">
                       Favorite Pen &amp; Highlighter Slots (Keys 1–5)
                     </span>
                     <button
                       type="button"
                       data-testid="settings-reset-pen-slots"
                       onClick={resetPenSlots}
-                      className="inline-flex items-center gap-1 rounded-lg border border-[#072D59]/14 bg-white px-2.5 py-1 text-[11px] font-semibold text-[#072D59] transition duration-150 hover:bg-[#DBF2FC]/65"
+                      className="folio-btn-secondary inline-flex items-center gap-1 rounded-lg px-2.5 py-1 text-[11px] font-semibold"
                     >
                       <RotateCcw className="h-3 w-3" />
                       Reset 5 Slots
@@ -752,14 +906,14 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               {activeTab === 'appearance' && (
                 <div data-testid="settings-appearance-section" className="space-y-4">
                   <div>
-                    <h3 className="text-sm font-bold text-[#072D59]">Appearance</h3>
-                    <p className="text-xs text-[#072D59]/65">
-                      Customize the editor studio desk backdrop, Smart Dark Paper, and UI contrast.
+                    <h3 className="text-sm font-bold text-[var(--navy-900)]">Appearance</h3>
+                    <p className="text-xs text-[var(--navy-600)]">
+                      Customize the editor studio desk backdrop, interface font, scale, and sound.
                     </p>
                   </div>
 
                   <div>
-                    <div className="mb-2 text-xs font-bold uppercase tracking-wide text-[#072D59]/65">
+                    <div className="folio-section-label mb-2">
                       Canvas Desk Backdrop
                     </div>
                     <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
@@ -772,14 +926,14 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                             data-testid={`settings-backdrop-${preset.id}`}
                             aria-pressed={selected}
                             onClick={() => setDeskBackdrop(preset.id as DeskBackdropPresetId)}
-                            className={`flex items-center gap-2 rounded-xl border px-2.5 py-2.5 text-left text-xs font-semibold transition duration-150 ${
+                            className={`folio-press flex items-center gap-2 rounded-xl border px-2.5 py-2.5 text-left text-xs font-semibold ${
                               selected
-                                ? 'border-[#FD6E88] bg-white text-[#072D59] ring-2 ring-[#FD6E88]/25'
-                                : 'border-[#072D59]/12 bg-[#F4F8FB] text-[#072D59]/80 hover:bg-white'
+                                ? 'border-[var(--crimson-500)] bg-[var(--surface-elevated)] text-[var(--navy-900)] ring-2 ring-[var(--crimson-glow)]'
+                                : 'border-[var(--border-subtle)] bg-[var(--surface-canvas)] text-[var(--navy-600)] hover:bg-[var(--surface-elevated)] hover:text-[var(--navy-900)]'
                             }`}
                           >
                             <span
-                              className={`h-4 w-4 shrink-0 rounded-full border border-[#072D59]/20 ${preset.className ?? ''}`}
+                              className={`h-4 w-4 shrink-0 rounded-full border border-[var(--border-strong)] ${preset.className ?? ''}`}
                               style={{ backgroundColor: preset.previewColor }}
                             />
                             <span className="truncate text-[11px]">{preset.label}</span>
@@ -789,289 +943,823 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
                       <label
                         data-testid="settings-backdrop-custom"
-                        className={`flex cursor-pointer items-center gap-2 rounded-xl border px-2.5 py-2.5 text-xs font-semibold transition duration-150 ${
+                        className={`folio-press flex cursor-pointer items-center gap-2 rounded-xl border px-2.5 py-2.5 text-xs font-semibold ${
                           deskBackdrop === 'custom'
-                            ? 'border-[#FD6E88] bg-white text-[#072D59] ring-2 ring-[#FD6E88]/25'
-                            : 'border-[#072D59]/12 bg-[#F4F8FB] text-[#072D59]/80 hover:bg-white'
+                            ? 'border-[var(--crimson-500)] bg-[var(--surface-elevated)] text-[var(--navy-900)] ring-2 ring-[var(--crimson-glow)]'
+                            : 'border-[var(--border-subtle)] bg-[var(--surface-canvas)] text-[var(--navy-600)] hover:bg-[var(--surface-elevated)] hover:text-[var(--navy-900)]'
                         }`}
                       >
-                        <input
-                          type="color"
-                          aria-label="Custom desk backdrop color"
+                        <DebouncedColorInput
                           value={deskCustomColor}
-                          onChange={(e) => setDeskBackdrop('custom', e.target.value)}
+                          ariaLabel="Custom desk backdrop color"
                           className="h-4 w-4 shrink-0 cursor-pointer rounded border-0 bg-transparent p-0"
+                          onPreview={(c) => setDeskBackdrop('custom', c)}
+                          onCommit={(c) => setDeskBackdrop('custom', c)}
                         />
-                        <span className="truncate text-[11px]">Custom ({deskCustomColor})</span>
+                        <span className="folio-mono truncate text-[11px]">
+                          Custom ({deskCustomColor})
+                        </span>
                       </label>
                     </div>
                   </div>
 
-                  {/* Smart Dark Paper View Toggle */}
-                  <div className="flex items-center justify-between gap-3 rounded-xl border border-[#072D59]/10 bg-[#F4F8FB] px-4 py-3">
-                    <div className="flex items-start gap-2.5">
-                      <Moon className="mt-0.5 h-4 w-4 shrink-0 text-[#072D59]" />
-                      <div>
-                        <div className="text-xs font-bold text-[#072D59]">
-                          Smart Dark Paper View
-                        </div>
-                        <p className="mt-0.5 text-[11px] text-[#072D59]/65">
-                          Renders light papers as dark slate (#131B2E) and near-black ink as off-white
-                          (#F1F5F9) on screen without altering saved strokes or photos.
-                        </p>
-                      </div>
-                    </div>
-                    {renderToggleSwitch({
-                      testId: 'settings-dark-paper-toggle',
-                      label: 'Toggle Smart Dark Paper View',
-                      checked: darkPaperView,
-                      onToggle: () => setDarkPaperView(!darkPaperView),
-                    })}
-                  </div>
+                  {/* Interface Font Picker */}
+                  {(() => {
+                    const activeFontLabel = getActiveInterfaceFontLabel(
+                      interfaceFontId,
+                      interfaceCustomFont,
+                      uploadedFonts,
+                    );
+                    const normalizedFontQuery = fontSearch.trim().toLowerCase();
+                    const cleanedCustomCandidate = sanitizeCustomFontName(fontSearch);
+                    const exactPresetMatch = INTERFACE_FONT_PRESETS.some(
+                      (p) => p.name.toLowerCase() === cleanedCustomCandidate.toLowerCase(),
+                    );
+                    const matchingPresets = INTERFACE_FONT_PRESETS.filter((preset) => {
+                      if (
+                        fontCategory !== 'all' &&
+                        fontCategory !== preset.category
+                      ) {
+                        return false;
+                      }
+                      if (!normalizedFontQuery) return true;
+                      return (
+                        preset.name.toLowerCase().includes(normalizedFontQuery) ||
+                        preset.subtitle.toLowerCase().includes(normalizedFontQuery)
+                      );
+                    });
+                    const showUploaded =
+                      fontCategory === 'all' || fontCategory === 'imported';
+                    const matchingUploaded = showUploaded
+                      ? uploadedFonts.filter(
+                          (f) =>
+                            !normalizedFontQuery ||
+                            f.name.toLowerCase().includes(normalizedFontQuery) ||
+                            f.fileName.toLowerCase().includes(normalizedFontQuery),
+                        )
+                      : [];
+                    const showSystemList =
+                      systemFonts.length > 0 &&
+                      (fontCategory === 'system' ||
+                        (fontCategory === 'all' && normalizedFontQuery.length > 0));
+                    const matchingSystem = showSystemList
+                      ? systemFonts
+                          .filter(
+                            (name) =>
+                              !normalizedFontQuery ||
+                              name.toLowerCase().includes(normalizedFontQuery),
+                          )
+                          .slice(0, 60)
+                      : [];
 
-                  {/* Enhanced UI Contrast Toggle */}
-                  <div className="flex items-center justify-between gap-3 rounded-xl border border-[#072D59]/10 bg-[#F4F8FB] px-4 py-3">
-                    <div className="flex items-start gap-2.5">
-                      <Contrast className="mt-0.5 h-4 w-4 shrink-0 text-[#072D59]" />
-                      <div>
-                        <div className="text-xs font-bold text-[#072D59]">
-                          Enhanced UI Border Contrast
+                    const categoryTabs: Array<{
+                      id: 'all' | InterfaceFontCategory | 'system' | 'imported';
+                      label: string;
+                    }> = [
+                      { id: 'all', label: 'All' },
+                      { id: 'sans', label: 'Sans' },
+                      { id: 'serif', label: 'Serif' },
+                      { id: 'accessible', label: 'Accessible' },
+                      { id: 'mono', label: 'Mono & Script' },
+                      ...(systemFonts.length > 0
+                        ? [{ id: 'system' as const, label: `System (${systemFonts.length})` }]
+                        : []),
+                      ...(uploadedFonts.length > 0
+                        ? [{ id: 'imported' as const, label: `Imported (${uploadedFonts.length})` }]
+                        : []),
+                    ];
+
+                    const applyNamedCustomFont = (rawName: string, knownSystem = false) => {
+                      const clean = sanitizeCustomFontName(rawName);
+                      if (!clean) return;
+                      setFontError(null);
+                      setFontStatusMessage(null);
+                      setInterfaceFont('custom', clean);
+                      void applyInterfaceFontToRuntime('custom', clean, {
+                        skipGoogleLookup: knownSystem,
+                      }).then((res) => {
+                        setFontStatusMessage(
+                          res.source === 'google'
+                            ? `Loaded Google Font "${res.label}".`
+                            : `Applied local system font "${res.label}".`,
+                        );
+                      });
+                    };
+
+                    return (
+                      <div
+                        data-testid="settings-interface-font-section"
+                        className="space-y-3 rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-canvas)] p-3.5"
+                      >
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div className="flex items-center gap-2">
+                            <span className="folio-section-label">Interface Font</span>
+                            <span
+                              data-testid="settings-active-font-badge"
+                              className="rounded-full bg-[var(--surface-elevated)] px-2.5 py-0.5 text-[11px] font-bold text-[var(--navy-900)] ring-1 ring-[var(--border-subtle)]"
+                            >
+                              {activeFontLabel}
+                            </span>
+                          </div>
+                          {interfaceFontId !== DEFAULT_INTERFACE_FONT_ID && (
+                            <button
+                              type="button"
+                              data-testid="settings-interface-font-reset"
+                              onClick={() => {
+                                setFontError(null);
+                                setFontStatusMessage(null);
+                                setInterfaceFont(DEFAULT_INTERFACE_FONT_ID, '');
+                                void applyInterfaceFontToRuntime(DEFAULT_INTERFACE_FONT_ID, '');
+                              }}
+                              className="folio-btn-secondary rounded-lg px-2 py-0.5 text-[11px] font-semibold"
+                            >
+                              Reset
+                            </button>
+                          )}
                         </div>
-                        <p className="mt-0.5 text-[11px] text-[#072D59]/65">
-                          Strengthens Seal &amp; Navy control borders, muted labels, and card outlines
-                          across shelves and dialogs.
+
+                        <div className="flex flex-wrap items-center gap-2">
+                          <input
+                            type="text"
+                            data-testid="settings-font-search-input"
+                            value={fontSearch}
+                            onChange={(e) => setFontSearch(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter' && cleanedCustomCandidate) {
+                                e.preventDefault();
+                                applyNamedCustomFont(
+                                  cleanedCustomCandidate,
+                                  systemFonts.some(
+                                    (s) => s.toLowerCase() === cleanedCustomCandidate.toLowerCase(),
+                                  ),
+                                );
+                              }
+                            }}
+                            placeholder="Search fonts or type any font name…"
+                            className="folio-input min-w-[180px] flex-1 rounded-xl px-3 py-1.5 text-xs"
+                          />
+                          {cleanedCustomCandidate && !exactPresetMatch && (
+                            <button
+                              type="button"
+                              data-testid="settings-apply-custom-font-btn"
+                              onClick={() =>
+                                applyNamedCustomFont(
+                                  cleanedCustomCandidate,
+                                  systemFonts.some(
+                                    (s) => s.toLowerCase() === cleanedCustomCandidate.toLowerCase(),
+                                  ),
+                                )
+                              }
+                              className="folio-btn-navy rounded-xl px-3 py-1.5 text-xs font-semibold"
+                            >
+                              Use &ldquo;{cleanedCustomCandidate}&rdquo;
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            data-testid="settings-import-font-btn"
+                            onClick={() => fontFileInputRef.current?.click()}
+                            className="folio-btn-secondary rounded-xl px-3 py-1.5 text-xs font-semibold"
+                          >
+                            Import File
+                          </button>
+                          <input
+                            ref={fontFileInputRef}
+                            type="file"
+                            data-testid="settings-import-font-input"
+                            accept=".ttf,.otf,.woff,.woff2"
+                            className="hidden"
+                            onChange={(e) => {
+                              const file = e.target.files?.[0];
+                              e.target.value = '';
+                              if (!file) return;
+                              setFontError(null);
+                              setFontStatusMessage(null);
+                              void importCustomInterfaceFont(file).then((res) => {
+                                if (res.ok && res.fontId) {
+                                  setFontStatusMessage(`Imported offline font "${res.name}".`);
+                                  void applyInterfaceFontToRuntime(res.fontId, res.name);
+                                } else {
+                                  setFontError(res.error ?? 'Failed to import font file.');
+                                }
+                              });
+                            }}
+                          />
+                        </div>
+
+                        <div className="flex flex-wrap gap-1.5">
+                          {categoryTabs.map((cat) => {
+                            const active = fontCategory === cat.id;
+                            return (
+                              <button
+                                key={cat.id}
+                                type="button"
+                                data-testid={`settings-font-cat-${cat.id}`}
+                                aria-pressed={active}
+                                onClick={() => setFontCategory(cat.id)}
+                                className={`folio-press rounded-lg px-2.5 py-1 text-[11px] font-semibold ${
+                                  active
+                                    ? 'folio-glass-active'
+                                    : 'border border-[var(--border-subtle)] bg-[var(--surface-elevated)] text-[var(--navy-600)] hover:text-[var(--navy-900)]'
+                                }`}
+                              >
+                                {cat.label}
+                              </button>
+                            );
+                          })}
+                        </div>
+
+                        <div className="custom-scrollbar grid max-h-56 grid-cols-1 gap-2 overflow-y-auto pr-0.5 sm:grid-cols-2">
+                          {fontCategory !== 'system' &&
+                            fontCategory !== 'imported' &&
+                            matchingPresets.map((preset) => {
+                              const selected = interfaceFontId === preset.id;
+                              return (
+                                <button
+                                  key={preset.id}
+                                  type="button"
+                                  data-testid={`settings-font-preset-${preset.id}`}
+                                  aria-pressed={selected}
+                                  onClick={() => {
+                                    setFontError(null);
+                                    setFontStatusMessage(null);
+                                    setInterfaceFont(preset.id);
+                                    void applyInterfaceFontToRuntime(preset.id);
+                                  }}
+                                  className={`folio-press flex flex-col items-start rounded-xl border px-3 py-2 text-left ${
+                                    selected
+                                      ? 'border-[var(--crimson-500)] bg-[var(--surface-elevated)] text-[var(--navy-900)] ring-2 ring-[var(--crimson-glow)]'
+                                      : 'border-[var(--border-subtle)] bg-[var(--surface-elevated)] text-[var(--navy-900)] hover:border-[var(--border-strong)]'
+                                  }`}
+                                >
+                                  <span
+                                    style={{ fontFamily: preset.previewStack }}
+                                    className="text-xs font-bold leading-snug text-[var(--navy-900)]"
+                                  >
+                                    {preset.name}
+                                  </span>
+                                  <span className="mt-0.5 text-[10px] text-[var(--navy-600)]">
+                                    {preset.subtitle}
+                                  </span>
+                                </button>
+                              );
+                            })}
+
+                          {matchingUploaded.map((uf) => {
+                            const ufId = `uploaded:${uf.id}`;
+                            const selected = interfaceFontId === ufId;
+                            return (
+                              <div
+                                key={uf.id}
+                                className={`flex items-center justify-between gap-2 rounded-xl border px-3 py-2 ${
+                                  selected
+                                    ? 'border-[var(--crimson-500)] bg-[var(--surface-elevated)] ring-2 ring-[var(--crimson-glow)]'
+                                    : 'border-[var(--border-subtle)] bg-[var(--surface-elevated)]'
+                                }`}
+                              >
+                                <button
+                                  type="button"
+                                  data-testid={`settings-font-uploaded-${uf.id}`}
+                                  aria-pressed={selected}
+                                  onClick={() => {
+                                    setFontError(null);
+                                    setFontStatusMessage(null);
+                                    setInterfaceFont(ufId, uf.name);
+                                    void applyInterfaceFontToRuntime(ufId, uf.name);
+                                  }}
+                                  className="min-w-0 flex-1 text-left"
+                                >
+                                  <div className="truncate text-xs font-bold text-[var(--navy-900)]">
+                                    {uf.name}
+                                  </div>
+                                  <div className="truncate text-[10px] text-[var(--navy-600)]">
+                                    Imported file · {uf.fileName}
+                                  </div>
+                                </button>
+                                <button
+                                  type="button"
+                                  data-testid={`settings-font-uploaded-delete-${uf.id}`}
+                                  aria-label={`Remove ${uf.name}`}
+                                  onClick={() => {
+                                    setFontError(null);
+                                    setFontStatusMessage(null);
+                                    const wasActive = interfaceFontId === ufId;
+                                    void deleteCustomInterfaceFont(uf.id).then(() => {
+                                      if (wasActive) {
+                                        void applyInterfaceFontToRuntime(
+                                          DEFAULT_INTERFACE_FONT_ID,
+                                          '',
+                                        );
+                                      }
+                                    });
+                                  }}
+                                  className="folio-press rounded-lg p-1 text-[var(--navy-600)] hover:bg-[var(--state-danger-bg)] hover:text-[var(--state-danger-text)]"
+                                >
+                                  <X className="h-3.5 w-3.5" />
+                                </button>
+                              </div>
+                            );
+                          })}
+
+                          {matchingSystem.map((sysName) => {
+                            const selected =
+                              interfaceFontId === 'custom' &&
+                              interfaceCustomFont.toLowerCase() === sysName.toLowerCase();
+                            return (
+                              <button
+                                key={sysName}
+                                type="button"
+                                data-testid="settings-system-font-btn"
+                                aria-pressed={selected}
+                                onClick={() => applyNamedCustomFont(sysName, true)}
+                                className={`folio-press flex flex-col items-start rounded-xl border px-3 py-2 text-left ${
+                                  selected
+                                    ? 'border-[var(--crimson-500)] bg-[var(--surface-elevated)] text-[var(--navy-900)] ring-2 ring-[var(--crimson-glow)]'
+                                    : 'border-[var(--border-subtle)] bg-[var(--surface-elevated)] text-[var(--navy-900)] hover:border-[var(--border-strong)]'
+                                }`}
+                              >
+                                <span
+                                  style={{ fontFamily: `"${sysName}", system-ui, sans-serif` }}
+                                  className="truncate text-xs font-bold leading-snug text-[var(--navy-900)]"
+                                >
+                                  {sysName}
+                                </span>
+                                <span className="mt-0.5 text-[10px] text-[var(--navy-600)]">
+                                  Installed system font
+                                </span>
+                              </button>
+                            );
+                          })}
+                        </div>
+
+                        <div
+                          data-testid="settings-font-live-preview"
+                          className="rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-elevated)] px-3 py-2"
+                        >
+                          <div className="folio-display-heading text-sm font-bold text-[var(--navy-900)]">
+                            Your Notes, Ready.
+                          </div>
+                          <p className="mt-0.5 text-[11px] text-[var(--navy-600)]">
+                            Clean workspace menus, buttons, and 123 labels.
+                          </p>
+                        </div>
+
+                        {fontStatusMessage && (
+                          <div
+                            data-testid="settings-font-status"
+                            className="text-[11px] font-semibold text-[var(--state-success-text)]"
+                          >
+                            {fontStatusMessage}
+                          </div>
+                        )}
+                        {fontError && (
+                          <div
+                            data-testid="settings-font-error"
+                            className="text-[11px] font-semibold text-[var(--state-danger-text)]"
+                          >
+                            {fontError}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })()}
+
+                  {/* UI Scale (75% - 150%) */}
+                  {(() => {
+                    const displayUiScalePct = uiScaleDraftPct ?? Math.round(uiScale * 100);
+                    return (
+                      <div className="space-y-2 rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-canvas)] px-4 py-3">
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="flex items-center gap-2">
+                            <ZoomIn className="h-4 w-4 text-[var(--navy-900)]" />
+                            <div className="text-xs font-bold text-[var(--navy-900)]">
+                              Whole App UI Scale
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <span
+                              data-testid="settings-ui-scale-value"
+                              className="folio-mono rounded-full bg-[var(--surface-elevated)] px-2.5 py-0.5 text-xs font-bold text-[var(--navy-900)] ring-1 ring-[var(--border-subtle)] tabular-nums"
+                            >
+                              {displayUiScalePct}%
+                            </span>
+                            <button
+                              type="button"
+                              data-testid="settings-ui-scale-reset"
+                              onClick={() => {
+                                setUiScaleDraftPct(null);
+                                setUiScale(DEFAULT_UI_SCALE);
+                              }}
+                              className="folio-btn-secondary rounded-lg px-2 py-0.5 text-[11px] font-semibold"
+                            >
+                              Reset
+                            </button>
+                          </div>
+                        </div>
+                        <DraggableRangeSlider
+                          testId="settings-ui-scale-slider"
+                          ariaLabel="Whole App UI Scale"
+                          min={75}
+                          max={150}
+                          step={5}
+                          value={displayUiScalePct}
+                          onChange={(pct) => setUiScaleDraftPct(pct)}
+                          onCommit={(pct) => {
+                            setUiScaleDraftPct(null);
+                            setUiScale(pct / 100);
+                          }}
+                          className="w-full"
+                        />
+                      </div>
+                    );
+                  })()}
+
+                  {/* Optional Tactile UI Sounds Toggle (Off by Default) */}
+                  <div className="flex items-center justify-between gap-3 rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-canvas)] px-4 py-3">
+                    <div className="flex items-start gap-2.5">
+                      <Volume2 className="mt-0.5 h-4 w-4 shrink-0 text-[var(--navy-900)]" />
+                      <div>
+                        <div className="text-xs font-bold text-[var(--navy-900)]">
+                          Subtle UI Sounds
+                        </div>
+                        <p className="mt-0.5 text-[11px] text-[var(--navy-600)]">
+                          Plays gentle tactile Web Audio cues for tool switching, adding pages, and
+                          deletions (off by default).
                         </p>
                       </div>
                     </div>
                     {renderToggleSwitch({
-                      testId: 'settings-high-contrast-toggle',
-                      label: 'Toggle Enhanced UI Border Contrast',
-                      checked: highContrastUi,
-                      onToggle: () => setHighContrastUi(!highContrastUi),
+                      testId: 'settings-ui-sounds-toggle',
+                      label: 'Toggle Subtle UI Sounds',
+                      checked: uiSoundsEnabled,
+                      onToggle: () => setUiSoundsEnabled(!uiSoundsEnabled),
                     })}
                   </div>
                 </div>
               )}
 
-              {/* Tab 3: AI & Gemini */}
-              {activeTab === 'ai' && (
-                <form
-                  data-testid="settings-gemini-section"
-                  onSubmit={handleSave}
-                  className="space-y-4"
-                >
-                  <div className="flex items-start justify-between gap-2">
-                    <div>
-                      <h3 className="text-sm font-bold text-[#072D59]">
-                        Google AI Studio (Gemini) API Key
-                      </h3>
-                      <p className="mt-0.5 text-xs text-[#072D59]/65">
-                        100% BYOK: connects directly from your device via{' '}
-                        <code className="rounded bg-[#DBF2FC]/70 px-1 py-0.5 text-[#072D59]">
-                          @google/genai
-                        </code>{' '}
-                        using your key stored only in local{' '}
-                        <code className="rounded bg-[#DBF2FC]/70 px-1 py-0.5 text-[#072D59]">
-                          localStorage
-                        </code>
-                        .
-                      </p>
-                    </div>
+              {/* Tab 3: AI & Providers */}
+              {activeTab === 'ai' &&
+                (() => {
+                  const activeMeta = AI_PROVIDER_META[activeAiProvider];
+                  const currentModel = aiProviderModels[activeAiProvider] ?? activeMeta.defaultModel;
+                  const savedKeysCount = AI_PROVIDER_ORDER.filter(
+                    (p) => (aiProviderKeys[p] ?? '').trim().length > 0,
+                  ).length;
 
-                    <a
-                      href={GEMINI_API_STUDIO_URL}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      data-testid="settings-get-gemini-key-link"
-                      className="inline-flex shrink-0 items-center gap-1 rounded-lg bg-[#DBF2FC]/70 px-2.5 py-1 text-[11px] font-semibold text-[#072D59] transition duration-150 hover:bg-[#DBF2FC]"
+                  return (
+                    <form
+                      data-testid="settings-gemini-section"
+                      onSubmit={handleSave}
+                      className="space-y-3.5"
                     >
-                      <span>AI Studio</span>
-                      <ExternalLink className="h-3 w-3" />
-                    </a>
-                  </div>
-
-                  <div className="flex flex-wrap items-center gap-2">
-                    <div className="relative min-w-[200px] flex-1">
-                      <input
-                        id="gemini-api-key-input"
-                        type={showKey ? 'text' : 'password'}
-                        value={apiKey}
-                        onChange={(e) => {
-                          setApiKey(e.target.value);
-                          setStatusMessage(null);
-                          setTestResult(null);
-                        }}
-                        placeholder="Paste your AIza... API key"
-                        autoComplete="off"
-                        className="folio-input w-full rounded-xl py-2.5 pl-3.5 pr-10 text-sm"
-                      />
-                      <button
-                        type="button"
-                        aria-label={showKey ? 'Hide API key' : 'Show API key'}
-                        onClick={() => setShowKey((prev) => !prev)}
-                        className="absolute right-2.5 top-1/2 -translate-y-1/2 rounded-md p-1 text-[#072D59]/50 transition duration-150 hover:bg-[#DBF2FC]/60 hover:text-[#072D59]"
-                      >
-                        {showKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-                      </button>
-                    </div>
-
-                    <button
-                      type="button"
-                      data-testid="test-gemini-key-btn"
-                      disabled={testingKey}
-                      onClick={() => void handleTestKey()}
-                      className="folio-btn-secondary inline-flex shrink-0 items-center gap-1.5 rounded-xl px-3.5 py-2.5 text-xs font-semibold disabled:opacity-50"
-                    >
-                      {testingKey ? (
-                        <Loader2 className="h-3.5 w-3.5 animate-spin text-[#FD6E88]" />
-                      ) : (
-                        <Sparkles className="h-3.5 w-3.5 text-[#FD6E88]" />
-                      )}
-                      <span>{testingKey ? 'Testing…' : 'Test API Key'}</span>
-                    </button>
-                  </div>
-
-                  {/* Model Selector */}
-                  <div className="grid gap-3 rounded-xl border border-[#072D59]/10 bg-[#F4F8FB] p-3.5">
-                    <div>
-                      <label
-                        htmlFor="gemini-model-select"
-                        className="mb-1 block text-xs font-bold uppercase tracking-wide text-[#072D59]/65"
-                      >
-                        Gemini Model
-                      </label>
-                      <select
-                        id="gemini-model-select"
-                        data-testid="gemini-model-select"
-                        value={geminiModelPreset}
-                        onChange={(e) => {
-                          const nextPreset = e.target.value as GeminiModelPresetId;
-                          setGeminiModelConfig(nextPreset, customModelDraft);
-                          setTestResult(null);
-                        }}
-                        className="folio-input w-full rounded-xl px-3 py-2 text-xs font-semibold"
-                      >
-                        <option value="gemini-4-hydrogen">
-                          gemini-4-hydrogen (Default · Multimodal Reasoning, Free &amp; Paid)
-                        </option>
-                        <option value="gemini-3.5-flash-lite">
-                          gemini-3.5-flash-lite (Fastest &amp; Lightest)
-                        </option>
-                        <option value="custom">Custom Model ID…</option>
-                      </select>
-                    </div>
-
-                    {geminiModelPreset === 'custom' && (
-                      <div>
-                        <label
-                          htmlFor="gemini-custom-model-input"
-                          className="mb-1 block text-[11px] font-semibold text-[#072D59]/70"
-                        >
-                          Custom Model ID
-                        </label>
-                        <input
-                          id="gemini-custom-model-input"
-                          data-testid="gemini-custom-model-input"
-                          type="text"
-                          value={customModelDraft}
-                          onChange={(e) => {
-                            setCustomModelDraft(e.target.value);
-                            setGeminiModelConfig('custom', e.target.value);
-                            setTestResult(null);
-                          }}
-                          placeholder="e.g. gemini-2.5-pro"
-                          className="folio-input w-full rounded-xl px-3 py-2 font-mono text-xs"
-                        />
-                      </div>
-                    )}
-
-                    {/* Vault Lock Privacy Guardrail Toggle */}
-                    <div className="flex items-center justify-between gap-3 rounded-xl border border-[#072D59]/10 bg-white px-3.5 py-2.5">
-                      <div className="flex items-start gap-2">
-                        <Shield className="mt-0.5 h-4 w-4 shrink-0 text-[#072D59]" />
+                      <div className="flex items-start justify-between gap-2">
                         <div>
-                          <div className="text-xs font-bold text-[#072D59]">
-                            Block AI on Vault-Locked Notebooks
-                          </div>
-                          <p className="text-[11px] text-[#072D59]/65">
-                            Keep encrypted notebooks 100% offline by blocking all Gemini sidebar &amp;
-                            Lasso AI calls.
+                          <h3 className="text-sm font-bold text-[var(--navy-900)]">
+                            AI Providers (100% BYOK)
+                          </h3>
+                          <p className="mt-0.5 text-xs text-[var(--navy-600)]">
+                            Each provider&apos;s key and model stays isolated in local{' '}
+                            <code className="rounded bg-[var(--surface-seal)] px-1 py-0.5 text-[var(--navy-900)]">
+                              localStorage
+                            </code>{' '}
+                            ({savedKeysCount} saved).
                           </p>
                         </div>
+
+                        <a
+                          href={activeMeta.keyConsoleUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          data-testid="settings-get-gemini-key-link"
+                          className="folio-press inline-flex shrink-0 items-center gap-1 rounded-lg bg-[var(--surface-seal)] px-2.5 py-1 text-[11px] font-semibold text-[var(--navy-900)] hover:bg-[var(--surface-tint)]"
+                        >
+                          <span>{activeMeta.keyConsoleLabel}</span>
+                          <ExternalLink className="h-3 w-3" />
+                        </a>
                       </div>
-                      {renderToggleSwitch({
-                        testId: 'settings-block-vault-ai-toggle',
-                        label: 'Block AI on Vault-Locked Notebooks',
-                        checked: blockAiOnVaultLocked,
-                        onToggle: () => setBlockAiOnVaultLocked(!blockAiOnVaultLocked),
-                      })}
-                    </div>
-                  </div>
 
-                  {testResult && (
-                    <div
-                      data-testid="gemini-test-status"
-                      className={`flex items-start gap-1.5 rounded-xl border px-3 py-2 text-xs font-semibold ${
-                        testResult.ok
-                          ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
-                          : 'border-[#FD6E88]/40 bg-[#FD6E88]/10 text-[#F95573]'
-                      }`}
-                    >
-                      {testResult.ok ? (
-                        <Check className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                      ) : (
-                        <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                      {/* 5-Provider Switcher */}
+                      <div
+                        data-testid="ai-provider-selector"
+                        className="grid grid-cols-2 gap-1.5 sm:grid-cols-5"
+                      >
+                        {AI_PROVIDER_ORDER.map((providerId) => {
+                          const meta = AI_PROVIDER_META[providerId];
+                          const isSelected = activeAiProvider === providerId;
+                          const hasKey = (aiProviderKeys[providerId] ?? '').trim().length > 0;
+                          return (
+                            <button
+                              key={providerId}
+                              type="button"
+                              data-testid={`ai-provider-btn-${providerId}`}
+                              aria-pressed={isSelected}
+                              onClick={() => handleSelectProvider(providerId)}
+                              className={`folio-press relative flex items-center justify-center gap-1.5 rounded-xl border px-2 py-2 text-xs font-bold ${
+                                isSelected
+                                  ? 'folio-glass-active'
+                                  : 'border-[var(--border-subtle)] bg-[var(--surface-canvas)] text-[var(--navy-600)] hover:bg-[var(--surface-elevated)] hover:text-[var(--navy-900)]'
+                              }`}
+                            >
+                              <span className="truncate">{meta.shortLabel}</span>
+                              {hasKey && (
+                                <span
+                                  title="Key saved"
+                                  className={`h-2 w-2 shrink-0 rounded-full ${
+                                    isSelected ? 'bg-[var(--crimson-500)]' : 'bg-[var(--state-success)]'
+                                  }`}
+                                />
+                              )}
+                            </button>
+                          );
+                        })}
+                      </div>
+
+                      {/* API Key Input + Test Connection */}
+                      <div className="flex flex-wrap items-center gap-2">
+                        <div className="relative min-w-[200px] flex-1">
+                          <input
+                            id="gemini-api-key-input"
+                            data-testid="ai-api-key-input"
+                            type={showKey ? 'text' : 'password'}
+                            value={apiKey}
+                            onChange={(e) => {
+                              setApiKey(e.target.value);
+                              setStatusMessage(null);
+                              setTestResult(null);
+                            }}
+                            placeholder={activeMeta.keyPlaceholder}
+                            autoComplete="off"
+                            className="folio-input w-full rounded-xl py-2.5 pl-3.5 pr-10 text-sm"
+                          />
+                          <button
+                            type="button"
+                            aria-label={showKey ? 'Hide API key' : 'Show API key'}
+                            onClick={() => setShowKey((prev) => !prev)}
+                            className="folio-press absolute right-2.5 top-1/2 -translate-y-1/2 rounded-md p-1 text-[var(--navy-600)] hover:bg-[var(--surface-tint)] hover:text-[var(--navy-900)]"
+                          >
+                            {showKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                          </button>
+                        </div>
+
+                        <button
+                          type="button"
+                          data-testid="test-gemini-key-btn"
+                          disabled={testingKey}
+                          onClick={() => void handleTestKey()}
+                          className="folio-btn-secondary inline-flex shrink-0 items-center gap-1.5 rounded-xl px-3.5 py-2.5 text-xs font-semibold disabled:opacity-50"
+                        >
+                          {testingKey && (
+                            <Loader2 className="h-3.5 w-3.5 animate-spin text-[var(--crimson-500)]" />
+                          )}
+                          <span>{testingKey ? 'Testing…' : 'Test Connection'}</span>
+                        </button>
+                      </div>
+
+                      {/* Model / Endpoint Card */}
+                      <div className="grid gap-3 rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-canvas)] p-3.5">
+                        {activeAiProvider === 'gemini' ? (
+                          <>
+                            <div>
+                              <label
+                                htmlFor="gemini-model-select"
+                                className="folio-section-label mb-1 block"
+                              >
+                                Gemini Model
+                              </label>
+                              <select
+                                id="gemini-model-select"
+                                data-testid="gemini-model-select"
+                                value={geminiModelPreset}
+                                onChange={(e) => {
+                                  const nextPreset = e.target.value as GeminiModelPresetId;
+                                  setGeminiModelConfig(nextPreset, customModelDraft);
+                                  setTestResult(null);
+                                }}
+                                className="folio-input w-full rounded-xl px-3 py-2 text-xs font-semibold"
+                              >
+                                <option value="gemini-3-flash">
+                                  gemini-3-flash (Default · Multimodal Reasoning, Free &amp; Paid)
+                                </option>
+                                <option value="gemini-3.5-flash-lite">
+                                  gemini-3.5-flash-lite (Fastest &amp; Lightest)
+                                </option>
+                                <option value="custom">Custom Model ID…</option>
+                              </select>
+                            </div>
+
+                            {geminiModelPreset === 'custom' && (
+                              <div>
+                                <label
+                                  htmlFor="gemini-custom-model-input"
+                                  className="mb-1 block text-[11px] font-semibold text-[var(--navy-600)]"
+                                >
+                                  Custom Model ID
+                                </label>
+                                <input
+                                  id="gemini-custom-model-input"
+                                  data-testid="gemini-custom-model-input"
+                                  type="text"
+                                  value={customModelDraft}
+                                  onChange={(e) => {
+                                    setCustomModelDraft(e.target.value);
+                                    setGeminiModelConfig('custom', e.target.value);
+                                    setTestResult(null);
+                                  }}
+                                  placeholder="e.g. gemini-2.5-pro"
+                                  className="folio-input w-full rounded-xl px-3 py-2 font-mono text-xs"
+                                />
+                              </div>
+                            )}
+                          </>
+                        ) : (
+                          <>
+                            {activeAiProvider === 'custom' && (
+                              <div>
+                                <label
+                                  htmlFor="ai-custom-base-url-input"
+                                  className="folio-section-label mb-1 block"
+                                >
+                                  Base URL (OpenAI Compatible)
+                                </label>
+                                <input
+                                  id="ai-custom-base-url-input"
+                                  data-testid="ai-custom-base-url-input"
+                                  type="text"
+                                  value={aiCustomBaseUrl}
+                                  onChange={(e) => {
+                                    setAiCustomBaseUrl(e.target.value);
+                                    setTestResult(null);
+                                  }}
+                                  placeholder="https://openrouter.ai/api/v1 or http://localhost:11434/v1"
+                                  className="folio-input w-full rounded-xl px-3 py-2 font-mono text-xs"
+                                />
+                              </div>
+                            )}
+
+                            <div>
+                              <div className="mb-1 flex items-center justify-between gap-2">
+                                <label
+                                  htmlFor="ai-model-input"
+                                  className="folio-section-label"
+                                >
+                                  {activeMeta.label} Model ID
+                                </label>
+                                {activeMeta.modelPresets && activeMeta.modelPresets.length > 0 && (
+                                  <div className="flex flex-wrap gap-1">
+                                    {activeMeta.modelPresets.map((preset) => (
+                                      <button
+                                        key={preset}
+                                        type="button"
+                                        onClick={() => {
+                                          setAiProviderModel(activeAiProvider, preset);
+                                          setTestResult(null);
+                                        }}
+                                        className={`folio-press rounded-md px-1.5 py-0.5 font-mono text-[10px] font-bold ${
+                                          currentModel === preset
+                                            ? 'folio-glass-active'
+                                            : 'bg-[var(--surface-elevated)] text-[var(--navy-600)] ring-1 ring-[var(--border-subtle)] hover:bg-[var(--surface-tint)] hover:text-[var(--navy-900)]'
+                                        }`}
+                                      >
+                                        {preset}
+                                      </button>
+                                    ))}
+                                  </div>
+                                )}
+                              </div>
+                              <input
+                                id="ai-model-input"
+                                data-testid="ai-model-input"
+                                type="text"
+                                value={currentModel}
+                                onChange={(e) => {
+                                  setAiProviderModel(activeAiProvider, e.target.value);
+                                  setTestResult(null);
+                                }}
+                                placeholder={activeMeta.defaultModel}
+                                className="folio-input w-full rounded-xl px-3 py-2 font-mono text-xs"
+                              />
+                            </div>
+                          </>
+                        )}
+
+                        {/* Vault Lock Privacy Guardrail Toggle */}
+                        <div className="flex items-center justify-between gap-3 rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-elevated)] px-3.5 py-2.5">
+                          <div className="flex items-start gap-2">
+                            <Shield className="mt-0.5 h-4 w-4 shrink-0 text-[var(--navy-900)]" />
+                            <div>
+                              <div className="text-xs font-bold text-[var(--navy-900)]">
+                                Block AI on Vault Locked Notebooks
+                              </div>
+                              <p className="text-[11px] text-[var(--navy-600)]">
+                                Keep encrypted notebooks 100% offline by blocking AI calls across ALL
+                                providers.
+                              </p>
+                            </div>
+                          </div>
+                          {renderToggleSwitch({
+                            testId: 'settings-block-vault-ai-toggle',
+                            label: 'Block AI on Vault Locked Notebooks',
+                            checked: blockAiOnVaultLocked,
+                            onToggle: () => setBlockAiOnVaultLocked(!blockAiOnVaultLocked),
+                          })}
+                        </div>
+                      </div>
+
+                      {/* Auto AI Handwriting Correction */}
+                      <div className="space-y-2.5 rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-elevated)] p-3.5">
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="flex items-start gap-2.5">
+                            <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-[var(--surface-seal)] text-[var(--navy-900)]">
+                              <Sparkles className="h-4 w-4 text-[var(--crimson-500)]" />
+                            </div>
+                            <div>
+                              <div className="text-xs font-bold text-[var(--navy-900)]">
+                                Auto AI Handwriting Correction
+                              </div>
+                              <p className="mt-0.5 text-[11px] text-[var(--navy-600)]">
+                                Cleans completed words into neat vector ink strokes live as you
+                                write using your active AI provider (keeps them as drawings; Ctrl+Z
+                                reverts).
+                              </p>
+                            </div>
+                          </div>
+                          {renderToggleSwitch({
+                            testId: 'settings-handwriting-toggle',
+                            label: 'Toggle Auto AI Handwriting Correction',
+                            checked: handwritingCorrectionEnabled,
+                            onToggle: () =>
+                              setHandwritingCorrectionEnabled(!handwritingCorrectionEnabled),
+                          })}
+                        </div>
+                      </div>
+
+                      {testResult && (
+                        <div
+                          data-testid="gemini-test-status"
+                          className={`flex items-start gap-1.5 rounded-xl px-3 py-2 text-xs font-semibold ${
+                            testResult.ok ? 'folio-badge-success' : 'folio-badge-danger'
+                          }`}
+                        >
+                          {testResult.ok ? (
+                            <Check className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                          ) : (
+                            <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                          )}
+                          <span>{testResult.message}</span>
+                        </div>
                       )}
-                      <span>{testResult.message}</span>
-                    </div>
-                  )}
 
-                  {statusMessage && (
-                    <div
-                      data-testid="settings-status-message"
-                      className="flex items-center gap-1.5 text-xs font-semibold text-emerald-700"
-                    >
-                      <Check className="h-3.5 w-3.5" />
-                      <span>{statusMessage}</span>
-                    </div>
-                  )}
+                      {statusMessage && (
+                        <div
+                          data-testid="settings-status-message"
+                          className="flex items-center gap-1.5 text-xs font-semibold text-[var(--state-success-text)]"
+                        >
+                          <Check className="h-3.5 w-3.5" />
+                          <span>{statusMessage}</span>
+                        </div>
+                      )}
 
-                  <div className="flex items-center justify-between pt-1">
-                    <button
-                      type="button"
-                      onClick={handleClear}
-                      disabled={!apiKey}
-                      className="inline-flex items-center gap-1.5 rounded-xl px-3 py-2 text-xs font-semibold text-[#F95573] transition duration-150 hover:bg-[#FD6E88]/10 disabled:cursor-not-allowed disabled:opacity-40"
-                    >
-                      <Trash2 className="h-3.5 w-3.5" />
-                      Clear Key
-                    </button>
+                      <div className="flex items-center justify-between pt-1">
+                        <button
+                          type="button"
+                          onClick={handleClear}
+                          disabled={!apiKey && !(aiProviderKeys[activeAiProvider] ?? '').trim()}
+                          className="folio-press inline-flex items-center gap-1.5 rounded-xl px-3 py-2 text-xs font-semibold text-[var(--state-danger-text)] hover:bg-[var(--state-danger-bg)] disabled:cursor-not-allowed disabled:opacity-40"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                          Clear {activeMeta.shortLabel} Key
+                        </button>
 
-                    <button
-                      type="submit"
-                      className="folio-btn-crimson rounded-xl px-4 py-2 text-xs font-semibold shadow-xs"
-                    >
-                      Save Key
-                    </button>
-                  </div>
-                </form>
-              )}
+                        <button
+                          type="submit"
+                          data-testid="settings-save-ai-key-btn"
+                          className="folio-btn-crimson rounded-xl px-4 py-2 text-xs font-semibold"
+                        >
+                          Save {activeMeta.shortLabel} Key
+                        </button>
+                      </div>
+                    </form>
+                  );
+                })()}
 
               {/* Tab 4: Privacy & Vault */}
               {activeTab === 'vault' && (
                 <div data-testid="settings-vault-section" className="space-y-4">
                   <div className="flex items-center justify-between gap-2">
                     <div>
-                      <h3 className="text-sm font-bold text-[#072D59]">Privacy &amp; Vault Lock</h3>
-                      <p className="text-xs text-[#072D59]/65">
+                      <h3 className="text-sm font-bold text-[var(--navy-900)]">
+                        Privacy &amp; Vault Lock
+                      </h3>
+                      <p className="text-xs text-[var(--navy-600)]">
                         Protect private notebooks at rest with AES-GCM-256 and a Recovery Key.
                       </p>
                     </div>
                     <span
-                      className={`shrink-0 rounded-full px-2.5 py-0.5 text-[11px] font-bold ${
+                      className={`shrink-0 rounded-full px-2.5 py-0.5 text-[11px] font-bold tabular-nums ${
                         vaultConfigured
-                          ? 'bg-[#072D59] text-white'
-                          : 'bg-[#F4F8FB] text-[#072D59]/70 ring-1 ring-[#072D59]/12'
+                          ? 'folio-glass-badge'
+                          : 'bg-[var(--surface-canvas)] text-[var(--navy-600)] ring-1 ring-[var(--border-subtle)]'
                       }`}
                     >
                       {vaultConfigured
@@ -1081,8 +1769,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   </div>
 
                   {!vaultConfigured ? (
-                    <div className="space-y-3 rounded-2xl border border-[#072D59]/10 bg-[#F4F8FB] p-4">
-                      <p className="text-xs leading-relaxed text-[#072D59]/80">
+                    <div className="space-y-3 rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-canvas)] p-4">
+                      <p className="text-xs leading-relaxed text-[var(--navy-600)]">
                         Encrypt individual notebooks locally using Web Crypto AES-GCM-256 and an
                         offline Recovery Key. Your password never leaves this device.
                       </p>
@@ -1108,10 +1796,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                             setVaultNotice(null);
                             setFreshRecoveryKey(null);
                           }}
-                          className={`rounded-xl border px-3 py-1.5 text-xs font-semibold transition duration-150 ${
+                          className={`folio-press rounded-xl border px-3 py-1.5 text-xs font-semibold ${
                             vaultAction === 'change-password'
-                              ? 'border-[#072D59] bg-[#072D59] text-white'
-                              : 'border-[#072D59]/12 bg-white text-[#072D59] hover:bg-[#DBF2FC]/55'
+                              ? 'folio-glass-active'
+                              : 'border-[var(--border-subtle)] bg-[var(--surface-elevated)] text-[var(--navy-900)] hover:bg-[var(--surface-tint)]'
                           }`}
                         >
                           Change Vault Password
@@ -1126,10 +1814,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                             setVaultNotice(null);
                             setFreshRecoveryKey(null);
                           }}
-                          className={`inline-flex items-center gap-1.5 rounded-xl border px-3 py-1.5 text-xs font-semibold transition duration-150 ${
+                          className={`folio-press inline-flex items-center gap-1.5 rounded-xl border px-3 py-1.5 text-xs font-semibold ${
                             vaultAction === 'regen-recovery'
-                              ? 'border-[#072D59] bg-[#072D59] text-white'
-                              : 'border-[#072D59]/12 bg-white text-[#072D59] hover:bg-[#DBF2FC]/55'
+                              ? 'folio-glass-active'
+                              : 'border-[var(--border-subtle)] bg-[var(--surface-elevated)] text-[var(--navy-900)] hover:bg-[var(--surface-tint)]'
                           }`}
                         >
                           <RefreshCw className="h-3.5 w-3.5" />
@@ -1138,7 +1826,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                         <button
                           type="button"
                           onClick={() => void handleLockAllNow()}
-                          className="inline-flex items-center gap-1.5 rounded-xl border border-amber-300 bg-amber-50 px-3 py-1.5 text-xs font-semibold text-amber-900 transition duration-150 hover:bg-amber-100"
+                          className="folio-press folio-badge-warning inline-flex items-center gap-1.5 rounded-xl px-3 py-1.5 text-xs font-semibold hover:opacity-90"
                         >
                           <Lock className="h-3.5 w-3.5" />
                           Lock All Notebooks Now
@@ -1148,7 +1836,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                       {vaultAction === 'change-password' && (
                         <form
                           onSubmit={handleChangePasswordSubmit}
-                          className="space-y-2.5 rounded-xl border border-[#072D59]/10 bg-[#F4F8FB] p-3.5"
+                          className="space-y-2.5 rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-canvas)] p-3.5"
                         >
                           <input
                             type="password"
@@ -1172,12 +1860,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                                   className={`h-1 rounded-full ${
                                     strength.score >= bar
                                       ? strengthColors[strength.score]
-                                      : 'bg-[#072D59]/12'
+                                      : 'bg-[var(--border-strong)]'
                                   }`}
                                 />
                               ))}
                             </div>
-                            <span className="text-[11px] font-semibold text-[#072D59]/65">
+                            <span className="text-[11px] font-semibold text-[var(--navy-600)]">
                               {newPassword ? strength.label : ''}
                             </span>
                           </div>
@@ -1192,7 +1880,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                             <button
                               type="button"
                               onClick={() => setVaultAction('none')}
-                              className="rounded-lg px-2.5 py-1.5 text-xs font-semibold text-[#072D59]/70 hover:bg-[#DBF2FC]/55"
+                              className="folio-press rounded-lg px-2.5 py-1.5 text-xs font-semibold text-[var(--navy-600)] hover:bg-[var(--surface-tint)]"
                             >
                               Cancel
                             </button>
@@ -1210,9 +1898,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                       {vaultAction === 'regen-recovery' && (
                         <form
                           onSubmit={handleRegenerateRecoverySubmit}
-                          className="space-y-2.5 rounded-xl border border-[#072D59]/10 bg-[#F4F8FB] p-3.5"
+                          className="space-y-2.5 rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-canvas)] p-3.5"
                         >
-                          <p className="text-[11px] text-[#072D59]/65">
+                          <p className="text-[11px] text-[var(--navy-600)]">
                             Verify your current Vault Password to issue a new Recovery Key and
                             invalidate the previous one.
                           </p>
@@ -1234,10 +1922,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                           </div>
 
                           {freshRecoveryKey && (
-                            <div className="space-y-2 rounded-xl border border-amber-200 bg-amber-50 p-3">
+                            <div className="folio-badge-warning space-y-2 rounded-xl p-3">
                               <div
                                 data-testid="regenerated-recovery-key"
-                                className="rounded-lg border border-amber-300 bg-white px-2.5 py-2 text-center font-mono text-xs font-bold tracking-wider text-[#072D59] select-all"
+                                className="rounded-lg border border-[var(--state-warning-border)] bg-[var(--surface-elevated)] px-2.5 py-2 text-center font-mono text-xs font-bold tracking-wider text-[var(--navy-900)] select-all"
                               >
                                 {freshRecoveryKey}
                               </div>
@@ -1245,11 +1933,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                                 <button
                                   type="button"
                                   onClick={handleCopyRecovery}
-                                  className="inline-flex flex-1 items-center justify-center gap-1 rounded-lg border border-amber-300 bg-white px-2.5 py-1.5 text-[11px] font-semibold text-[#072D59]"
+                                  className="folio-btn-secondary inline-flex flex-1 items-center justify-center gap-1 rounded-lg px-2.5 py-1.5 text-[11px] font-semibold"
                                 >
                                   {copiedRecovery ? (
                                     <>
-                                      <Check className="h-3 w-3 text-emerald-600" />
+                                      <Check className="h-3 w-3 text-[var(--state-success)]" />
                                       Copied
                                     </>
                                   ) : (
@@ -1262,7 +1950,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                                 <button
                                   type="button"
                                   onClick={handleDownloadRecovery}
-                                  className="inline-flex flex-1 items-center justify-center gap-1 rounded-lg border border-amber-300 bg-white px-2.5 py-1.5 text-[11px] font-semibold text-[#072D59]"
+                                  className="folio-btn-secondary inline-flex flex-1 items-center justify-center gap-1 rounded-lg px-2.5 py-1.5 text-[11px] font-semibold"
                                 >
                                   <Download className="h-3 w-3" />
                                   Download .txt
@@ -1276,7 +1964,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                       {vaultError && (
                         <p
                           data-testid="vault-settings-error"
-                          className="text-xs font-semibold text-[#F95573]"
+                          className="text-xs font-semibold text-[var(--state-danger-text)]"
                         >
                           {vaultError}
                         </p>
@@ -1284,7 +1972,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                       {vaultNotice && (
                         <p
                           data-testid="vault-settings-notice"
-                          className="flex items-center gap-1.5 text-xs font-semibold text-emerald-700"
+                          className="flex items-center gap-1.5 text-xs font-semibold text-[var(--state-success-text)]"
                         >
                           <Check className="h-3.5 w-3.5" />
                           {vaultNotice}
@@ -1299,8 +1987,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               {activeTab === 'data' && (
                 <div data-testid="settings-workspace-section" className="space-y-4">
                   <div>
-                    <h3 className="text-sm font-bold text-[#072D59]">Backup &amp; Data</h3>
-                    <p className="text-xs text-[#072D59]/65">
+                    <h3 className="text-sm font-bold text-[var(--navy-900)]">Backup &amp; Data</h3>
+                    <p className="text-xs text-[var(--navy-600)]">
                       Inspect local IndexedDB storage usage and export portable workspace backups.
                     </p>
                   </div>
@@ -1308,57 +1996,59 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   {/* Storage Summary Grid */}
                   <div
                     data-testid="settings-storage-summary"
-                    className="space-y-2.5 rounded-2xl border border-[#072D59]/10 bg-[#F4F8FB] p-3.5"
+                    className="space-y-2.5 rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-canvas)] p-3.5"
                   >
                     <div className="flex items-center justify-between text-xs">
-                      <span className="font-bold text-[#072D59]">Local IndexedDB Storage</span>
-                      <span className="folio-mono rounded-full bg-[#DBF2FC] px-2.5 py-0.5 text-[11px] font-bold text-[#072D59]">
+                      <span className="font-bold text-[var(--navy-900)]">
+                        Local IndexedDB Storage
+                      </span>
+                      <span className="folio-mono rounded-full bg-[var(--surface-seal)] px-2.5 py-0.5 text-[11px] font-bold text-[var(--navy-900)] tabular-nums">
                         {formatBytesCompact(storageSummary?.estimatedBytes)}
                       </span>
                     </div>
 
                     <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-                      <div className="rounded-xl border border-[#072D59]/10 bg-white px-3 py-2">
+                      <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-elevated)] px-3 py-2">
                         <div
                           data-testid="storage-stat-notebooks"
-                          className="folio-mono text-base font-bold text-[#072D59]"
+                          className="folio-mono text-base font-bold text-[var(--navy-900)] tabular-nums"
                         >
                           {storageSummary ? storageSummary.notebookCount : '—'}
                         </div>
-                        <div className="text-[11px] font-semibold text-[#072D59]/60">
+                        <div className="text-[11px] font-semibold text-[var(--navy-600)]">
                           Notebooks
                         </div>
                       </div>
-                      <div className="rounded-xl border border-[#072D59]/10 bg-white px-3 py-2">
+                      <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-elevated)] px-3 py-2">
                         <div
                           data-testid="storage-stat-pages"
-                          className="folio-mono text-base font-bold text-[#072D59]"
+                          className="folio-mono text-base font-bold text-[var(--navy-900)] tabular-nums"
                         >
                           {storageSummary ? storageSummary.pageCount : '—'}
                         </div>
-                        <div className="text-[11px] font-semibold text-[#072D59]/60">
+                        <div className="text-[11px] font-semibold text-[var(--navy-600)]">
                           Pages
                         </div>
                       </div>
-                      <div className="rounded-xl border border-[#072D59]/10 bg-white px-3 py-2">
+                      <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-elevated)] px-3 py-2">
                         <div
                           data-testid="storage-stat-templates"
-                          className="folio-mono text-base font-bold text-[#072D59]"
+                          className="folio-mono text-base font-bold text-[var(--navy-900)] tabular-nums"
                         >
                           {storageSummary ? storageSummary.templateCount : '—'}
                         </div>
-                        <div className="text-[11px] font-semibold text-[#072D59]/60">
+                        <div className="text-[11px] font-semibold text-[var(--navy-600)]">
                           Templates
                         </div>
                       </div>
-                      <div className="rounded-xl border border-[#072D59]/10 bg-white px-3 py-2">
+                      <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-elevated)] px-3 py-2">
                         <div
                           data-testid="storage-stat-pdf-assets"
-                          className="folio-mono text-base font-bold text-[#072D59]"
+                          className="folio-mono text-base font-bold text-[var(--navy-900)] tabular-nums"
                         >
                           {storageSummary ? storageSummary.pdfAssetCount : '—'}
                         </div>
-                        <div className="text-[11px] font-semibold text-[#072D59]/60">
+                        <div className="text-[11px] font-semibold text-[var(--navy-600)]">
                           PDF Assets
                         </div>
                       </div>
@@ -1366,21 +2056,16 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   </div>
 
                   {/* Workspace Backup Archive */}
-                  <div className="space-y-3 rounded-2xl border border-[#072D59]/10 bg-white p-4">
-                    <div className="flex items-start gap-2.5">
-                      <div className="rounded-xl bg-[#DBF2FC] p-2 text-[#072D59]">
-                        <Archive className="h-4 w-4" />
-                      </div>
-                      <div>
-                        <h4 className="text-xs font-bold text-[#072D59]">
-                          Workspace Backup &amp; Restore
-                        </h4>
-                        <p className="mt-0.5 text-[11px] text-[#072D59]/65">
-                          Download a single <code>.folio-workspace.json</code> archive of all
-                          folders, unlocked notebooks, PDFs, and custom templates, or restore one
-                          cleanly without overwriting existing items.
-                        </p>
-                      </div>
+                  <div className="space-y-3 rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-elevated)] p-4">
+                    <div>
+                      <h4 className="text-xs font-bold text-[var(--navy-900)]">
+                        Workspace Backup &amp; Restore
+                      </h4>
+                      <p className="mt-0.5 text-[11px] text-[var(--navy-600)]">
+                        Download a single <code>.folio-workspace.json</code> archive of all
+                        folders, unlocked notebooks, PDFs, and custom templates, or restore one
+                        cleanly without overwriting existing items.
+                      </p>
                     </div>
 
                     <input
@@ -1410,7 +2095,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                         onClick={() => workspaceInputRef.current?.click()}
                         className="folio-btn-secondary inline-flex items-center gap-1.5 rounded-xl px-3.5 py-2 text-xs font-semibold disabled:opacity-50"
                       >
-                        <Upload className="h-3.5 w-3.5 text-[#FD6E88]" />
+                        <Upload className="h-3.5 w-3.5 text-[var(--crimson-500)]" />
                         <span>Import Workspace Backup</span>
                       </button>
                     </div>
@@ -1418,16 +2103,235 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     {(workspaceMessage || workspaceError) && (
                       <div
                         data-testid="workspace-status-message"
-                        className={`rounded-xl border px-3 py-2 text-xs font-medium ${
+                        className={`rounded-xl px-3 py-2 text-xs font-medium ${
                           workspaceError
-                            ? 'border-[#FD6E88]/40 bg-[#FD6E88]/10 text-[#F95573]'
-                            : 'border-[#072D59]/12 bg-[#DBF2FC]/45 text-[#072D59]'
+                            ? 'folio-badge-danger'
+                            : 'border border-[var(--border-subtle)] bg-[var(--surface-tint)] text-[var(--navy-900)]'
                         }`}
                       >
                         {workspaceError ?? workspaceMessage}
                       </div>
                     )}
                   </div>
+                </div>
+              )}
+
+              {/* Tab 6: App Updates */}
+              {activeTab === 'updates' && (
+                <div data-testid="settings-updates-section" className="space-y-4">
+                  <div>
+                    <h3 className="text-sm font-bold text-[var(--navy-900)]">App Updates</h3>
+                    <p className="text-xs text-[var(--navy-600)]">
+                      One click Restart to Update from your local build folder or public GitHub Releases.
+                    </p>
+                  </div>
+
+                  {hasDesktopUpdater ? (
+                    updateStatus ? (
+                      <>
+                      {/* Current Build & Action Card */}
+                      <div className="space-y-3 rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-canvas)] p-4">
+                        <div className="flex flex-wrap items-start justify-between gap-3">
+                          <div>
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span className="text-sm font-bold text-[var(--navy-900)] tabular-nums">
+                                Folio Notes v{updateStatus.currentVersion}
+                              </span>
+                              <span
+                                data-testid="settings-updater-phase-badge"
+                                className={`rounded-full px-2.5 py-0.5 text-[11px] font-bold ${
+                                  updateStatus.phase === 'ready'
+                                    ? 'bg-[var(--crimson-soft)] text-[var(--crimson-600)]'
+                                    : updateStatus.phase === 'error'
+                                      ? 'folio-badge-warning'
+                                      : 'bg-[var(--surface-seal)] text-[var(--navy-900)]'
+                                }`}
+                              >
+                                {updateStatus.phase === 'ready'
+                                  ? updateStatus.source === 'local'
+                                    ? `Ready · Local v${updateStatus.availableVersion ?? updateStatus.currentVersion}`
+                                    : `Ready · v${updateStatus.availableVersion ?? updateStatus.currentVersion}`
+                                  : updateStatus.phase === 'checking'
+                                    ? 'Checking…'
+                                    : updateStatus.phase === 'downloading'
+                                      ? `Downloading ${updateStatus.downloadProgress ?? 0}%`
+                                      : updateStatus.phase === 'error'
+                                        ? 'Attention'
+                                        : 'Up to Date'}
+                              </span>
+                            </div>
+                            <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-[var(--navy-600)]">
+                              <span>
+                                Build ID:{' '}
+                                <code
+                                  data-testid="settings-updater-build-id"
+                                  className="folio-mono rounded bg-[var(--surface-elevated)] px-1.5 py-0.5 text-[10px] font-semibold text-[var(--navy-900)]"
+                                >
+                                  {updateStatus.currentBuildId}
+                                </code>
+                              </span>
+                              <span>
+                                Last checked:{' '}
+                                {updateStatus.lastCheckedAt
+                                  ? new Date(updateStatus.lastCheckedAt).toLocaleString()
+                                  : 'Not checked yet'}
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+
+                        <p
+                          data-testid="settings-updater-status-message"
+                          className="text-xs font-medium text-[var(--navy-900)]/85"
+                        >
+                          {updateStatus.message}
+                        </p>
+
+                        {(updateActionError || updateStatus.error) && (
+                          <div className="folio-badge-danger flex items-start gap-1.5 rounded-xl px-3 py-2 text-xs font-semibold">
+                            <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                            <span>{updateActionError ?? updateStatus.error}</span>
+                          </div>
+                        )}
+
+                        <div className="flex flex-wrap items-center gap-2 pt-1">
+                          <button
+                            type="button"
+                            data-testid="settings-check-updates-btn"
+                            disabled={updateStatus.phase === 'checking' || updateRestarting}
+                            onClick={() => void checkForUpdates()}
+                            className="folio-btn-navy inline-flex items-center gap-1.5 rounded-xl px-3.5 py-2 text-xs font-semibold disabled:opacity-50"
+                          >
+                            {updateStatus.phase === 'checking' ? (
+                              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            ) : (
+                              <RefreshCw className="h-3.5 w-3.5" />
+                            )}
+                            <span>
+                              {updateStatus.phase === 'checking'
+                                ? 'Checking…'
+                                : 'Check for Updates'}
+                            </span>
+                          </button>
+
+                          {updateStatus.phase === 'ready' && (
+                            <button
+                              type="button"
+                              data-testid="settings-restart-update-btn"
+                              disabled={updateRestarting}
+                              onClick={() => void restartAndInstall()}
+                              className="folio-btn-crimson inline-flex items-center gap-1.5 rounded-xl px-3.5 py-2 text-xs font-semibold disabled:cursor-wait disabled:opacity-75"
+                            >
+                              {updateRestarting ? (
+                                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                              ) : (
+                                <RefreshCw className="h-3.5 w-3.5" />
+                              )}
+                              <span>
+                                {updateRestarting ? 'Restarting…' : 'Restart to Update'}
+                              </span>
+                            </button>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* Local Build Folder (Instant PC Updates) */}
+                      <div className="space-y-3 rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-elevated)] p-4">
+                        <div className="flex items-center justify-between gap-3">
+                          <div>
+                            <h4 className="text-xs font-bold text-[var(--navy-900)]">
+                              Local Build Folder (Instant PC Updates)
+                            </h4>
+                            <p className="mt-0.5 text-[11px] text-[var(--navy-600)]">
+                              Automatically detects rebuilt installers in your local{' '}
+                              <code>release/</code> folder with zero GitHub upload needed.
+                            </p>
+                          </div>
+                          {renderToggleSwitch({
+                            testId: 'settings-local-watch-toggle',
+                            label: 'Toggle Local Build Folder Watch',
+                            checked: updateStatus.localWatchEnabled,
+                            onToggle: () =>
+                              void setLocalUpdateConfig({
+                                enabled: !updateStatus.localWatchEnabled,
+                              }),
+                          })}
+                        </div>
+
+                        <div
+                          data-testid="settings-local-release-dir"
+                          className="folio-mono truncate rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-canvas)] px-3 py-2 text-[11px] font-medium text-[var(--navy-900)]/80"
+                          title={updateStatus.localReleaseDir ?? 'No folder selected'}
+                        >
+                          {updateStatus.localReleaseDir ?? 'No folder selected'}
+                        </div>
+
+                        <div className="flex flex-wrap items-center gap-2">
+                          <button
+                            type="button"
+                            data-testid="settings-pick-local-dir-btn"
+                            onClick={() => void pickLocalUpdateDir()}
+                            className="folio-btn-secondary inline-flex items-center gap-1.5 rounded-xl px-3 py-1.5 text-xs font-semibold"
+                          >
+                            <FolderOpen className="h-3.5 w-3.5 text-[var(--navy-900)]" />
+                            <span>Choose Folder…</span>
+                          </button>
+
+                          {updateStatus.localReleaseDir && (
+                            <button
+                              type="button"
+                              data-testid="settings-clear-local-dir-btn"
+                              onClick={() =>
+                                void setLocalUpdateConfig({ enabled: false, releaseDir: null })
+                              }
+                              className="folio-press inline-flex items-center gap-1.5 rounded-xl border border-[var(--border-subtle)] px-3 py-1.5 text-xs font-semibold text-[var(--state-danger-text)] hover:bg-[var(--state-danger-bg)]"
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                              <span>Clear</span>
+                            </button>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* GitHub Releases Channel */}
+                      <div className="space-y-2 rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-canvas)] p-4">
+                        <div className="flex items-center gap-2 text-xs font-bold text-[var(--navy-900)]">
+                          <Globe className="h-4 w-4 text-[var(--navy-900)]" />
+                          <span>GitHub Releases Channel</span>
+                        </div>
+                        <p className="text-[11px] leading-relaxed text-[var(--navy-600)]">
+                          Connected repository:{' '}
+                          <code className="folio-mono rounded bg-[var(--surface-elevated)] px-1.5 py-0.5 text-[10px] font-semibold text-[var(--navy-900)]">
+                            ryanhauyinchan14-maker/Folio-Notes
+                          </code>
+                          . When your repository is Public and a tagged version release (
+                          <code>v*</code>) is published, every installed copy of Folio Notes checks
+                          and downloads updates automatically in the background.
+                        </p>
+                      </div>
+                    </>
+                    ) : (
+                      <div className="flex items-center gap-2 rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-canvas)] p-4 text-xs font-semibold text-[var(--navy-600)]">
+                        <Loader2 className="h-4 w-4 animate-spin text-[var(--navy-900)]" />
+                        <span>Loading desktop updater status…</span>
+                      </div>
+                    )
+                  ) : (
+                    <div
+                      data-testid="settings-updates-web-fallback"
+                      className="space-y-2 rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-canvas)] p-4"
+                    >
+                      <div className="flex items-center gap-2 text-xs font-bold text-[var(--navy-900)]">
+                        <RefreshCw className="h-4 w-4 text-[var(--crimson-500)]" />
+                        <span>Desktop Auto Updater</span>
+                      </div>
+                      <p className="text-xs leading-relaxed text-[var(--navy-600)]">
+                        You are currently viewing Folio Notes in a web browser. In the Folio Notes
+                        Windows desktop app, one click <strong>Restart to Update</strong> runs
+                        automatically from both your local build folder and GitHub Releases.
+                      </p>
+                    </div>
+                  )}
                 </div>
               )}
             </div>
