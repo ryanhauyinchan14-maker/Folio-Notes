@@ -1,9 +1,28 @@
 import type {
   BuiltInPaperPreset,
+  NotebookMode,
   PageOrientation,
   PageSizePresetId,
   PaperConfig,
+  PaperPattern,
 } from '../types/notes';
+
+export function formatPaperPatternLabel(pattern: PaperPattern): string {
+  switch (pattern) {
+    case 'blank':
+      return 'Blank';
+    case 'ruled':
+      return 'Lined';
+    case 'grid':
+      return 'Graph';
+    case 'dotted':
+      return 'Dotted';
+    case 'cornell':
+      return 'Study Notes';
+    default:
+      return pattern;
+  }
+}
 
 export interface PageSizeDefinition {
   id: PageSizePresetId;
@@ -14,12 +33,15 @@ export interface PageSizeDefinition {
 }
 
 export const PAGE_SIZE_DEFINITIONS: PageSizeDefinition[] = [
-  { id: 'letter', label: 'US Letter', subtitle: '816 × 1056 px (8.5 × 11 in)', width: 816, height: 1056 },
-  { id: 'a4', label: 'A4', subtitle: '794 × 1123 px (210 × 297 mm)', width: 794, height: 1123 },
-  { id: 'legal', label: 'Legal', subtitle: '816 × 1344 px (8.5 × 14 in)', width: 816, height: 1344 },
-  { id: 'tabloid', label: 'Tabloid', subtitle: '1056 × 1632 px (11 × 17 in)', width: 1056, height: 1632 },
-  { id: 'custom', label: 'Custom', subtitle: 'User-defined dimensions', width: 816, height: 1056 },
+  { id: 'letter', label: 'Standard Letter', subtitle: '8.5 × 11 in', width: 816, height: 1056 },
+  { id: 'a4', label: 'A4', subtitle: '210 × 297 mm', width: 794, height: 1123 },
+  { id: 'legal', label: 'Tall (Legal)', subtitle: '8.5 × 14 in', width: 816, height: 1344 },
+  { id: 'tabloid', label: 'Large (Poster)', subtitle: '11 × 17 in', width: 1056, height: 1632 },
+  { id: 'custom', label: 'Custom Size', subtitle: 'Enter any width and height', width: 816, height: 1056 },
 ];
+
+export const MIN_CUSTOM_PAGE_DIMENSION = 320;
+export const MAX_CUSTOM_PAGE_DIMENSION = 24000;
 
 export function resolvePageDimensions(
   preset: PageSizePresetId,
@@ -28,8 +50,14 @@ export function resolvePageDimensions(
   customHeight?: number,
 ): { width: number; height: number } {
   if (preset === 'custom') {
-    const w = Math.max(320, Math.min(2400, Math.round(customWidth || 816)));
-    const h = Math.max(320, Math.min(2400, Math.round(customHeight || 1056)));
+    const w = Math.max(
+      MIN_CUSTOM_PAGE_DIMENSION,
+      Math.min(MAX_CUSTOM_PAGE_DIMENSION, Math.round(customWidth || 816)),
+    );
+    const h = Math.max(
+      MIN_CUSTOM_PAGE_DIMENSION,
+      Math.min(MAX_CUSTOM_PAGE_DIMENSION, Math.round(customHeight || 1056)),
+    );
     if (orientation === 'landscape' && h > w) {
       return { width: h, height: w };
     }
@@ -46,11 +74,11 @@ export function resolvePageDimensions(
 }
 
 export const PAPER_COLOR_PRESETS = [
-  { id: 'white', label: 'Crisp White', color: '#FFFFFF' },
-  { id: 'cream', label: 'Warm Cream', color: '#FDF8EC' },
-  { id: 'yellow', label: 'Legal Yellow', color: '#FEF7C3' },
-  { id: 'mint', label: 'Soft Mint', color: '#F0FDF4' },
-  { id: 'dark', label: 'Midnight Slate', color: '#1E293B' },
+  { id: 'white', label: 'White', color: '#FFFFFF' },
+  { id: 'cream', label: 'Cream', color: '#FDF8EC' },
+  { id: 'yellow', label: 'Yellow', color: '#FEF7C3' },
+  { id: 'mint', label: 'Light Green', color: '#F0FDF4' },
+  { id: 'dark', label: 'Dark', color: '#1E293B' },
 ];
 
 export const DEFAULT_PAPER_CONFIG: PaperConfig = {
@@ -69,8 +97,7 @@ export const DEFAULT_PAPER_CONFIG: PaperConfig = {
 export const BUILT_IN_PAPER_PRESETS: BuiltInPaperPreset[] = [
   {
     id: 'builtin-ruled-letter',
-    name: 'College Ruled',
-    description: 'Classic ruled paper with left margin',
+    name: 'Lined Paper',
     paper: {
       ...DEFAULT_PAPER_CONFIG,
       pattern: 'ruled',
@@ -78,23 +105,51 @@ export const BUILT_IN_PAPER_PRESETS: BuiltInPaperPreset[] = [
       marginLine: true,
       paperColor: '#FFFFFF',
     },
-  },
-  {
-    id: 'builtin-wide-ruled',
-    name: 'Wide Ruled',
-    description: 'Generous 42px line spacing on warm cream',
-    paper: {
-      ...DEFAULT_PAPER_CONFIG,
-      pattern: 'ruled',
-      spacing: 42,
-      marginLine: true,
-      paperColor: '#FDF8EC',
-    },
+    variants: [
+      {
+        id: 'builtin-ruled-letter',
+        label: 'White',
+        fullName: 'Lined Paper',
+        swatchColor: '#FFFFFF',
+        paper: {
+          ...DEFAULT_PAPER_CONFIG,
+          pattern: 'ruled',
+          spacing: 32,
+          marginLine: true,
+          paperColor: '#FFFFFF',
+        },
+      },
+      {
+        id: 'builtin-wide-ruled',
+        label: 'Wide Cream',
+        fullName: 'Wide Lined (Cream)',
+        swatchColor: '#FDF8EC',
+        paper: {
+          ...DEFAULT_PAPER_CONFIG,
+          pattern: 'ruled',
+          spacing: 42,
+          marginLine: true,
+          paperColor: '#FDF8EC',
+        },
+      },
+      {
+        id: 'builtin-legal-pad',
+        label: 'Yellow',
+        fullName: 'Yellow Lined Pad',
+        swatchColor: '#FEF7C3',
+        paper: {
+          ...DEFAULT_PAPER_CONFIG,
+          pattern: 'ruled',
+          spacing: 32,
+          marginLine: true,
+          paperColor: '#FEF7C3',
+        },
+      },
+    ],
   },
   {
     id: 'builtin-grid',
-    name: 'Square Grid',
-    description: 'Clean engineering & math grid (24px)',
+    name: 'Graph Paper',
     paper: {
       ...DEFAULT_PAPER_CONFIG,
       pattern: 'grid',
@@ -102,11 +157,38 @@ export const BUILT_IN_PAPER_PRESETS: BuiltInPaperPreset[] = [
       marginLine: false,
       paperColor: '#FFFFFF',
     },
+    variants: [
+      {
+        id: 'builtin-grid',
+        label: 'Light',
+        fullName: 'Graph Paper',
+        swatchColor: '#FFFFFF',
+        paper: {
+          ...DEFAULT_PAPER_CONFIG,
+          pattern: 'grid',
+          spacing: 24,
+          marginLine: false,
+          paperColor: '#FFFFFF',
+        },
+      },
+      {
+        id: 'builtin-dark-grid',
+        label: 'Dark',
+        fullName: 'Dark Graph Paper',
+        swatchColor: '#1E293B',
+        paper: {
+          ...DEFAULT_PAPER_CONFIG,
+          pattern: 'grid',
+          spacing: 24,
+          marginLine: false,
+          paperColor: '#1E293B',
+        },
+      },
+    ],
   },
   {
     id: 'builtin-dotted',
-    name: 'Dot Grid',
-    description: 'Minimalist bullet-journal dot grid',
+    name: 'Dotted Paper',
     paper: {
       ...DEFAULT_PAPER_CONFIG,
       pattern: 'dotted',
@@ -117,8 +199,7 @@ export const BUILT_IN_PAPER_PRESETS: BuiltInPaperPreset[] = [
   },
   {
     id: 'builtin-cornell',
-    name: 'Cornell Notes',
-    description: 'Cue column, notes area, and summary footer',
+    name: 'Study Notes (Cornell)',
     paper: {
       ...DEFAULT_PAPER_CONFIG,
       pattern: 'cornell',
@@ -129,8 +210,7 @@ export const BUILT_IN_PAPER_PRESETS: BuiltInPaperPreset[] = [
   },
   {
     id: 'builtin-blank',
-    name: 'Blank Sheet',
-    description: 'Clean unruled canvas for sketching',
+    name: 'Blank Paper',
     paper: {
       ...DEFAULT_PAPER_CONFIG,
       pattern: 'blank',
@@ -138,5 +218,160 @@ export const BUILT_IN_PAPER_PRESETS: BuiltInPaperPreset[] = [
       marginLine: false,
       paperColor: '#FFFFFF',
     },
+    variants: [
+      {
+        id: 'builtin-blank',
+        label: 'Portrait',
+        fullName: 'Blank Paper',
+        paper: {
+          ...DEFAULT_PAPER_CONFIG,
+          pattern: 'blank',
+          spacing: 32,
+          marginLine: false,
+          paperColor: '#FFFFFF',
+        },
+      },
+      {
+        id: 'builtin-landscape-sketch',
+        label: 'Wide',
+        fullName: 'Wide Blank Page',
+        paper: {
+          ...DEFAULT_PAPER_CONFIG,
+          sizePreset: 'letter',
+          orientation: 'landscape',
+          width: 1056,
+          height: 816,
+          pattern: 'blank',
+          spacing: 32,
+          marginLine: false,
+          paperColor: '#FFFFFF',
+        },
+      },
+    ],
   },
 ];
+
+export const BUILT_IN_WHITEBOARD_PRESETS: BuiltInPaperPreset[] = [
+  {
+    id: 'builtin-wb-dotted',
+    name: 'Dotted Whiteboard',
+    mode: 'whiteboard',
+    paper: {
+      sizePreset: 'custom',
+      orientation: 'landscape',
+      width: 1200,
+      height: 800,
+      pattern: 'dotted',
+      spacing: 32,
+      marginLine: false,
+      paperColor: '#FFFFFF',
+    },
+    variants: [
+      {
+        id: 'builtin-wb-dotted',
+        label: 'Light',
+        fullName: 'Dotted Whiteboard',
+        swatchColor: '#FFFFFF',
+        paper: {
+          sizePreset: 'custom',
+          orientation: 'landscape',
+          width: 1200,
+          height: 800,
+          pattern: 'dotted',
+          spacing: 32,
+          marginLine: false,
+          paperColor: '#FFFFFF',
+        },
+      },
+      {
+        id: 'builtin-wb-dark-dots',
+        label: 'Dark',
+        fullName: 'Dark Whiteboard',
+        swatchColor: '#1E293B',
+        paper: {
+          sizePreset: 'custom',
+          orientation: 'landscape',
+          width: 1200,
+          height: 800,
+          pattern: 'dotted',
+          spacing: 32,
+          marginLine: false,
+          paperColor: '#1E293B',
+        },
+      },
+    ],
+  },
+  {
+    id: 'builtin-wb-grid',
+    name: 'Grid Whiteboard',
+    mode: 'whiteboard',
+    paper: {
+      sizePreset: 'custom',
+      orientation: 'landscape',
+      width: 1200,
+      height: 800,
+      pattern: 'grid',
+      spacing: 28,
+      marginLine: false,
+      paperColor: '#FFFFFF',
+    },
+  },
+  {
+    id: 'builtin-wb-blank',
+    name: 'Blank Whiteboard',
+    mode: 'whiteboard',
+    paper: {
+      sizePreset: 'custom',
+      orientation: 'landscape',
+      width: 1200,
+      height: 800,
+      pattern: 'blank',
+      spacing: 32,
+      marginLine: false,
+      paperColor: '#FFFFFF',
+    },
+  },
+];
+
+export interface FlatBuiltInPreset {
+  id: string;
+  name: string;
+  groupId: string;
+  groupName: string;
+  variantLabel?: string;
+  mode: NotebookMode;
+  paper: PaperConfig;
+}
+
+export function flattenBuiltInPresets(presets: BuiltInPaperPreset[]): FlatBuiltInPreset[] {
+  return presets.flatMap((preset) => {
+    const mode: NotebookMode = preset.mode ?? 'notebook';
+    if (!preset.variants || preset.variants.length === 0) {
+      return [
+        {
+          id: preset.id,
+          name: preset.name,
+          groupId: preset.id,
+          groupName: preset.name,
+          mode,
+          paper: preset.paper,
+        },
+      ];
+    }
+    return preset.variants.map((variant) => ({
+      id: variant.id,
+      name: variant.fullName,
+      groupId: preset.id,
+      groupName: preset.name,
+      variantLabel: variant.label,
+      mode,
+      paper: variant.paper,
+    }));
+  });
+}
+
+export const ALL_BUILT_IN_PAPER_VARIANTS: FlatBuiltInPreset[] =
+  flattenBuiltInPresets(BUILT_IN_PAPER_PRESETS);
+
+export const ALL_BUILT_IN_WHITEBOARD_VARIANTS: FlatBuiltInPreset[] =
+  flattenBuiltInPresets(BUILT_IN_WHITEBOARD_PRESETS);

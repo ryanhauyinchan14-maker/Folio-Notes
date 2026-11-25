@@ -1,7 +1,13 @@
 import JSZip from 'jszip';
 import { PDFDocument } from 'pdf-lib';
-import { drawCommittedImage } from '../canvas/imageRenderer';
-import { renderPaperBackground, resolvePaperLineColors } from '../canvas/paperRenderer';
+import { boundsOverlap } from '../canvas/geometry';
+import { drawCommittedImage, getImageBounds } from '../canvas/imageRenderer';
+import {
+  renderPaperBackground,
+  renderWhiteboardBackground,
+  resolvePaperLineColors,
+} from '../canvas/paperRenderer';
+import { getTextboxBounds } from '../canvas/selection';
 import {
   drawCommittedStroke,
   getFreehandStrokeOutline,
@@ -12,11 +18,18 @@ import {
   measureTextboxLayout,
   TEXTBOX_FONT_STACKS,
 } from '../canvas/textLayout';
+import {
+  getPageContentBounds,
+  normalizeWhiteboardPageForExport,
+  WHITEBOARD_EXPORT_MARGIN,
+} from '../canvas/whiteboard';
 import { db } from '../db/database';
 import type {
+  BoundingBox,
   CoverConfig,
   Folder,
   Notebook,
+  NotebookMode,
   Page,
   PageImage,
   PaperConfig,
@@ -27,6 +40,32 @@ import type {
 } from '../types/notes';
 import { getPdfDocumentForAsset, renderPdfPageToCanvas } from './pdfEngine';
 import { arrayBufferToBase64 } from './vaultCrypto';
+
+export const MAX_EXPORT_CANVAS_DIMENSION = 8192;
+export const MAX_EXPORT_CANVAS_PIXELS = 67_108_864;
+export const MAX_PDF_PAGE_PT = 14400;
+
+export const IMAGE_EXPORT_MAX_PRESETS = [2048, 4096, 8192] as const;
+export type ImageExportMaxDimension = (typeof IMAGE_EXPORT_MAX_PRESETS)[number];
+export type ImageExportAreaMode = 'full' | 'screen' | 'custom' | 'content';
+
+export interface ExportCropRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface ResolvedImageExportMetrics {
+  sourceWidth: number;
+  sourceHeight: number;
+  outputWidth: number;
+  outputHeight: number;
+  requestedScale: number;
+  effectiveScale: number;
+  isCondensed: boolean;
+  scalePercent: number;
+}
 
 export type ExportFormat = 'pdf' | 'png' | 'jpg' | 'svg' | 'folio';
 export type PageRangeMode = 'current' | 'all' | 'custom';
@@ -51,6 +90,7 @@ export interface FolioNotebookExport {
   exportedAt: number;
   notebook: {
     title: string;
+    mode?: NotebookMode;
     cover: CoverConfig;
     defaultPaper: PaperConfig;
   };
@@ -218,28 +258,281 @@ async function readPlainAssetBytesFromDb(assetId: string): Promise<ArrayBuffer |
   return null;
 }
 
+export function resolveImageExportMetrics(params: {
+  sourceWidth: number;
+  sourceHeight: number;
+  scale: number;
+  maxDimension?: number;
+}): ResolvedImageExportMetrics {
+  const safeW = Math.max(1, params.sourceWidth);
+  const safeH = Math.max(1, params.sourceHeight);
+  const requestedScale = Math.max(0.05, params.scale);
+  const maxDim = Math.max(
+    512,
+    Math.min(
+      MAX_EXPORT_CANVAS_DIMENSION,
+      Math.round(params.maxDimension ?? MAX_EXPORT_CANVAS_DIMENSION),
+    ),
+  );
+  const maxPixels = Math.min(MAX_EXPORT_CANVAS_PIXELS, maxDim * maxDim);
+
+  const maxDimScale = Math.min(maxDim / safeW, maxDim / safeH);
+  const maxAreaScale = Math.sqrt(maxPixels / (safeW * safeH));
+  const effectiveScale = Math.min(requestedScale, maxDimScale, maxAreaScale);
+
+  const outputWidth = Math.max(1, Math.round(safeW * effectiveScale));
+  const outputHeight = Math.max(1, Math.round(safeH * effectiveScale));
+
+  return {
+    sourceWidth: safeW,
+    sourceHeight: safeH,
+    outputWidth,
+    outputHeight,
+    requestedScale,
+    effectiveScale,
+    isCondensed: effectiveScale < 0.999,
+    scalePercent: Math.max(1, Math.round(effectiveScale * 100)),
+  };
+}
+
+/**
+ * Computes a tight positive crop rectangle covering all ink, textboxes, and images
+ * on a fixed page (+`padding` px margin), or `null` if the page is blank.
+ */
+export function computeContentCropRect(
+  page: Pick<Page, 'paper' | 'strokes' | 'textboxes' | 'images'>,
+  padding = 48,
+): ExportCropRect | null {
+  const bounds = getPageContentBounds(page);
+  if (!bounds) return null;
+
+  const safeW = Math.max(1, page.paper.width);
+  const safeH = Math.max(1, page.paper.height);
+
+  let x1 = Math.max(0, Math.floor(bounds.minX - padding));
+  let y1 = Math.max(0, Math.floor(bounds.minY - padding));
+  let x2 = Math.min(safeW, Math.ceil(bounds.maxX + padding));
+  let y2 = Math.min(safeH, Math.ceil(bounds.maxY + padding));
+
+  const minSpanX = Math.min(64, safeW);
+  if (x2 - x1 < minSpanX) {
+    x2 = Math.min(safeW, x1 + minSpanX);
+    x1 = Math.max(0, x2 - minSpanX);
+  }
+
+  const minSpanY = Math.min(64, safeH);
+  if (y2 - y1 < minSpanY) {
+    y2 = Math.min(safeH, y1 + minSpanY);
+    y1 = Math.max(0, y2 - minSpanY);
+  }
+
+  return {
+    x: x1,
+    y: y1,
+    width: Math.max(1, x2 - x1),
+    height: Math.max(1, y2 - y1),
+  };
+}
+
+/**
+ * Computes an overview world rectangle spanning all whiteboard content plus the
+ * currently visible screen rectangle so area pickers show everything cleanly.
+ */
+export function computeWhiteboardOverviewRect(
+  page: Pick<Page, 'strokes' | 'textboxes' | 'images'>,
+  visibleRect?: ExportCropRect | null,
+): ExportCropRect {
+  const bounds = getPageContentBounds(page);
+  const hasVisible = Boolean(
+    visibleRect &&
+      Number.isFinite(visibleRect.x) &&
+      Number.isFinite(visibleRect.y) &&
+      visibleRect.width > 0 &&
+      visibleRect.height > 0,
+  );
+
+  if (!bounds && !hasVisible) {
+    return { x: -600, y: -400, width: 1200, height: 800 };
+  }
+
+  let minX = bounds ? bounds.minX - WHITEBOARD_EXPORT_MARGIN : Infinity;
+  let minY = bounds ? bounds.minY - WHITEBOARD_EXPORT_MARGIN : Infinity;
+  let maxX = bounds ? bounds.maxX + WHITEBOARD_EXPORT_MARGIN : -Infinity;
+  let maxY = bounds ? bounds.maxY + WHITEBOARD_EXPORT_MARGIN : -Infinity;
+
+  if (hasVisible && visibleRect) {
+    minX = Math.min(minX, visibleRect.x);
+    minY = Math.min(minY, visibleRect.y);
+    maxX = Math.max(maxX, visibleRect.x + visibleRect.width);
+    maxY = Math.max(maxY, visibleRect.y + visibleRect.height);
+  }
+
+  return {
+    x: Math.floor(minX),
+    y: Math.floor(minY),
+    width: Math.max(120, Math.ceil(maxX - minX)),
+    height: Math.max(120, Math.ceil(maxY - minY)),
+  };
+}
+
 export interface RenderPageExportOptions {
   scale: number;
   includeBackground: boolean;
   includeAnnotations: boolean;
   transparentBackground?: boolean;
+  isWhiteboard?: boolean;
+  cropRect?: ExportCropRect | null;
+  maxDimension?: number;
   resolvePdfBytes?: (assetId: string) => Promise<ArrayBuffer | null>;
 }
 
+function rectToBoundingBox(rect: ExportCropRect): BoundingBox {
+  return {
+    minX: rect.x,
+    minY: rect.y,
+    maxX: rect.x + rect.width,
+    maxY: rect.y + rect.height,
+  };
+}
+
 export async function renderPageToCanvas(
-  page: Page,
+  rawPage: Page,
   options: RenderPageExportOptions,
 ): Promise<HTMLCanvasElement> {
   if (typeof document === 'undefined') {
     throw new Error('Canvas rendering requires a browser/DOM environment.');
   }
 
+  const hasCrop = Boolean(
+    options.cropRect &&
+      Number.isFinite(options.cropRect.width) &&
+      Number.isFinite(options.cropRect.height) &&
+      options.cropRect.width > 0 &&
+      options.cropRect.height > 0,
+  );
+
+  if (hasCrop && options.cropRect) {
+    const crop = options.cropRect;
+    if (options.includeAnnotations && rawPage.images && rawPage.images.length > 0) {
+      await ensurePageImagesDecoded(rawPage.images);
+    }
+
+    const metrics = resolveImageExportMetrics({
+      sourceWidth: crop.width,
+      sourceHeight: crop.height,
+      scale: options.scale,
+      maxDimension: options.maxDimension,
+    });
+
+    const canvas = document.createElement('canvas');
+    canvas.width = metrics.outputWidth;
+    canvas.height = metrics.outputHeight;
+
+    const ctx = canvas.getContext('2d');
+    if (!ctx) {
+      throw new Error('Failed to acquire 2D canvas context.');
+    }
+
+    const cropBox = rectToBoundingBox(crop);
+
+    ctx.save();
+    ctx.scale(metrics.effectiveScale, metrics.effectiveScale);
+    ctx.translate(-crop.x, -crop.y);
+
+    if (options.transparentBackground) {
+      ctx.clearRect(crop.x, crop.y, crop.width, crop.height);
+    } else if (options.includeBackground && rawPage.pdfBackground) {
+      ctx.fillStyle = '#FFFFFF';
+      ctx.fillRect(crop.x, crop.y, crop.width, crop.height);
+      const doc = await getPdfDocumentForAsset(
+        rawPage.pdfBackground.assetId,
+        null,
+        options.resolvePdfBytes,
+      );
+      if (doc) {
+        const pdfMetrics = resolveImageExportMetrics({
+          sourceWidth: rawPage.paper.width,
+          sourceHeight: rawPage.paper.height,
+          scale: metrics.effectiveScale,
+          maxDimension: MAX_EXPORT_CANVAS_DIMENSION,
+        });
+        const pdfCanvas = document.createElement('canvas');
+        const ok = await renderPdfPageToCanvas({
+          doc,
+          pageNumber: rawPage.pdfBackground.pageNumber,
+          canvas: pdfCanvas,
+          targetWidthPx: pdfMetrics.outputWidth,
+          targetHeightPx: pdfMetrics.outputHeight,
+        });
+        if (ok) {
+          ctx.drawImage(pdfCanvas, 0, 0, rawPage.paper.width, rawPage.paper.height);
+        }
+      }
+    } else if (options.includeBackground && options.isWhiteboard) {
+      renderWhiteboardBackground(
+        ctx,
+        rawPage.paper,
+        cropBox,
+        Math.max(0.08, Math.min(1, metrics.effectiveScale)),
+      );
+    } else if (options.includeBackground) {
+      renderPaperBackground(ctx, rawPage.paper, cropBox);
+    } else {
+      ctx.fillStyle = '#FFFFFF';
+      ctx.fillRect(crop.x, crop.y, crop.width, crop.height);
+    }
+
+    if (options.includeAnnotations) {
+      const sortedImages = [...(rawPage.images ?? [])].sort((a, b) => a.zIndex - b.zIndex);
+      for (const img of sortedImages) {
+        if (boundsOverlap(cropBox, getImageBounds(img))) {
+          drawCommittedImage(ctx, img);
+        }
+      }
+      for (const stroke of rawPage.strokes) {
+        const pad = Math.max(16, (stroke.size || 4) * 2);
+        const sb = stroke.bounds;
+        if (
+          sb &&
+          !boundsOverlap(cropBox, {
+            minX: sb.minX - pad,
+            minY: sb.minY - pad,
+            maxX: sb.maxX + pad,
+            maxY: sb.maxY + pad,
+          })
+        ) {
+          continue;
+        }
+        drawCommittedStroke(ctx, stroke, true);
+      }
+      for (const tb of rawPage.textboxes ?? []) {
+        if (boundsOverlap(cropBox, getTextboxBounds(tb))) {
+          drawCommittedTextbox(ctx, tb);
+        }
+      }
+    }
+
+    ctx.restore();
+    return canvas;
+  }
+
+  const page = options.isWhiteboard
+    ? normalizeWhiteboardPageForExport(rawPage, WHITEBOARD_EXPORT_MARGIN)
+    : rawPage;
+
   if (options.includeAnnotations && page.images && page.images.length > 0) {
     await ensurePageImagesDecoded(page.images);
   }
 
-  const width = Math.max(1, Math.round(page.paper.width * options.scale));
-  const height = Math.max(1, Math.round(page.paper.height * options.scale));
+  const metrics = resolveImageExportMetrics({
+    sourceWidth: page.paper.width,
+    sourceHeight: page.paper.height,
+    scale: options.scale,
+    maxDimension: options.maxDimension,
+  });
+
+  const width = metrics.outputWidth;
+  const height = metrics.outputHeight;
 
   const canvas = document.createElement('canvas');
   canvas.width = width;
@@ -251,7 +544,7 @@ export async function renderPageToCanvas(
   }
 
   ctx.save();
-  ctx.scale(options.scale, options.scale);
+  ctx.scale(metrics.effectiveScale, metrics.effectiveScale);
 
   if (options.transparentBackground) {
     ctx.clearRect(0, 0, page.paper.width, page.paper.height);
@@ -322,13 +615,168 @@ function canvasToBytes(
 }
 
 export async function renderExportPreviewDataUrl(
-  page: Page,
-  options: Omit<RenderPageExportOptions, 'scale'> & { maxWidth?: number },
+  rawPage: Page,
+  options: Omit<RenderPageExportOptions, 'scale'> & { maxWidth?: number; maxHeight?: number },
 ): Promise<string> {
   const maxW = options.maxWidth ?? 260;
-  const scale = Math.min(1, maxW / Math.max(1, page.paper.width));
-  const canvas = await renderPageToCanvas(page, { ...options, scale });
+  const maxH = options.maxHeight ?? maxW;
+
+  if (options.cropRect && options.cropRect.width > 0 && options.cropRect.height > 0) {
+    const scale = Math.min(
+      1,
+      maxW / Math.max(1, options.cropRect.width),
+      maxH / Math.max(1, options.cropRect.height),
+    );
+    const canvas = await renderPageToCanvas(rawPage, {
+      ...options,
+      scale,
+    });
+    return canvas.toDataURL('image/png');
+  }
+
+  const targetPage = options.isWhiteboard
+    ? normalizeWhiteboardPageForExport(rawPage, WHITEBOARD_EXPORT_MARGIN)
+    : rawPage;
+  const scale = Math.min(
+    1,
+    maxW / Math.max(1, targetPage.paper.width),
+    maxH / Math.max(1, targetPage.paper.height),
+  );
+  const canvas = await renderPageToCanvas(targetPage, {
+    ...options,
+    isWhiteboard: false,
+    cropRect: undefined,
+    scale,
+  });
   return canvas.toDataURL('image/png');
+}
+
+function pickDetailSampleRect(
+  page: Page,
+  region: ExportCropRect,
+  sampleWidth: number,
+  sampleHeight: number,
+): ExportCropRect {
+  const sw = Math.max(32, Math.min(region.width, sampleWidth));
+  const sh = Math.max(32, Math.min(region.height, sampleHeight));
+  const regionBox = rectToBoundingBox(region);
+
+  let focusX = region.x + region.width / 2;
+  let focusY = region.y + region.height / 2;
+  let foundFocus = false;
+
+  for (const s of page.strokes) {
+    if (s.bounds && boundsOverlap(regionBox, s.bounds)) {
+      focusX =
+        (Math.max(regionBox.minX, s.bounds.minX) + Math.min(regionBox.maxX, s.bounds.maxX)) / 2;
+      focusY =
+        (Math.max(regionBox.minY, s.bounds.minY) + Math.min(regionBox.maxY, s.bounds.maxY)) / 2;
+      foundFocus = true;
+      break;
+    }
+  }
+  if (!foundFocus) {
+    for (const tb of page.textboxes ?? []) {
+      const b = getTextboxBounds(tb);
+      if (boundsOverlap(regionBox, b)) {
+        focusX = (Math.max(regionBox.minX, b.minX) + Math.min(regionBox.maxX, b.maxX)) / 2;
+        focusY = (Math.max(regionBox.minY, b.minY) + Math.min(regionBox.maxY, b.maxY)) / 2;
+        foundFocus = true;
+        break;
+      }
+    }
+  }
+  if (!foundFocus) {
+    for (const im of page.images ?? []) {
+      const b = getImageBounds(im);
+      if (boundsOverlap(regionBox, b)) {
+        focusX = (Math.max(regionBox.minX, b.minX) + Math.min(regionBox.maxX, b.maxX)) / 2;
+        focusY = (Math.max(regionBox.minY, b.minY) + Math.min(regionBox.maxY, b.maxY)) / 2;
+        foundFocus = true;
+        break;
+      }
+    }
+  }
+
+  const x = Math.max(
+    region.x,
+    Math.min(region.x + region.width - sw, Math.round(focusX - sw / 2)),
+  );
+  const y = Math.max(
+    region.y,
+    Math.min(region.y + region.height - sh, Math.round(focusY - sh / 2)),
+  );
+  return { x, y, width: sw, height: sh };
+}
+
+/**
+ * Renders a small 1:1 sharpness comparison patch from inside the export region using
+ * `effectiveScale`, then scales back up to preview dimensions so users can visually compare
+ * condensed vs full-sharpness output before downloading.
+ */
+export async function renderExportDetailSampleDataUrl(
+  rawPage: Page,
+  options: {
+    includeBackground: boolean;
+    includeAnnotations: boolean;
+    transparentBackground?: boolean;
+    isWhiteboard?: boolean;
+    cropRect?: ExportCropRect | null;
+    effectiveScale: number;
+    resolvePdfBytes?: (assetId: string) => Promise<ArrayBuffer | null>;
+    sampleWidth?: number;
+    sampleHeight?: number;
+  },
+): Promise<string> {
+  if (typeof document === 'undefined') {
+    throw new Error('Detail sample rendering requires a browser/DOM environment.');
+  }
+
+  const sampleWidth = options.sampleWidth ?? 260;
+  const sampleHeight = options.sampleHeight ?? 68;
+
+  let region: ExportCropRect;
+  if (options.cropRect && options.cropRect.width > 0 && options.cropRect.height > 0) {
+    region = options.cropRect;
+  } else if (options.isWhiteboard) {
+    region = computeWhiteboardOverviewRect(rawPage);
+  } else {
+    region = {
+      x: 0,
+      y: 0,
+      width: Math.max(1, rawPage.paper.width),
+      height: Math.max(1, rawPage.paper.height),
+    };
+  }
+
+  const sampleRect = pickDetailSampleRect(rawPage, region, sampleWidth, sampleHeight);
+  const renderScale = Math.min(2, Math.max(0.05, options.effectiveScale));
+
+  const patchCanvas = await renderPageToCanvas(rawPage, {
+    scale: renderScale,
+    includeBackground: options.includeBackground,
+    includeAnnotations: options.includeAnnotations,
+    transparentBackground: options.transparentBackground,
+    isWhiteboard: options.isWhiteboard,
+    cropRect: sampleRect,
+    resolvePdfBytes: options.resolvePdfBytes,
+  });
+
+  const outCanvas = document.createElement('canvas');
+  outCanvas.width = sampleWidth;
+  outCanvas.height = sampleHeight;
+  const outCtx = outCanvas.getContext('2d');
+  if (!outCtx) {
+    return patchCanvas.toDataURL('image/png');
+  }
+
+  outCtx.imageSmoothingEnabled = true;
+  if (!options.transparentBackground) {
+    outCtx.fillStyle = rawPage.paper.paperColor || '#FFFFFF';
+    outCtx.fillRect(0, 0, sampleWidth, sampleHeight);
+  }
+  outCtx.drawImage(patchCanvas, 0, 0, sampleWidth, sampleHeight);
+  return outCanvas.toDataURL('image/png');
 }
 
 export async function renderPdfPageToDataUrl(
@@ -362,6 +810,7 @@ export async function exportNotebookToPdf(params: {
   includeBackground: boolean;
   includeAnnotations: boolean;
   scale: number;
+  isWhiteboard?: boolean;
   resolvePdfBytes?: (assetId: string) => Promise<ArrayBuffer | null>;
   onProgress?: (current: number, total: number) => void;
 }): Promise<Uint8Array> {
@@ -372,6 +821,7 @@ export async function exportNotebookToPdf(params: {
     includeBackground,
     includeAnnotations,
     scale,
+    isWhiteboard = false,
     resolvePdfBytes,
     onProgress,
   } = params;
@@ -451,18 +901,28 @@ export async function exportNotebookToPdf(params: {
       }
     }
 
-    const canvas = await renderPageToCanvas(page, {
+    const normalizedPage = isWhiteboard
+      ? normalizeWhiteboardPageForExport(page, WHITEBOARD_EXPORT_MARGIN)
+      : page;
+
+    const canvas = await renderPageToCanvas(normalizedPage, {
       scale,
       includeBackground,
       includeAnnotations,
       transparentBackground: false,
+      isWhiteboard: false,
       resolvePdfBytes: resolveBytes,
     });
     const pngBytes = await canvasToBytes(canvas, 'image/png');
     const embeddedImage = await pdfDoc.embedPng(pngBytes);
 
-    const ptWidth = page.paper.width * ptPerPx;
-    const ptHeight = page.paper.height * ptPerPx;
+    let ptWidth = normalizedPage.paper.width * ptPerPx;
+    let ptHeight = normalizedPage.paper.height * ptPerPx;
+    if (ptWidth > MAX_PDF_PAGE_PT || ptHeight > MAX_PDF_PAGE_PT) {
+      const pdfFit = Math.min(MAX_PDF_PAGE_PT / ptWidth, MAX_PDF_PAGE_PT / ptHeight);
+      ptWidth *= pdfFit;
+      ptHeight *= pdfFit;
+    }
     const pdfPage = pdfDoc.addPage([ptWidth, ptHeight]);
     pdfPage.drawImage(embeddedImage, {
       x: 0,
@@ -494,6 +954,10 @@ export async function exportPagesToImages(params: {
   transparentBackground: boolean;
   jpgQuality: number;
   scale?: number;
+  isWhiteboard?: boolean;
+  areaMode?: ImageExportAreaMode;
+  cropRect?: ExportCropRect | null;
+  maxDimension?: number;
   resolvePdfBytes?: (assetId: string) => Promise<ArrayBuffer | null>;
   onProgress?: (current: number, total: number) => void;
 }): Promise<ImageExportResult> {
@@ -507,6 +971,10 @@ export async function exportPagesToImages(params: {
     transparentBackground,
     jpgQuality,
     scale = 2,
+    isWhiteboard = false,
+    areaMode = 'full',
+    cropRect = null,
+    maxDimension,
     resolvePdfBytes,
     onProgress,
   } = params;
@@ -516,13 +984,27 @@ export async function exportPagesToImages(params: {
   const ext = format === 'png' ? 'png' : 'jpg';
   const total = selectedIndices.length;
 
+  const resolvePageCrop = (page: Page): ExportCropRect | undefined => {
+    if (areaMode === 'screen' || areaMode === 'custom') {
+      return cropRect ?? undefined;
+    }
+    if (areaMode === 'content' && !isWhiteboard) {
+      return computeContentCropRect(page, 48) ?? undefined;
+    }
+    return undefined;
+  };
+
   const renderSingle = async (idx: number): Promise<Uint8Array> => {
     const page = pages[idx];
+    const resolvedCrop = resolvePageCrop(page);
     const canvas = await renderPageToCanvas(page, {
       scale,
       includeBackground: format === 'png' && transparentBackground ? false : includeBackground,
       includeAnnotations,
       transparentBackground: format === 'png' ? transparentBackground : false,
+      isWhiteboard,
+      cropRect: resolvedCrop,
+      maxDimension,
       resolvePdfBytes,
     });
     return canvasToBytes(canvas, mime, jpgQuality);
@@ -533,9 +1015,17 @@ export async function exportPagesToImages(params: {
     onProgress?.(1, 1);
     const bytes = await renderSingle(idx);
     const ab = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+    const areaSuffix =
+      areaMode === 'screen'
+        ? ' (Screen)'
+        : areaMode === 'custom'
+          ? ' (Area)'
+          : areaMode === 'content'
+            ? ' (Cropped)'
+            : '';
     return {
       blob: new Blob([ab], { type: mime }),
-      filename: `${safeBase} - Page ${idx + 1}.${ext}`,
+      filename: `${safeBase} - Page ${idx + 1}${areaSuffix}.${ext}`,
       isZip: false,
     };
   }
@@ -600,14 +1090,17 @@ function buildPaperSvgElements(paper: PaperConfig): string {
     }
   } else if (pattern === 'dotted') {
     const radius = Math.max(1, Math.min(1.8, spacing * 0.045));
-    const dots: string[] = [];
-    for (let x = spacing; x <= width - spacing * 0.5; x += spacing) {
-      for (let y = spacing; y <= height - spacing * 0.5; y += spacing) {
-        dots.push(`<circle cx="${x}" cy="${y}" r="${radius.toFixed(2)}" />`);
-      }
-    }
-    if (dots.length > 0) {
-      parts.push(`<g fill="${escapeXml(colors.dotColor)}">${dots.join('')}</g>`);
+    const cols = Math.floor((width - spacing * 0.5) / spacing);
+    const rows = Math.floor((height - spacing * 0.5) / spacing);
+    if (cols >= 1 && rows >= 1) {
+      const patternId = `folio-dot-grid-${spacing}`;
+      const startOffset = spacing * 0.5;
+      parts.push(
+        `<defs><pattern id="${patternId}" x="${startOffset}" y="${startOffset}" width="${spacing}" height="${spacing}" patternUnits="userSpaceOnUse"><circle cx="${startOffset}" cy="${startOffset}" r="${radius.toFixed(2)}" fill="${escapeXml(colors.dotColor)}" /></pattern></defs>`,
+      );
+      parts.push(
+        `<rect x="${startOffset}" y="${startOffset}" width="${cols * spacing}" height="${rows * spacing}" fill="url(#${patternId})" />`,
+      );
     }
   } else if (pattern === 'cornell') {
     const topHeaderY = Math.round(Math.max(72, Math.min(110, height * 0.095)));
@@ -651,9 +1144,19 @@ export function exportPageToSvg(params: {
   page: Page;
   includeBackground: boolean;
   includeAnnotations: boolean;
+  isWhiteboard?: boolean;
   pdfBackgroundDataUrl?: string;
 }): string {
-  const { page, includeBackground, includeAnnotations, pdfBackgroundDataUrl } = params;
+  const {
+    page: rawPage,
+    includeBackground,
+    includeAnnotations,
+    isWhiteboard = false,
+    pdfBackgroundDataUrl,
+  } = params;
+  const page = isWhiteboard
+    ? normalizeWhiteboardPageForExport(rawPage, WHITEBOARD_EXPORT_MARGIN)
+    : rawPage;
   const { width, height } = page.paper;
   const defs: string[] = [];
   const body: string[] = [];
@@ -725,6 +1228,7 @@ export function exportPageToSvg(params: {
         stroke.size,
         stroke.simulatePressure,
         true,
+        Boolean(stroke.isTidied),
       );
       const d = outlineToSvgPath(outline);
       if (d) {
@@ -764,6 +1268,7 @@ export function buildFolioNotebookExport(
     exportedAt: Date.now(),
     notebook: {
       title: notebook.title,
+      ...(notebook.mode ? { mode: notebook.mode } : {}),
       cover: { ...notebook.cover },
       defaultPaper: { ...notebook.defaultPaper },
     },
@@ -868,8 +1373,11 @@ export function estimateExportSizeLabel(params: {
   pageCount: number;
   scale?: number;
   pages?: Page[];
+  outputWidth?: number;
+  outputHeight?: number;
+  jpgQuality?: number;
 }): string {
-  const { format, pageCount, scale = 1.5, pages = [] } = params;
+  const { format, pageCount, scale = 1.5, pages = [], outputWidth, outputHeight, jpgQuality } = params;
   let estKb = 0;
 
   if (format === 'folio') {
@@ -887,6 +1395,13 @@ export function estimateExportSizeLabel(params: {
     estKb = Math.max(4, Math.round(24 + (pages[0]?.strokes.length ?? 0) * 1.4));
   } else if (format === 'pdf') {
     estKb = Math.max(30, Math.round(pageCount * (scale >= 2 ? 260 : 120)));
+  } else if (outputWidth && outputHeight) {
+    const megapixels = (outputWidth * outputHeight) / 1_000_000;
+    const kbPerMp =
+      format === 'png'
+        ? 95
+        : Math.max(32, Math.round(45 + ((jpgQuality ?? 92) - 70) * 1.4));
+    estKb = Math.max(25, Math.round(pageCount * megapixels * kbPerMp));
   } else {
     estKb = Math.max(25, Math.round(pageCount * (format === 'png' ? 180 : 110)));
   }

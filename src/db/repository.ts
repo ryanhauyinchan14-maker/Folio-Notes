@@ -1,12 +1,14 @@
 import { cloneStrokeWithNewId } from '../canvas/geometry';
 import { remapGroupIdsForClones } from '../canvas/selection';
 import { generatePageThumbnail } from '../canvas/thumbnail';
+import { DEFAULT_WHITEBOARD_PAPER } from '../canvas/whiteboard';
 import { DEFAULT_PAPER_CONFIG } from '../constants/papers';
 import type {
   CoverConfig,
   EncryptedPayload,
   Folder,
   Notebook,
+  NotebookMode,
   Page,
   PageImage,
   PaperConfig,
@@ -15,6 +17,7 @@ import type {
   PdfPageBackground,
   Stroke,
   Textbox,
+  TrashedNotebookRecord,
 } from '../types/notes';
 import {
   ensurePageImagesDecoded,
@@ -90,12 +93,29 @@ function clonePageAnnotations(
   );
 }
 
+export const TRASH_RETENTION_DAYS = 7;
+export const TRASH_RETENTION_MS = TRASH_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+export const NOTEBOOK_UNDO_WINDOW_MS = 5_000;
+
+export function formatTrashTimeRemaining(expiresAt: number, now = Date.now()): string {
+  const remainingMs = Math.max(0, expiresAt - now);
+  const remainingHours = Math.ceil(remainingMs / (60 * 60 * 1000));
+  if (remainingHours <= 1) return '<1 hour left';
+  if (remainingHours < 24) return `${remainingHours} hours left`;
+  const remainingDays = Math.min(
+    TRASH_RETENTION_DAYS,
+    Math.ceil(remainingMs / (24 * 60 * 60 * 1000)),
+  );
+  return `${remainingDays} ${remainingDays === 1 ? 'day' : 'days'} left`;
+}
+
 export interface LocalStorageSummary {
   folderCount: number;
   notebookCount: number;
   pageCount: number;
   templateCount: number;
   pdfAssetCount: number;
+  trashedNotebookCount: number;
   estimatedBytes: number | null;
 }
 
@@ -139,6 +159,11 @@ export class NotesRepository {
 
   async getAllFolders(): Promise<Folder[]> {
     return this.database.folders.orderBy('name').toArray();
+  }
+
+  async getAllNotebooks(): Promise<Notebook[]> {
+    const list = await this.database.notebooks.toArray();
+    return list.sort((a, b) => b.updatedAt - a.updatedAt);
   }
 
   async getFolderBreadcrumbs(folderId: string | null): Promise<Folder[]> {
@@ -237,34 +262,99 @@ export class NotesRepository {
     });
   }
 
-  async deleteFolderRecursive(folderId: string): Promise<void> {
+  private collectSubtreeFolderIds(allFolders: Folder[], rootFolderId: string): Set<string> {
+    const ids = new Set<string>([rootFolderId]);
+    let expanded = true;
+    while (expanded) {
+      expanded = false;
+      for (const f of allFolders) {
+        if (f.parentId && ids.has(f.parentId) && !ids.has(f.id)) {
+          ids.add(f.id);
+          expanded = true;
+        }
+      }
+    }
+    return ids;
+  }
+
+  /**
+   * Returns true if `folderId` or any nested descendant subfolder contains at least one
+   * Vault-locked notebook.
+   */
+  async folderContainsLockedNotebook(folderId: string): Promise<boolean> {
+    const [allFolders, allNotebooks] = await Promise.all([
+      this.database.folders.toArray(),
+      this.database.notebooks.toArray(),
+    ]);
+    const folderIds = this.collectSubtreeFolderIds(allFolders, folderId);
+    return allNotebooks.some((nb) =>
+      Boolean(nb.folderId && folderIds.has(nb.folderId) && nb.isLocked),
+    );
+  }
+
+  async deleteFolderRecursive(
+    folderId: string,
+    authorizedMasterKey?: CryptoKey,
+  ): Promise<TrashedNotebookRecord[]> {
+    const now = Date.now();
+    const expiresAt = now + TRASH_RETENTION_MS;
+    const trashedRecords: TrashedNotebookRecord[] = [];
+
     await this.database.transaction(
       'rw',
       this.database.folders,
       this.database.notebooks,
       this.database.pages,
       this.database.pdfAssets,
+      this.database.trashedNotebooks,
       async () => {
-        const folderIdsToDelete = new Set<string>([folderId]);
         const allFolders = await this.database.folders.toArray();
-
-        let expanded = true;
-        while (expanded) {
-          expanded = false;
-          for (const f of allFolders) {
-            if (f.parentId && folderIdsToDelete.has(f.parentId) && !folderIdsToDelete.has(f.id)) {
-              folderIdsToDelete.add(f.id);
-              expanded = true;
-            }
-          }
-        }
+        const folderById = new Map(allFolders.map((f) => [f.id, f]));
+        const folderIdsToDelete = this.collectSubtreeFolderIds(allFolders, folderId);
 
         const allNotebooks = await this.database.notebooks.toArray();
-        const notebookIdsToDelete = allNotebooks
-          .filter((nb) => nb.folderId && folderIdsToDelete.has(nb.folderId))
-          .map((nb) => nb.id);
+        const notebooksToDelete = allNotebooks.filter(
+          (nb) => nb.folderId && folderIdsToDelete.has(nb.folderId),
+        );
 
+        if (notebooksToDelete.some((nb) => Boolean(nb.isLocked)) && !authorizedMasterKey) {
+          throw new Error(
+            'Vault password is required to delete a folder containing locked notebooks.',
+          );
+        }
+
+        const notebookIdsToDelete = notebooksToDelete.map((nb) => nb.id);
         if (notebookIdsToDelete.length > 0) {
+          const [pagesToTrash, assetsToTrash] = await Promise.all([
+            this.database.pages.where('notebookId').anyOf(notebookIdsToDelete).toArray(),
+            this.database.pdfAssets.where('notebookId').anyOf(notebookIdsToDelete).toArray(),
+          ]);
+          const pagesByNb = new Map<string, Page[]>();
+          for (const page of pagesToTrash) {
+            const list = pagesByNb.get(page.notebookId) ?? [];
+            list.push(page);
+            pagesByNb.set(page.notebookId, list);
+          }
+          const assetsByNb = new Map<string, PdfAsset[]>();
+          for (const asset of assetsToTrash) {
+            const list = assetsByNb.get(asset.notebookId) ?? [];
+            list.push(asset);
+            assetsByNb.set(asset.notebookId, list);
+          }
+
+          for (const nb of notebooksToDelete) {
+            trashedRecords.push({
+              id: nb.id,
+              notebook: { ...nb },
+              pages: pagesByNb.get(nb.id) ?? [],
+              pdfAssets: assetsByNb.get(nb.id) ?? [],
+              originalFolderName: nb.folderId ? folderById.get(nb.folderId)?.name ?? null : null,
+              deletedAt: now,
+              expiresAt,
+            });
+          }
+
+          await this.database.trashedNotebooks.bulkPut(trashedRecords);
           await this.database.pdfAssets.where('notebookId').anyOf(notebookIdsToDelete).delete();
           await this.database.pages.where('notebookId').anyOf(notebookIdsToDelete).delete();
           await this.database.notebooks.bulkDelete(notebookIdsToDelete);
@@ -273,10 +363,13 @@ export class NotesRepository {
         await this.database.folders.bulkDelete(Array.from(folderIdsToDelete));
       },
     );
+
+    return trashedRecords;
   }
 
   async createNotebook(params: {
     title: string;
+    mode?: NotebookMode;
     folderId: string | null;
     cover: CoverConfig;
     paper?: PaperConfig;
@@ -287,13 +380,25 @@ export class NotesRepository {
     const now = Date.now();
     const notebookId = createId();
     const pageId = createId();
-    const paper = clonePaper(params.paper ?? DEFAULT_PAPER_CONFIG);
+    const mode: NotebookMode = params.mode === 'whiteboard' ? 'whiteboard' : 'notebook';
+    const isWhiteboard = mode === 'whiteboard';
+    const paper = clonePaper(
+      params.paper ?? (isWhiteboard ? DEFAULT_WHITEBOARD_PAPER : DEFAULT_PAPER_CONFIG),
+    );
     const { strokes, textboxes, images } = clonePageAnnotations(
       params.initialStrokes,
       params.initialTextboxes,
       params.initialImages,
     );
-    const thumbnailDataUrl = generatePageThumbnail(paper, strokes, 240, textboxes, images);
+    const thumbnailDataUrl = generatePageThumbnail(
+      paper,
+      strokes,
+      240,
+      textboxes,
+      images,
+      undefined,
+      isWhiteboard,
+    );
 
     const firstPage: Page = {
       id: pageId,
@@ -309,7 +414,8 @@ export class NotesRepository {
 
     const notebook: Notebook = {
       id: notebookId,
-      title: params.title.trim() || 'Untitled Notebook',
+      title: params.title.trim() || (isWhiteboard ? 'Untitled Whiteboard' : 'Untitled Notebook'),
+      mode,
       folderId: params.folderId,
       cover: { ...params.cover },
       defaultPaper: clonePaper(paper),
@@ -401,6 +507,7 @@ export class NotesRepository {
       ...original,
       id: newNotebookId,
       title: `${original.title} (Copy)`,
+      mode: original.mode ?? 'notebook',
       cover: { ...original.cover },
       defaultPaper: clonePaper(original.defaultPaper),
       pageOrder: newOrder,
@@ -428,18 +535,121 @@ export class NotesRepository {
     return clonedNotebook;
   }
 
-  async deleteNotebook(notebookId: string): Promise<void> {
+  async deleteNotebook(
+    notebookId: string,
+    authorizedMasterKey?: CryptoKey,
+  ): Promise<TrashedNotebookRecord | null> {
+    const now = Date.now();
+    const expiresAt = now + TRASH_RETENTION_MS;
+    let trashedRecord: TrashedNotebookRecord | null = null;
+
     await this.database.transaction(
       'rw',
+      this.database.folders,
       this.database.notebooks,
       this.database.pages,
       this.database.pdfAssets,
+      this.database.trashedNotebooks,
       async () => {
+        const nb = await this.database.notebooks.get(notebookId);
+        if (!nb) return;
+        if (nb.isLocked && !authorizedMasterKey) {
+          throw new Error('Vault password is required to delete a locked notebook.');
+        }
+
+        const [pages, pdfAssets, originalFolder] = await Promise.all([
+          this.database.pages.where('notebookId').equals(notebookId).toArray(),
+          this.database.pdfAssets.where('notebookId').equals(notebookId).toArray(),
+          nb.folderId ? this.database.folders.get(nb.folderId) : Promise.resolve(undefined),
+        ]);
+
+        trashedRecord = {
+          id: nb.id,
+          notebook: { ...nb },
+          pages,
+          pdfAssets,
+          originalFolderName: originalFolder?.name ?? null,
+          deletedAt: now,
+          expiresAt,
+        };
+
+        await this.database.trashedNotebooks.put(trashedRecord);
         await this.database.pdfAssets.where('notebookId').equals(notebookId).delete();
         await this.database.pages.where('notebookId').equals(notebookId).delete();
         await this.database.notebooks.delete(notebookId);
       },
     );
+
+    return trashedRecord;
+  }
+
+  async purgeExpiredTrashedNotebooks(now = Date.now()): Promise<number> {
+    return this.database.trashedNotebooks.where('expiresAt').belowOrEqual(now).delete();
+  }
+
+  async getTrashedNotebooks(now = Date.now()): Promise<TrashedNotebookRecord[]> {
+    await this.purgeExpiredTrashedNotebooks(now);
+    const items = await this.database.trashedNotebooks.toArray();
+    return items.sort((a, b) => b.deletedAt - a.deletedAt);
+  }
+
+  async getTrashedNotebookCount(now = Date.now()): Promise<number> {
+    await this.purgeExpiredTrashedNotebooks(now);
+    return this.database.trashedNotebooks.count();
+  }
+
+  async restoreTrashedNotebook(notebookId: string, now = Date.now()): Promise<Notebook | null> {
+    await this.purgeExpiredTrashedNotebooks(now);
+    let restored: Notebook | null = null;
+
+    await this.database.transaction(
+      'rw',
+      this.database.folders,
+      this.database.notebooks,
+      this.database.pages,
+      this.database.pdfAssets,
+      this.database.trashedNotebooks,
+      async () => {
+        const record = await this.database.trashedNotebooks.get(notebookId);
+        if (!record) return;
+
+        let resolvedFolderId = record.notebook.folderId ?? null;
+        if (resolvedFolderId) {
+          const folderExists = await this.database.folders.get(resolvedFolderId);
+          if (!folderExists) {
+            resolvedFolderId = null;
+          }
+        }
+
+        const restoredNotebook: Notebook = {
+          ...record.notebook,
+          folderId: resolvedFolderId,
+          updatedAt: now,
+        };
+
+        if (record.pdfAssets.length > 0) {
+          await this.database.pdfAssets.bulkPut(record.pdfAssets);
+        }
+        if (record.pages.length > 0) {
+          await this.database.pages.bulkPut(record.pages);
+        }
+        await this.database.notebooks.put(restoredNotebook);
+        await this.database.trashedNotebooks.delete(notebookId);
+        restored = restoredNotebook;
+      },
+    );
+
+    return restored;
+  }
+
+  async permanentlyDeleteTrashedNotebook(notebookId: string): Promise<void> {
+    await this.database.trashedNotebooks.delete(notebookId);
+  }
+
+  async emptyTrash(): Promise<number> {
+    const count = await this.database.trashedNotebooks.count();
+    await this.database.trashedNotebooks.clear();
+    return count;
   }
 
   async getLockedNotebookCount(): Promise<number> {
@@ -1275,6 +1485,7 @@ export class NotesRepository {
 
   async saveCustomTemplate(params: {
     name: string;
+    mode?: NotebookMode;
     category: 'paper-preset' | 'page-template';
     paper: PaperConfig;
     strokes: Stroke[];
@@ -1297,11 +1508,14 @@ export class NotesRepository {
         240,
         clonedTextboxes,
         clonedImages,
+        undefined,
+        params.mode === 'whiteboard',
       );
 
     const template: PaperTemplate = {
       id: createId(),
       name: params.name.trim() || 'Untitled Template',
+      ...(params.mode ? { mode: params.mode } : {}),
       category: params.category,
       paper: clonedPaper,
       strokes: clonedStrokes,
@@ -1347,6 +1561,10 @@ export class NotesRepository {
       };
     });
 
+    const importedMode: NotebookMode =
+      archive.notebook.mode === 'whiteboard' ? 'whiteboard' : 'notebook';
+    const isImportedWhiteboard = importedMode === 'whiteboard';
+
     const pages: Page[] = archive.pages.map((srcPage, idx) => {
       const paper = clonePaper(srcPage.paper ?? archive.notebook.defaultPaper ?? DEFAULT_PAPER_CONFIG);
       const { strokes, textboxes, images } = clonePageAnnotations(
@@ -1362,7 +1580,7 @@ export class NotesRepository {
         : null;
       const thumbnailDataUrl =
         idx === 0 && !mappedPdfBg
-          ? generatePageThumbnail(paper, strokes, 240, textboxes, images)
+          ? generatePageThumbnail(paper, strokes, 240, textboxes, images, undefined, isImportedWhiteboard)
           : undefined;
       return {
         id: createId(),
@@ -1382,6 +1600,7 @@ export class NotesRepository {
     const notebook: Notebook = {
       id: notebookId,
       title: archive.notebook.title.trim() || 'Imported Notebook',
+      mode: importedMode,
       folderId: targetFolderId,
       cover: { ...archive.notebook.cover },
       defaultPaper: clonePaper(archive.notebook.defaultPaper ?? pages[0]?.paper ?? DEFAULT_PAPER_CONFIG),
@@ -1636,14 +1855,22 @@ export class NotesRepository {
   }
 
   async getStorageSummary(): Promise<LocalStorageSummary> {
-    const [folderCount, notebookCount, pageCount, templateCount, pdfAssetCount] =
-      await Promise.all([
-        this.database.folders.count(),
-        this.database.notebooks.count(),
-        this.database.pages.count(),
-        this.database.templates.count(),
-        this.database.pdfAssets.count(),
-      ]);
+    await this.purgeExpiredTrashedNotebooks();
+    const [
+      folderCount,
+      notebookCount,
+      pageCount,
+      templateCount,
+      pdfAssetCount,
+      trashedNotebookCount,
+    ] = await Promise.all([
+      this.database.folders.count(),
+      this.database.notebooks.count(),
+      this.database.pages.count(),
+      this.database.templates.count(),
+      this.database.pdfAssets.count(),
+      this.database.trashedNotebooks.count(),
+    ]);
 
     let estimatedBytes: number | null = null;
     try {
@@ -1663,6 +1890,7 @@ export class NotesRepository {
       pageCount,
       templateCount,
       pdfAssetCount,
+      trashedNotebookCount,
       estimatedBytes,
     };
   }

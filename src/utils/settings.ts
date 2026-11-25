@@ -1,8 +1,22 @@
 import type { PaperPattern } from '../types/notes';
+import {
+  DEFAULT_KEYBOARD_SHORTCUTS,
+  type KeyboardShortcutsMap,
+  sanitizeKeyboardShortcuts,
+} from './shortcuts';
+import { clampUiScale, DEFAULT_UI_SCALE } from './uiZoom';
+import {
+  DEFAULT_INTERFACE_FONT_ID,
+  isValidInterfaceFontId,
+  sanitizeCustomFontName,
+} from './uiFonts';
 
 const GEMINI_API_KEY_STORAGE_KEY = 'goodnotes_gemini_api_key';
+const AI_PROVIDER_KEYS_STORAGE_KEY = 'folio_ai_provider_keys_v1';
 const HANDWRITING_CORRECTION_KEY = 'goodnotes_handwriting_correction';
 const WORKSPACE_PREFS_STORAGE_KEY = 'folio_workspace_preferences_v1';
+export const CTRL_SCROLL_SMART_MIGRATED_KEY = 'folio_ctrl_scroll_smart_migrated_v12';
+export const UI_SCALE_DEFAULT_135_MIGRATED_KEY = 'folio_ui_scale_default_135_migrated_v132';
 
 export type DeskBackdropPresetId =
   | 'cool-gray'
@@ -15,16 +29,110 @@ export type DeskBackdropPresetId =
 export type DockPosition = 'bottom' | 'top' | 'left';
 export type DefaultZoomMode = 'fit-width' | '100';
 export type DefaultToolPreference = 'pan' | 'pen';
+export type CtrlScrollBehavior = 'smart' | 'gui-scale' | 'paper-zoom';
+export type EraserMode = 'precision' | 'stroke';
+export type AiProviderId = 'gemini' | 'grok' | 'openai' | 'anthropic' | 'custom';
 
-export const DEFAULT_GEMINI_MODEL = 'gemini-4-hydrogen';
+export const DEFAULT_GEMINI_MODEL = 'gemini-3-flash';
 export const FAST_GEMINI_MODEL = 'gemini-3.5-flash-lite';
 export const IMAGE_GEMINI_MODEL = 'gemini-nano-banana-2.1';
 export const GEMINI_API_STUDIO_URL = 'https://aistudio.google.com/apikey';
 
 export type GeminiModelPresetId =
-  | 'gemini-4-hydrogen'
+  | 'gemini-3-flash'
   | 'gemini-3.5-flash-lite'
+  | 'gemini-4-hydrogen'
   | 'custom';
+
+export interface AiProviderMeta {
+  id: AiProviderId;
+  label: string;
+  shortLabel: string;
+  defaultModel: string;
+  defaultBaseUrl?: string;
+  modelPresets?: string[];
+  keyPlaceholder: string;
+  keyConsoleUrl: string;
+  keyConsoleLabel: string;
+  requiresApiKey: boolean;
+}
+
+export const AI_PROVIDER_ORDER: AiProviderId[] = [
+  'gemini',
+  'grok',
+  'openai',
+  'anthropic',
+  'custom',
+];
+
+export const AI_PROVIDER_META: Record<AiProviderId, AiProviderMeta> = {
+  gemini: {
+    id: 'gemini',
+    label: 'Google Gemini',
+    shortLabel: 'Gemini',
+    defaultModel: 'gemini-3-flash',
+    modelPresets: ['gemini-3-flash', 'gemini-3.5-flash-lite'],
+    keyPlaceholder: 'Paste your AIza... Google AI Studio key',
+    keyConsoleUrl: GEMINI_API_STUDIO_URL,
+    keyConsoleLabel: 'Google AI Studio',
+    requiresApiKey: true,
+  },
+  grok: {
+    id: 'grok',
+    label: 'xAI (Grok)',
+    shortLabel: 'Grok',
+    defaultModel: 'grok-4.7',
+    defaultBaseUrl: 'https://api.x.ai/v1',
+    modelPresets: ['grok-4.7'],
+    keyPlaceholder: 'Paste your xai-... API key',
+    keyConsoleUrl: 'https://console.x.ai/',
+    keyConsoleLabel: 'xAI Console',
+    requiresApiKey: true,
+  },
+  openai: {
+    id: 'openai',
+    label: 'OpenAI',
+    shortLabel: 'OpenAI',
+    defaultModel: 'gpt-5',
+    defaultBaseUrl: 'https://api.openai.com/v1',
+    modelPresets: ['gpt-5', 'gpt-4o'],
+    keyPlaceholder: 'Paste your sk-... OpenAI key',
+    keyConsoleUrl: 'https://platform.openai.com/api-keys',
+    keyConsoleLabel: 'OpenAI API Keys',
+    requiresApiKey: true,
+  },
+  anthropic: {
+    id: 'anthropic',
+    label: 'Anthropic (Claude)',
+    shortLabel: 'Claude',
+    defaultModel: 'claude-sonnet-5-5',
+    defaultBaseUrl: 'https://api.anthropic.com/v1',
+    modelPresets: ['claude-sonnet-5-5'],
+    keyPlaceholder: 'Paste your sk-ant-... Claude key',
+    keyConsoleUrl: 'https://console.anthropic.com/settings/keys',
+    keyConsoleLabel: 'Anthropic Console',
+    requiresApiKey: true,
+  },
+  custom: {
+    id: 'custom',
+    label: 'OpenRouter / Custom',
+    shortLabel: 'Custom',
+    defaultModel: 'openai/gpt-4o-mini',
+    defaultBaseUrl: 'https://openrouter.ai/api/v1',
+    keyPlaceholder: 'sk-or-... (optional for localhost Ollama/LM Studio)',
+    keyConsoleUrl: 'https://openrouter.ai/keys',
+    keyConsoleLabel: 'OpenRouter Keys',
+    requiresApiKey: false,
+  },
+};
+
+export const DEFAULT_AI_PROVIDER_MODELS: Record<AiProviderId, string> = {
+  gemini: AI_PROVIDER_META.gemini.defaultModel,
+  grok: AI_PROVIDER_META.grok.defaultModel,
+  openai: AI_PROVIDER_META.openai.defaultModel,
+  anthropic: AI_PROVIDER_META.anthropic.defaultModel,
+  custom: AI_PROVIDER_META.custom.defaultModel,
+};
 
 export interface PenFavoriteSlot {
   id: string;
@@ -40,14 +148,24 @@ export interface WorkspacePreferences {
   deskCustomColor: string;
   darkPaperView: boolean;
   highContrastUi: boolean;
+  uiSoundsEnabled: boolean;
   dockPosition: DockPosition;
   heroHeadline: string;
+  interfaceFontId: string;
+  interfaceCustomFont: string;
   defaultZoomMode: DefaultZoomMode;
   defaultTool: DefaultToolPreference;
   defaultPaperPattern: PaperPattern;
+  uiScale: number;
+  ctrlScrollBehavior: CtrlScrollBehavior;
+  eraserMode: EraserMode;
+  activeAiProvider: AiProviderId;
+  aiProviderModels: Record<AiProviderId, string>;
+  aiCustomBaseUrl: string;
   geminiModelPreset: GeminiModelPresetId;
   geminiCustomModelId: string;
   blockAiOnVaultLocked: boolean;
+  keyboardShortcuts: KeyboardShortcutsMap;
 }
 
 export const DEFAULT_HERO_HEADLINE = 'Your Notes, Ready.';
@@ -114,14 +232,24 @@ export const DEFAULT_WORKSPACE_PREFERENCES: WorkspacePreferences = {
   deskCustomColor: '#DCEAF4',
   darkPaperView: false,
   highContrastUi: false,
+  uiSoundsEnabled: false,
   dockPosition: 'bottom',
   heroHeadline: DEFAULT_HERO_HEADLINE,
+  interfaceFontId: DEFAULT_INTERFACE_FONT_ID,
+  interfaceCustomFont: '',
   defaultZoomMode: '100',
   defaultTool: 'pen',
   defaultPaperPattern: 'ruled',
+  uiScale: DEFAULT_UI_SCALE,
+  ctrlScrollBehavior: 'smart',
+  eraserMode: 'precision',
+  activeAiProvider: 'gemini',
+  aiProviderModels: { ...DEFAULT_AI_PROVIDER_MODELS },
+  aiCustomBaseUrl: AI_PROVIDER_META.custom.defaultBaseUrl!,
   geminiModelPreset: DEFAULT_GEMINI_MODEL,
   geminiCustomModelId: '',
   blockAiOnVaultLocked: true,
+  keyboardShortcuts: { ...DEFAULT_KEYBOARD_SHORTCUTS },
 };
 
 const VALID_BACKDROPS = new Set<DeskBackdropPresetId>([
@@ -141,10 +269,12 @@ const VALID_PATTERNS = new Set<PaperPattern>([
   'cornell',
 ]);
 const VALID_GEMINI_PRESETS = new Set<GeminiModelPresetId>([
-  'gemini-4-hydrogen',
+  'gemini-3-flash',
   'gemini-3.5-flash-lite',
+  'gemini-4-hydrogen',
   'custom',
 ]);
+const VALID_AI_PROVIDERS = new Set<AiProviderId>(AI_PROVIDER_ORDER);
 
 export function resolveActiveGeminiModel(
   prefs: Pick<WorkspacePreferences, 'geminiModelPreset' | 'geminiCustomModelId'>,
@@ -153,17 +283,108 @@ export function resolveActiveGeminiModel(
     const trimmed = (prefs.geminiCustomModelId ?? '').trim();
     return trimmed || DEFAULT_GEMINI_MODEL;
   }
+  if (prefs.geminiModelPreset === 'gemini-4-hydrogen') {
+    return DEFAULT_GEMINI_MODEL;
+  }
   return VALID_GEMINI_PRESETS.has(prefs.geminiModelPreset)
     ? prefs.geminiModelPreset
     : DEFAULT_GEMINI_MODEL;
 }
 
-export function sanitizeWorkspacePreferences(
-  raw: unknown,
-): WorkspacePreferences {
+export function isLocalhostUrl(rawUrl: string): boolean {
+  try {
+    const parsed = new URL(rawUrl.trim());
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return false;
+    }
+    return (
+      parsed.hostname === 'localhost' ||
+      parsed.hostname === '127.0.0.1' ||
+      parsed.hostname === '::1' ||
+      parsed.hostname === '[::1]'
+    );
+  } catch {
+    return false;
+  }
+}
+
+export function isProviderConfigured(
+  provider: AiProviderId,
+  config: { apiKey: string; model: string; baseUrl?: string },
+): boolean {
+  const keyOk = config.apiKey.trim().length > 0;
+  if (provider === 'custom') {
+    const hasUrl = Boolean(config.baseUrl?.trim());
+    const hasModel = config.model.trim().length > 0;
+    return hasUrl && hasModel && (keyOk || isLocalhostUrl(config.baseUrl ?? ''));
+  }
+  return keyOk;
+}
+
+export interface ResolvedAiConfig {
+  provider: AiProviderId;
+  apiKey: string;
+  model: string;
+  baseUrl?: string;
+  label: string;
+  shortLabel: string;
+  configured: boolean;
+}
+
+export function resolveActiveAiConfig(state: {
+  activeAiProvider: AiProviderId;
+  aiProviderKeys: Record<AiProviderId, string>;
+  aiProviderModels: Record<AiProviderId, string>;
+  aiCustomBaseUrl: string;
+  geminiApiKey?: string;
+  geminiModelPreset?: GeminiModelPresetId;
+  geminiCustomModelId?: string;
+}): ResolvedAiConfig {
+  const provider = VALID_AI_PROVIDERS.has(state.activeAiProvider)
+    ? state.activeAiProvider
+    : 'gemini';
+  const meta = AI_PROVIDER_META[provider];
+
+  const apiKey =
+    provider === 'gemini'
+      ? (state.aiProviderKeys.gemini || state.geminiApiKey || '').trim()
+      : (state.aiProviderKeys[provider] || '').trim();
+
+  let model = (state.aiProviderModels[provider] || '').trim();
+  if (provider === 'gemini' && state.geminiModelPreset) {
+    model =
+      model ||
+      resolveActiveGeminiModel({
+        geminiModelPreset: state.geminiModelPreset,
+        geminiCustomModelId: state.geminiCustomModelId ?? '',
+      });
+  }
+  if (!model) {
+    model = meta.defaultModel;
+  }
+
+  const baseUrl =
+    provider === 'custom'
+      ? (state.aiCustomBaseUrl || meta.defaultBaseUrl || '').trim()
+      : meta.defaultBaseUrl;
+
+  return {
+    provider,
+    apiKey,
+    model,
+    baseUrl,
+    label: meta.label,
+    shortLabel: meta.shortLabel,
+    configured: isProviderConfigured(provider, { apiKey, model, baseUrl }),
+  };
+}
+
+export function sanitizeWorkspacePreferences(raw: unknown): WorkspacePreferences {
   const base: WorkspacePreferences = {
     ...DEFAULT_WORKSPACE_PREFERENCES,
     penSlots: DEFAULT_PEN_SLOTS.map((s) => ({ ...s })),
+    aiProviderModels: { ...DEFAULT_AI_PROVIDER_MODELS },
+    keyboardShortcuts: { ...DEFAULT_KEYBOARD_SHORTCUTS },
   };
   if (!raw || typeof raw !== 'object') return base;
   const obj = raw as Partial<WorkspacePreferences>;
@@ -196,17 +417,24 @@ export function sanitizeWorkspacePreferences(
   ) {
     base.deskCustomColor = obj.deskCustomColor;
   }
-  if (typeof obj.darkPaperView === 'boolean') {
-    base.darkPaperView = obj.darkPaperView;
-  }
-  if (typeof obj.highContrastUi === 'boolean') {
-    base.highContrastUi = obj.highContrastUi;
+  if (typeof obj.uiSoundsEnabled === 'boolean') {
+    base.uiSoundsEnabled = obj.uiSoundsEnabled;
   }
   if (obj.dockPosition && VALID_DOCK_POSITIONS.has(obj.dockPosition)) {
     base.dockPosition = obj.dockPosition;
   }
   if (typeof obj.heroHeadline === 'string' && obj.heroHeadline.trim()) {
     base.heroHeadline = obj.heroHeadline.trim().slice(0, 80);
+  }
+  if (typeof obj.interfaceCustomFont === 'string') {
+    base.interfaceCustomFont = sanitizeCustomFontName(obj.interfaceCustomFont);
+  }
+  if (typeof obj.interfaceFontId === 'string' && isValidInterfaceFontId(obj.interfaceFontId)) {
+    if (obj.interfaceFontId === 'custom' && !base.interfaceCustomFont) {
+      base.interfaceFontId = DEFAULT_INTERFACE_FONT_ID;
+    } else {
+      base.interfaceFontId = obj.interfaceFontId;
+    }
   }
   if (obj.defaultZoomMode === 'fit-width' || obj.defaultZoomMode === '100') {
     base.defaultZoomMode = obj.defaultZoomMode;
@@ -217,14 +445,52 @@ export function sanitizeWorkspacePreferences(
   if (obj.defaultPaperPattern && VALID_PATTERNS.has(obj.defaultPaperPattern)) {
     base.defaultPaperPattern = obj.defaultPaperPattern;
   }
+  if (typeof obj.uiScale === 'number' && Number.isFinite(obj.uiScale)) {
+    base.uiScale = clampUiScale(obj.uiScale);
+  }
+  if (
+    obj.ctrlScrollBehavior === 'smart' ||
+    obj.ctrlScrollBehavior === 'gui-scale' ||
+    obj.ctrlScrollBehavior === 'paper-zoom'
+  ) {
+    base.ctrlScrollBehavior = obj.ctrlScrollBehavior;
+  }
+  if (obj.eraserMode === 'precision' || obj.eraserMode === 'stroke') {
+    base.eraserMode = obj.eraserMode;
+  }
+  if (obj.activeAiProvider && VALID_AI_PROVIDERS.has(obj.activeAiProvider)) {
+    base.activeAiProvider = obj.activeAiProvider;
+  }
   if (obj.geminiModelPreset && VALID_GEMINI_PRESETS.has(obj.geminiModelPreset)) {
-    base.geminiModelPreset = obj.geminiModelPreset;
+    base.geminiModelPreset =
+      obj.geminiModelPreset === 'gemini-4-hydrogen'
+        ? DEFAULT_GEMINI_MODEL
+        : obj.geminiModelPreset;
   }
   if (typeof obj.geminiCustomModelId === 'string') {
     base.geminiCustomModelId = obj.geminiCustomModelId.trim().slice(0, 100);
   }
+  if (obj.aiProviderModels && typeof obj.aiProviderModels === 'object') {
+    for (const p of AI_PROVIDER_ORDER) {
+      const val = (obj.aiProviderModels as Record<string, unknown>)[p];
+      if (typeof val === 'string' && val.trim()) {
+        base.aiProviderModels[p] =
+          p === 'gemini' && val.trim() === 'gemini-4-hydrogen'
+            ? DEFAULT_GEMINI_MODEL
+            : val.trim().slice(0, 120);
+      }
+    }
+  } else {
+    base.aiProviderModels.gemini = resolveActiveGeminiModel(base);
+  }
+  if (typeof obj.aiCustomBaseUrl === 'string' && obj.aiCustomBaseUrl.trim()) {
+    base.aiCustomBaseUrl = obj.aiCustomBaseUrl.trim().slice(0, 300);
+  }
   if (typeof obj.blockAiOnVaultLocked === 'boolean') {
     base.blockAiOnVaultLocked = obj.blockAiOnVaultLocked;
+  }
+  if (obj.keyboardShortcuts && typeof obj.keyboardShortcuts === 'object') {
+    base.keyboardShortcuts = sanitizeKeyboardShortcuts(obj.keyboardShortcuts);
   }
 
   return base;
@@ -233,8 +499,34 @@ export function sanitizeWorkspacePreferences(
 export function getWorkspacePreferences(): WorkspacePreferences {
   try {
     const raw = window.localStorage.getItem(WORKSPACE_PREFS_STORAGE_KEY);
-    if (!raw) return sanitizeWorkspacePreferences(null);
-    return sanitizeWorkspacePreferences(JSON.parse(raw));
+    if (!raw) {
+      window.localStorage.setItem(UI_SCALE_DEFAULT_135_MIGRATED_KEY, '1');
+      return sanitizeWorkspacePreferences(null);
+    }
+    const parsed = JSON.parse(raw) as Partial<WorkspacePreferences> | null;
+    const sanitized = sanitizeWorkspacePreferences(parsed);
+
+    const alreadyMigrated =
+      window.localStorage.getItem(CTRL_SCROLL_SMART_MIGRATED_KEY) === '1';
+    if (!alreadyMigrated) {
+      if (parsed && parsed.ctrlScrollBehavior === 'gui-scale') {
+        sanitized.ctrlScrollBehavior = 'smart';
+        saveWorkspacePreferences(sanitized);
+      }
+      window.localStorage.setItem(CTRL_SCROLL_SMART_MIGRATED_KEY, '1');
+    }
+
+    const uiScaleMigrated =
+      window.localStorage.getItem(UI_SCALE_DEFAULT_135_MIGRATED_KEY) === '1';
+    if (!uiScaleMigrated) {
+      if (parsed && (parsed.uiScale === undefined || parsed.uiScale === 1)) {
+        sanitized.uiScale = DEFAULT_UI_SCALE;
+        saveWorkspacePreferences(sanitized);
+      }
+      window.localStorage.setItem(UI_SCALE_DEFAULT_135_MIGRATED_KEY, '1');
+    }
+
+    return sanitized;
   } catch {
     return sanitizeWorkspacePreferences(null);
   }
@@ -251,33 +543,66 @@ export function saveWorkspacePreferences(prefs: WorkspacePreferences): void {
   }
 }
 
-export function getGeminiApiKey(): string {
+export function getAllAiProviderKeys(): Record<AiProviderId, string> {
+  const empty: Record<AiProviderId, string> = {
+    gemini: '',
+    grok: '',
+    openai: '',
+    anthropic: '',
+    custom: '',
+  };
   try {
-    return window.localStorage.getItem(GEMINI_API_KEY_STORAGE_KEY) ?? '';
+    const raw = window.localStorage.getItem(AI_PROVIDER_KEYS_STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw) as Record<string, unknown>;
+      for (const p of AI_PROVIDER_ORDER) {
+        if (typeof parsed?.[p] === 'string') {
+          empty[p] = parsed[p].trim();
+        }
+      }
+    }
+    const legacyGemini = window.localStorage.getItem(GEMINI_API_KEY_STORAGE_KEY)?.trim() ?? '';
+    if (!empty.gemini && legacyGemini) {
+      empty.gemini = legacyGemini;
+    }
   } catch {
-    return '';
+    // Ignore storage errors
   }
+  return empty;
 }
 
-export function saveGeminiApiKey(apiKey: string): void {
+export function saveAiProviderKey(provider: AiProviderId, apiKey: string): void {
   try {
+    const current = getAllAiProviderKeys();
     const trimmed = apiKey.trim();
-    if (trimmed) {
-      window.localStorage.setItem(GEMINI_API_KEY_STORAGE_KEY, trimmed);
-    } else {
-      window.localStorage.removeItem(GEMINI_API_KEY_STORAGE_KEY);
+    current[provider] = trimmed;
+    window.localStorage.setItem(AI_PROVIDER_KEYS_STORAGE_KEY, JSON.stringify(current));
+    if (provider === 'gemini') {
+      if (trimmed) {
+        window.localStorage.setItem(GEMINI_API_KEY_STORAGE_KEY, trimmed);
+      } else {
+        window.localStorage.removeItem(GEMINI_API_KEY_STORAGE_KEY);
+      }
     }
   } catch {
     // Ignore storage quota / security errors in restricted environments
   }
 }
 
+export function clearAiProviderKey(provider: AiProviderId): void {
+  saveAiProviderKey(provider, '');
+}
+
+export function getGeminiApiKey(): string {
+  return getAllAiProviderKeys().gemini;
+}
+
+export function saveGeminiApiKey(apiKey: string): void {
+  saveAiProviderKey('gemini', apiKey);
+}
+
 export function clearGeminiApiKey(): void {
-  try {
-    window.localStorage.removeItem(GEMINI_API_KEY_STORAGE_KEY);
-  } catch {
-    // Ignore storage errors
-  }
+  clearAiProviderKey('gemini');
 }
 
 export function getHandwritingCorrectionEnabled(): boolean {

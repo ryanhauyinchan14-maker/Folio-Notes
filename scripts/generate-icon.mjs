@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import zlib from 'node:zlib';
@@ -271,6 +272,23 @@ if (process.argv.includes('--prepare-electron')) {
     path.join(DIST_ELECTRON_DIR, 'package.json'),
     JSON.stringify({ type: 'commonjs' }, null, 2) + '\n',
   );
+
+  const pkg = JSON.parse(fs.readFileSync(path.join(ROOT_DIR, 'package.json'), 'utf8'));
+  const version = typeof pkg.version === 'string' && pkg.version.trim() ? pkg.version.trim() : '1.0.0';
+  const now = new Date();
+  const builtAt = now.toISOString();
+  const compactStamp = builtAt.replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z');
+  const suffix = crypto.randomBytes(4).toString('hex');
+  const buildMeta = {
+    version,
+    buildId: `${version}-${compactStamp}-${suffix}`,
+    builtAt,
+  };
+  fs.writeFileSync(
+    path.join(DIST_ELECTRON_DIR, 'build-meta.json'),
+    JSON.stringify(buildMeta, null, 2) + '\n',
+  );
+  console.log(`Generated dist-electron/build-meta.json (${buildMeta.buildId})`);
 }
 
 console.log('Generated build/icon.png (256x256) and build/icon.ico (32, 48, 256)');

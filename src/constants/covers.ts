@@ -92,11 +92,12 @@ export const FOLDER_COLORS = [
   '#64748B', // Slate
 ];
 
-export const PEN_DEFAULT_SWATCHES = [
+export const UNIFIED_INK_SWATCHES = [
   '#072D59', // Ink Navy
   '#1E293B', // Graphite
   '#E11D48', // Crimson
   '#FD6E88', // Coral Pink
+  '#FACC15', // Yellow
   '#2563EB', // Cobalt
   '#0D9488', // Teal
   '#15803D', // Forest
@@ -104,11 +105,12 @@ export const PEN_DEFAULT_SWATCHES = [
   '#7C3AED', // Plum
 ];
 
-export const PEN_SWATCH_NAMES: Record<string, string> = {
+export const UNIFIED_INK_SWATCH_NAMES: Record<string, string> = {
   '#072D59': 'Ink Navy',
   '#1E293B': 'Graphite',
   '#E11D48': 'Crimson',
   '#FD6E88': 'Coral Pink',
+  '#FACC15': 'Yellow',
   '#2563EB': 'Cobalt',
   '#0D9488': 'Teal',
   '#15803D': 'Forest',
@@ -116,23 +118,18 @@ export const PEN_SWATCH_NAMES: Record<string, string> = {
   '#7C3AED': 'Plum',
 };
 
-export const HIGHLIGHTER_DEFAULT_SWATCHES = [
-  '#FEF08A', // Pastel Sun
-  '#A7F3D0', // Mint Glow
-  '#BAE6FD', // Sky Wash
-  '#FBCFE8', // Rose Tint
-  '#FED7AA', // Apricot
-  '#DDD6FE', // Lavender
-];
-
-export const HIGHLIGHTER_SWATCH_NAMES: Record<string, string> = {
-  '#FEF08A': 'Pastel Sun',
-  '#A7F3D0': 'Mint Glow',
-  '#BAE6FD': 'Sky Wash',
-  '#FBCFE8': 'Rose Tint',
-  '#FED7AA': 'Apricot',
-  '#DDD6FE': 'Lavender',
-};
+export const PEN_DEFAULT_SWATCHES = UNIFIED_INK_SWATCHES;
+export const PEN_SWATCH_NAMES = UNIFIED_INK_SWATCH_NAMES;
+export const HIGHLIGHTER_DEFAULT_SWATCHES = UNIFIED_INK_SWATCHES;
+export const HIGHLIGHTER_SWATCH_NAMES = UNIFIED_INK_SWATCH_NAMES;
 
 export const PEN_THICKNESS_PRESETS = [2, 4.5, 8];
 export const HIGHLIGHTER_THICKNESS_PRESETS = [14, 22, 34];
+
+export const ERASER_SIZE_PRESETS = [
+  { label: 'S', radius: 8 },
+  { label: 'M', radius: 18 },
+  { label: 'L', radius: 34 },
+] as const;
+
+export const DEFAULT_ERASER_SIZE = 18;

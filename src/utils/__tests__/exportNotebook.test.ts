@@ -1,20 +1,39 @@
 // @vitest-environment jsdom
+import 'fake-indexeddb/auto';
 import JSZip from 'jszip';
 import { PDFDocument } from 'pdf-lib';
+import { act, createElement } from 'react';
+import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { renderPaperBackground } from '../../canvas/paperRenderer';
+import { generatePageThumbnail } from '../../canvas/thumbnail';
+import { ExportModal } from '../../components/modals/ExportModal';
 import { COVER_PRESETS } from '../../constants/covers';
-import { DEFAULT_PAPER_CONFIG } from '../../constants/papers';
+import {
+  DEFAULT_PAPER_CONFIG,
+  MAX_CUSTOM_PAGE_DIMENSION,
+  MIN_CUSTOM_PAGE_DIMENSION,
+  resolvePageDimensions,
+} from '../../constants/papers';
 import type { Notebook, Page, PageImage, Stroke, Textbox } from '../../types/notes';
 import {
   buildFolioNotebookExport,
+  computeContentCropRect,
   exportNotebookToPdf,
   exportPagesToImages,
   exportPageToSvg,
+  MAX_EXPORT_CANVAS_DIMENSION,
+  MAX_EXPORT_CANVAS_PIXELS,
+  MAX_PDF_PAGE_PT,
   parseFolioNotebookExport,
   parseFolioWorkspaceBackup,
   parsePageRange,
+  renderPageToCanvas,
+  resolveImageExportMetrics,
   sanitizeExportFilename,
 } from '../exportNotebook';
+
+(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 const VALID_1PX_PNG_BASE64 =
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
@@ -429,5 +448,345 @@ describe('exportNotebook pipeline', () => {
     const reloadedNoBg = await PDFDocument.load(annotationsOnlyBytes);
     expect(reloadedNoBg.getPageCount()).toBe(1);
     expect(Math.round(reloadedNoBg.getPage(0).getWidth())).toBe(612);
+  });
+
+  it('supports up to 24000x24000 custom pages with batched/clipped patterns, bounded thumbnails, compact SVG <pattern>, and safe raster/PDF caps', async () => {
+    expect(MIN_CUSTOM_PAGE_DIMENSION).toBe(320);
+    expect(MAX_CUSTOM_PAGE_DIMENSION).toBe(24000);
+    expect(resolvePageDimensions('custom', 'portrait', 24000, 24000)).toEqual({
+      width: 24000,
+      height: 24000,
+    });
+    expect(resolvePageDimensions('custom', 'landscape', 50000, 100)).toEqual({
+      width: 24000,
+      height: 320,
+    });
+
+    const hugeDottedPaper = {
+      ...DEFAULT_PAPER_CONFIG,
+      sizePreset: 'custom' as const,
+      width: 24000,
+      height: 24000,
+      pattern: 'dotted' as const,
+      spacing: 24,
+      marginLine: false,
+    };
+
+    // 1. Batched dotted paper rendering runs cleanly & performs only 1 fill() pass
+    const fakeCanvas = document.createElement('canvas');
+    const mockCtx = fakeCanvas.getContext('2d')!;
+    const fillSpy = vi.spyOn(mockCtx, 'fill');
+    const arcSpy = vi.spyOn(mockCtx, 'arc');
+    renderPaperBackground(mockCtx, hugeDottedPaper);
+    expect(fillSpy).toHaveBeenCalledTimes(1);
+    expect(arcSpy.mock.calls.length).toBeLessThanOrEqual(6500);
+
+    // 2. Extreme aspect thumbnail (320 x 24000) bounds both width & height cleanly
+    const createdCanvases: HTMLCanvasElement[] = [];
+    const origCreateElement = document.createElement.bind(document);
+    const createSpy = vi
+      .spyOn(document, 'createElement')
+      .mockImplementation((tagName: string) => {
+        const el = origCreateElement(tagName);
+        if (tagName.toLowerCase() === 'canvas') {
+          createdCanvases.push(el as HTMLCanvasElement);
+        }
+        return el;
+      });
+    try {
+      generatePageThumbnail(
+        {
+          ...DEFAULT_PAPER_CONFIG,
+          sizePreset: 'custom',
+          width: 320,
+          height: 24000,
+          pattern: 'ruled',
+        },
+        [],
+        240,
+      );
+      const thumbCanvas = createdCanvases[createdCanvases.length - 1];
+      expect(thumbCanvas.width).toBeGreaterThanOrEqual(48);
+      expect(thumbCanvas.width).toBeLessThanOrEqual(384);
+      expect(thumbCanvas.height).toBeLessThanOrEqual(384);
+    } finally {
+      createSpy.mockRestore();
+    }
+
+    // 3. Raster canvas export clamps 24000x24000 cleanly inside MAX_EXPORT_CANVAS_DIMENSION & pixel cap
+    const hugePage: Page = {
+      id: 'huge-1',
+      notebookId: 'nb-huge',
+      paper: hugeDottedPaper,
+      strokes: [SAMPLE_STROKE],
+      textboxes: [SAMPLE_TEXTBOX],
+      images: [],
+      createdAt: 1700000000000,
+      updatedAt: 1700000000000,
+    };
+    const renderedCanvas = await renderPageToCanvas(hugePage, {
+      scale: 2,
+      includeBackground: true,
+      includeAnnotations: true,
+    });
+    expect(renderedCanvas.width).toBeLessThanOrEqual(MAX_EXPORT_CANVAS_DIMENSION);
+    expect(renderedCanvas.height).toBeLessThanOrEqual(MAX_EXPORT_CANVAS_DIMENSION);
+    expect(renderedCanvas.width * renderedCanvas.height).toBeLessThanOrEqual(
+      MAX_EXPORT_CANVAS_PIXELS,
+    );
+
+    // 4. SVG export on 24000x24000 dotted page uses SVG <pattern> (compact vector output)
+    const svg = exportPageToSvg({
+      page: hugePage,
+      includeBackground: true,
+      includeAnnotations: true,
+    });
+    expect(svg).toContain('width="24000" height="24000"');
+    expect(svg).toContain('<pattern id="folio-dot-grid-24"');
+    expect(svg.length).toBeLessThan(20000);
+
+    // 5. PDF export clamps 24000x24000 page points safely within 14400pt standard limit
+    const hugePdfBytes = await exportNotebookToPdf({
+      title: 'Oversized Architectural Canvas',
+      pages: [hugePage],
+      selectedIndices: [0],
+      includeBackground: true,
+      includeAnnotations: true,
+      scale: 2,
+    });
+    const hugePdf = await PDFDocument.load(hugePdfBytes);
+    expect(hugePdf.getPage(0).getWidth()).toBeLessThanOrEqual(MAX_PDF_PAGE_PT);
+    expect(hugePdf.getPage(0).getHeight()).toBeLessThanOrEqual(MAX_PDF_PAGE_PT);
+  });
+
+  it('supports Export Area cropping, max condensed size presets, region culling, and live ExportModal area/sharpness previews', async () => {
+    // 1. Resolution metrics across 2048 / 4096 / 8192 condensed full page vs sharp small crop
+    const condensed8k = resolveImageExportMetrics({
+      sourceWidth: 24000,
+      sourceHeight: 24000,
+      scale: 2,
+      maxDimension: 8192,
+    });
+    expect(condensed8k.outputWidth).toBe(8192);
+    expect(condensed8k.outputHeight).toBe(8192);
+    expect(condensed8k.isCondensed).toBe(true);
+    expect(condensed8k.scalePercent).toBe(34);
+
+    const condensed4k = resolveImageExportMetrics({
+      sourceWidth: 24000,
+      sourceHeight: 24000,
+      scale: 2,
+      maxDimension: 4096,
+    });
+    expect(condensed4k.outputWidth).toBe(4096);
+    expect(condensed4k.outputHeight).toBe(4096);
+    expect(condensed4k.scalePercent).toBe(17);
+
+    const sharpArea = resolveImageExportMetrics({
+      sourceWidth: 1200,
+      sourceHeight: 800,
+      scale: 2,
+      maxDimension: 8192,
+    });
+    expect(sharpArea.outputWidth).toBe(2400);
+    expect(sharpArea.outputHeight).toBe(1600);
+    expect(sharpArea.isCondensed).toBe(false);
+    expect(sharpArea.effectiveScale).toBe(2);
+
+    // 2. computeContentCropRect trims margins & returns null on blank sheet
+    const blankPage: Page = {
+      id: 'blank-1',
+      notebookId: 'nb-area',
+      paper: { ...DEFAULT_PAPER_CONFIG, sizePreset: 'custom', width: 24000, height: 24000 },
+      strokes: [],
+      textboxes: [],
+      images: [],
+      createdAt: 1,
+      updatedAt: 1,
+    };
+    expect(computeContentCropRect(blankPage)).toBeNull();
+
+    const farStroke: Stroke = {
+      ...SAMPLE_STROKE,
+      id: 'stroke-far',
+      points: [
+        { x: 18000, y: 18000, pressure: 0.5 },
+        { x: 18200, y: 18100, pressure: 0.5 },
+      ],
+      bounds: { minX: 18000, minY: 18000, maxX: 18200, maxY: 18100 },
+    };
+    const hugePage: Page = {
+      ...blankPage,
+      id: 'huge-area-1',
+      strokes: [SAMPLE_STROKE, farStroke],
+      textboxes: [SAMPLE_TEXTBOX],
+    };
+
+    const contentRect = computeContentCropRect(hugePage, 48);
+    expect(contentRect).toEqual({
+      x: 47,
+      y: 67,
+      width: 18201,
+      height: 18081,
+    });
+
+    // 3. Cropped render on 24000x24000 renders full 2x without downscaling & culls far annotations
+    const croppedCanvas = await renderPageToCanvas(hugePage, {
+      scale: 2,
+      includeBackground: true,
+      includeAnnotations: true,
+      cropRect: { x: 80, y: 100, width: 600, height: 400 },
+    });
+    expect(croppedCanvas.width).toBe(1200);
+    expect(croppedCanvas.height).toBe(800);
+
+    // 4. Negative-coordinate whiteboard area crop renders crisply without clamping >= 0
+    const negStroke: Stroke = {
+      ...SAMPLE_STROKE,
+      id: 'wb-neg',
+      points: [
+        { x: -500, y: -300, pressure: 0.5 },
+        { x: -200, y: -150, pressure: 0.5 },
+      ],
+      bounds: { minX: -500, minY: -300, maxX: -200, maxY: -150 },
+    };
+    const wbCanvas = await renderPageToCanvas(
+      { ...blankPage, strokes: [negStroke] },
+      {
+        scale: 2,
+        includeBackground: true,
+        includeAnnotations: true,
+        isWhiteboard: true,
+        cropRect: { x: -600, y: -400, width: 500, height: 350 },
+      },
+    );
+    expect(wbCanvas.width).toBe(1000);
+    expect(wbCanvas.height).toBe(700);
+
+    // 5. exportPagesToImages names & respects areaMode and maxDimension
+    const screenExport = await exportPagesToImages({
+      baseName: 'Architectural Board',
+      pages: [hugePage],
+      selectedIndices: [0],
+      format: 'png',
+      includeBackground: true,
+      includeAnnotations: true,
+      transparentBackground: false,
+      jpgQuality: 0.92,
+      scale: 2,
+      areaMode: 'screen',
+      cropRect: { x: 100, y: 100, width: 900, height: 600 },
+    });
+    expect(screenExport.filename).toBe('Architectural Board - Page 1 (Screen).png');
+
+    const areaExport = await exportPagesToImages({
+      baseName: 'Architectural Board',
+      pages: [hugePage],
+      selectedIndices: [0],
+      format: 'jpg',
+      includeBackground: true,
+      includeAnnotations: true,
+      transparentBackground: false,
+      jpgQuality: 0.9,
+      scale: 2,
+      areaMode: 'custom',
+      cropRect: { x: 100, y: 100, width: 900, height: 600 },
+    });
+    expect(areaExport.filename).toBe('Architectural Board - Page 1 (Area).jpg');
+
+    const croppedExport = await exportPagesToImages({
+      baseName: 'Architectural Board',
+      pages: [hugePage],
+      selectedIndices: [0],
+      format: 'png',
+      includeBackground: true,
+      includeAnnotations: true,
+      transparentBackground: false,
+      jpgQuality: 0.92,
+      scale: 2,
+      areaMode: 'content',
+      maxDimension: 4096,
+    });
+    expect(croppedExport.filename).toBe('Architectural Board - Page 1 (Cropped).png');
+
+    // 6. ExportModal UI test: switches PNG area modes, max size presets, area picker, and 1:1 sample
+    vi.spyOn(HTMLCanvasElement.prototype, 'toDataURL').mockReturnValue(
+      `data:image/png;base64,${VALID_1PX_PNG_BASE64}`,
+    );
+
+    const { notebook } = makeSampleNotebook();
+    const modalContainer = document.createElement('div');
+    document.body.appendChild(modalContainer);
+    const root: Root = createRoot(modalContainer);
+
+    await act(async () => {
+      root.render(
+        createElement(ExportModal, {
+          open: true,
+          notebook: { ...notebook, title: 'Giant Sheet' },
+          pages: [hugePage],
+          currentPageIndex: 0,
+          visibleRegion: { x: 80, y: 100, width: 1000, height: 700 },
+          onClose: () => {},
+        }),
+      );
+      await new Promise((r) => setTimeout(r, 30));
+    });
+
+    await act(async () => {
+      modalContainer.querySelector<HTMLButtonElement>('[data-testid="export-tab-png"]')!.click();
+      await new Promise((r) => setTimeout(r, 40));
+    });
+
+    expect(modalContainer.querySelector('[data-testid="export-area-section"]')).not.toBeNull();
+    expect(
+      modalContainer.querySelector('[data-testid="export-output-dimensions"]')?.textContent,
+    ).toContain('8,192 × 8,192');
+    expect(
+      modalContainer.querySelector('[data-testid="export-sharpness-badge"]')?.textContent,
+    ).toContain('Condensed');
+    expect(modalContainer.querySelector('[data-testid="export-detail-sample"]')).not.toBeNull();
+
+    // Switch Max Size to 4,096 px -> updates condensed output resolution
+    await act(async () => {
+      modalContainer.querySelector<HTMLButtonElement>('[data-testid="export-max-4096"]')!.click();
+      await new Promise((r) => setTimeout(r, 30));
+    });
+    expect(
+      modalContainer.querySelector('[data-testid="export-output-dimensions"]')?.textContent,
+    ).toContain('4,096 × 4,096');
+    expect(
+      modalContainer.querySelector('[data-testid="export-sharpness-badge"]')?.textContent,
+    ).toContain('17%');
+
+    // Switch to Current Screen -> switches to crisp Full Sharpness (2.0x)
+    await act(async () => {
+      modalContainer.querySelector<HTMLButtonElement>('[data-testid="export-area-screen"]')!.click();
+      await new Promise((r) => setTimeout(r, 30));
+    });
+    expect(
+      modalContainer.querySelector('[data-testid="export-output-dimensions"]')?.textContent,
+    ).toContain('2,000 × 1,400');
+    expect(
+      modalContainer.querySelector('[data-testid="export-sharpness-badge"]')?.textContent,
+    ).toContain('Full Sharpness');
+    expect(
+      modalContainer.querySelector('[data-testid="export-output-filename"]')?.textContent,
+    ).toContain('(Screen).png');
+
+    // Switch to Select Area -> shows interactive drag area picker map
+    await act(async () => {
+      modalContainer.querySelector<HTMLButtonElement>('[data-testid="export-area-custom"]')!.click();
+      await new Promise((r) => setTimeout(r, 40));
+    });
+    expect(modalContainer.querySelector('[data-testid="export-area-picker"]')).not.toBeNull();
+    expect(
+      modalContainer.querySelector('[data-testid="export-area-selection-box"]'),
+    ).not.toBeNull();
+
+    await act(async () => {
+      root.unmount();
+    });
+    modalContainer.remove();
   });
 });

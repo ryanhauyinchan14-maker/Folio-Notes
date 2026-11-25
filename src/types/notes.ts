@@ -139,9 +139,12 @@ export interface VaultMetadata {
   recoveryWrapped: WrappedKeyBlob;
 }
 
+export type NotebookMode = 'notebook' | 'whiteboard';
+
 export interface Notebook {
   id: string;
   title: string;
+  mode?: NotebookMode;
   folderId: string | null;
   cover: CoverConfig;
   defaultPaper: PaperConfig;
@@ -209,9 +212,20 @@ export interface Page {
   updatedAt: number;
 }
 
+export interface TrashedNotebookRecord {
+  id: string;
+  notebook: Notebook;
+  pages: Page[];
+  pdfAssets: PdfAsset[];
+  originalFolderName?: string | null;
+  deletedAt: number;
+  expiresAt: number;
+}
+
 export interface PaperTemplate {
   id: string;
   name: string;
+  mode?: NotebookMode;
   category: 'paper-preset' | 'page-template';
   paper: PaperConfig;
   strokes: Stroke[];
@@ -224,15 +238,40 @@ export interface PaperTemplate {
 
 export type ToolType = 'pen' | 'highlighter' | 'eraser' | 'lasso' | 'text' | 'pan';
 
+export interface BuiltInPaperVariant {
+  id: string;
+  label: string;
+  fullName: string;
+  swatchColor?: string;
+  paper: PaperConfig;
+}
+
 export interface BuiltInPaperPreset {
   id: string;
   name: string;
-  description: string;
+  mode?: NotebookMode;
   paper: PaperConfig;
+  variants?: BuiltInPaperVariant[];
 }
 
 export interface CoverPreset {
   id: CoverStyleId;
   name: string;
   cover: CoverConfig;
+}
+
+export interface CustomFontRecord {
+  id: string;
+  name: string;
+  fileName: string;
+  mimeType: string;
+  data: ArrayBuffer;
+  createdAt: number;
+}
+
+export interface UploadedInterfaceFontMeta {
+  id: string;
+  name: string;
+  fileName: string;
+  createdAt: number;
 }

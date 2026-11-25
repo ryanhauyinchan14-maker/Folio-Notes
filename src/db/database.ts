@@ -1,7 +1,15 @@
 import Dexie, { type EntityTable } from 'dexie';
 import { COVER_PRESETS } from '../constants/covers';
 import { DEFAULT_PAPER_CONFIG } from '../constants/papers';
-import type { Folder, Notebook, Page, PaperTemplate, PdfAsset } from '../types/notes';
+import type {
+  CustomFontRecord,
+  Folder,
+  Notebook,
+  Page,
+  PaperTemplate,
+  PdfAsset,
+  TrashedNotebookRecord,
+} from '../types/notes';
 import { createId } from '../utils/id';
 
 export class GoodNotesDatabase extends Dexie {
@@ -10,6 +18,8 @@ export class GoodNotesDatabase extends Dexie {
   pages!: EntityTable<Page, 'id'>;
   templates!: EntityTable<PaperTemplate, 'id'>;
   pdfAssets!: EntityTable<PdfAsset, 'id'>;
+  trashedNotebooks!: EntityTable<TrashedNotebookRecord, 'id'>;
+  customFonts!: EntityTable<CustomFontRecord, 'id'>;
 
   constructor(dbName = 'goodnotes-local-db') {
     super(dbName);
@@ -27,6 +37,25 @@ export class GoodNotesDatabase extends Dexie {
       pages: 'id, notebookId, updatedAt',
       templates: 'id, category, name, updatedAt',
       pdfAssets: 'id, notebookId, createdAt',
+    });
+
+    this.version(3).stores({
+      folders: 'id, parentId, name, updatedAt',
+      notebooks: 'id, folderId, title, updatedAt',
+      pages: 'id, notebookId, updatedAt',
+      templates: 'id, category, name, updatedAt',
+      pdfAssets: 'id, notebookId, createdAt',
+      trashedNotebooks: 'id, deletedAt, expiresAt',
+    });
+
+    this.version(4).stores({
+      folders: 'id, parentId, name, updatedAt',
+      notebooks: 'id, folderId, title, updatedAt',
+      pages: 'id, notebookId, updatedAt',
+      templates: 'id, category, name, updatedAt',
+      pdfAssets: 'id, notebookId, createdAt',
+      trashedNotebooks: 'id, deletedAt, expiresAt',
+      customFonts: 'id, name, createdAt',
     });
 
     // Runs strictly once on initial database creation.

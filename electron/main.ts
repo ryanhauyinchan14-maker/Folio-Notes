@@ -1,8 +1,21 @@
+import { execFile } from 'node:child_process';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { app, BrowserWindow, net, protocol, shell } from 'electron';
+import { promisify } from 'node:util';
+import { app, BrowserWindow, ipcMain, Menu, net, protocol, shell } from 'electron';
+import {
+  buildPrintDocumentHtml,
+  type FolioPrinterInfo,
+  type FolioPrintResult,
+  validatePrintSheetsRequest,
+} from './printCore';
+import { parseWindowsFontRegistryOutput } from './systemFontsCore';
+import { initHybridUpdater } from './updater';
+
+const execFileAsync = promisify(execFile);
 
 const APP_SCHEME = 'app';
 const APP_HOST = 'folio';
@@ -44,6 +57,7 @@ const MIME_BY_EXT: Record<string, string> = {
   '.jpeg': 'image/jpeg',
   '.webp': 'image/webp',
   '.ico': 'image/x-icon',
+  '.woff': 'font/woff',
   '.woff2': 'font/woff2',
   '.ttf': 'font/ttf',
   '.pdf': 'application/pdf',
@@ -106,6 +120,210 @@ function isAllowedInternalUrl(rawUrl: string, isDev: boolean): boolean {
   return false;
 }
 
+function isAllowedAiProxyUrl(rawUrl: string): boolean {
+  try {
+    const parsed = new URL(rawUrl);
+    if (parsed.protocol === 'https:') return true;
+    if (
+      parsed.protocol === 'http:' &&
+      (parsed.hostname === 'localhost' ||
+        parsed.hostname === '127.0.0.1' ||
+        parsed.hostname === '::1' ||
+        parsed.hostname === '[::1]')
+    ) {
+      return true;
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+function registerAiProxyIpc(): void {
+  ipcMain.handle('ai:proxy-fetch', async (_event, rawReq: unknown) => {
+    if (!rawReq || typeof rawReq !== 'object') {
+      throw new Error('Invalid AI proxy fetch request payload.');
+    }
+    const req = rawReq as {
+      url?: unknown;
+      method?: unknown;
+      headers?: unknown;
+      body?: unknown;
+      timeoutMs?: unknown;
+    };
+
+    const url = typeof req.url === 'string' ? req.url.trim() : '';
+    if (!url || !isAllowedAiProxyUrl(url)) {
+      throw new Error(
+        'Blocked AI request URL: only HTTPS endpoints or http://localhost / 127.0.0.1 are permitted.',
+      );
+    }
+
+    const method = req.method === 'GET' ? 'GET' : 'POST';
+    const headers: Record<string, string> = {};
+    if (req.headers && typeof req.headers === 'object') {
+      for (const [k, v] of Object.entries(req.headers as Record<string, unknown>)) {
+        if (typeof k === 'string' && typeof v === 'string') {
+          headers[k] = v;
+        }
+      }
+    }
+
+    const body = typeof req.body === 'string' && method !== 'GET' ? req.body : undefined;
+    const rawTimeout = typeof req.timeoutMs === 'number' && Number.isFinite(req.timeoutMs)
+      ? req.timeoutMs
+      : 60000;
+    const timeoutMs = Math.max(1000, Math.min(120000, Math.round(rawTimeout)));
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+    try {
+      const resp = await net.fetch(url, {
+        method,
+        headers,
+        body,
+        signal: controller.signal,
+      });
+      const bodyText = await resp.text();
+      return {
+        ok: resp.ok,
+        status: resp.status,
+        statusText: resp.statusText,
+        bodyText,
+      };
+    } finally {
+      clearTimeout(timer);
+    }
+  });
+}
+
+function registerFontsIpc(): void {
+  let cachedSystemFonts: string[] | null = null;
+
+  ipcMain.handle('fonts:list-system', async (): Promise<string[]> => {
+    if (cachedSystemFonts) return cachedSystemFonts;
+    if (process.platform !== 'win32') {
+      cachedSystemFonts = [];
+      return cachedSystemFonts;
+    }
+
+    const keys = [
+      'HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Fonts',
+      'HKCU\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Fonts',
+    ];
+    const outputs: string[] = [];
+
+    for (const key of keys) {
+      try {
+        const { stdout } = await execFileAsync('reg', ['query', key], {
+          windowsHide: true,
+          timeout: 4000,
+          maxBuffer: 4 * 1024 * 1024,
+        });
+        if (stdout) outputs.push(stdout);
+      } catch {
+        // Ignore unavailable or empty per-user registry key
+      }
+    }
+
+    cachedSystemFonts = parseWindowsFontRegistryOutput(outputs);
+    return cachedSystemFonts;
+  });
+}
+
+function registerWindowIpc(): void {
+  ipcMain.handle('window:toggle-fullscreen', (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender) ?? mainWindow;
+    if (!win || win.isDestroyed()) return false;
+    const next = !win.isFullScreen();
+    win.setFullScreen(next);
+    return next;
+  });
+}
+
+function registerPrintIpc(): void {
+  ipcMain.handle('print:get-printers', async (event): Promise<FolioPrinterInfo[]> => {
+    try {
+      const list = await event.sender.getPrintersAsync();
+      return list.map((p) => ({
+        name: p.name,
+        displayName: p.displayName || p.name,
+        description: p.description || '',
+        isDefault: Boolean((p as { isDefault?: boolean }).isDefault),
+      }));
+    } catch {
+      return [];
+    }
+  });
+
+  ipcMain.handle('print:execute', async (_event, rawReq: unknown): Promise<FolioPrintResult> => {
+    let printWin: BrowserWindow | null = null;
+    const tempHtmlPath = path.join(os.tmpdir(), `folio-print-${crypto.randomUUID()}.html`);
+    try {
+      const req = validatePrintSheetsRequest(rawReq);
+      const html = buildPrintDocumentHtml(req);
+      await fs.promises.writeFile(tempHtmlPath, html, 'utf8');
+
+      printWin = new BrowserWindow({
+        show: false,
+        width: 900,
+        height: 1100,
+        backgroundColor: '#ffffff',
+        webPreferences: {
+          contextIsolation: true,
+          nodeIntegration: false,
+          sandbox: true,
+          javascript: false,
+        },
+      });
+
+      await printWin.loadFile(tempHtmlPath);
+      await new Promise((resolve) => setTimeout(resolve, 120));
+
+      const activeWin = printWin;
+      return await new Promise<FolioPrintResult>((resolve) => {
+        activeWin.webContents.print(
+          {
+            silent: req.silent,
+            printBackground: true,
+            deviceName: req.deviceName || undefined,
+            color: req.color,
+            landscape: req.landscape,
+            copies: req.copies,
+            pageSize: req.pageSize,
+            margins: { marginType: 'none' },
+          },
+          (success, failureReason) => {
+            if (success) {
+              resolve({ ok: true });
+            } else {
+              resolve({
+                ok: false,
+                error: failureReason || 'Printing was cancelled or failed.',
+              });
+            }
+          },
+        );
+      });
+    } catch (err) {
+      return {
+        ok: false,
+        error: err instanceof Error ? err.message : 'Unable to prepare print job.',
+      };
+    } finally {
+      if (printWin && !printWin.isDestroyed()) {
+        printWin.destroy();
+      }
+      try {
+        await fs.promises.unlink(tempHtmlPath);
+      } catch {
+        // Ignore temp file cleanup errors
+      }
+    }
+  });
+}
+
 function createMainWindow(): BrowserWindow {
   const isDev =
     !app.isPackaged &&
@@ -123,7 +341,6 @@ function createMainWindow(): BrowserWindow {
     minHeight: 620,
     title: 'Folio Notes',
     icon: fs.existsSync(iconPath) ? iconPath : undefined,
-    autoHideMenuBar: true,
     show: false,
     backgroundColor: '#f1f5f9',
     webPreferences: {
@@ -134,6 +351,26 @@ function createMainWindow(): BrowserWindow {
     },
   });
 
+  if (process.platform !== 'darwin') {
+    win.removeMenu();
+    win.setMenuBarVisibility(false);
+  }
+
+  win.webContents.on('before-input-event', (event, input) => {
+    if (
+      input.type === 'keyDown' &&
+      !input.isAutoRepeat &&
+      (input.key === 'F11' || input.code === 'F11') &&
+      !input.control &&
+      !input.alt &&
+      !input.meta &&
+      !input.shift
+    ) {
+      event.preventDefault();
+      win.setFullScreen(!win.isFullScreen());
+    }
+  });
+
   win.once('ready-to-show', () => {
     if (!IS_SMOKE_CHECK) {
       win.show();
@@ -142,9 +379,16 @@ function createMainWindow(): BrowserWindow {
 
   if (IS_SMOKE_CHECK) {
     const consoleErrors: string[] = [];
+    const cspWarnings: string[] = [];
     win.webContents.on('console-message', (details) => {
       if (details.level === 'error') {
         consoleErrors.push(details.message);
+      }
+      if (
+        (details.level === 'error' || details.level === 'warning') &&
+        /content security policy|\bcsp\b|refused to/i.test(details.message)
+      ) {
+        cspWarnings.push(details.message);
       }
     });
     win.webContents.on('did-fail-load', (_e, code, desc, url) => {
@@ -169,6 +413,26 @@ function createMainWindow(): BrowserWindow {
               contentType: res.headers.get('content-type') || '',
             };
           }
+          const heroEl = document.querySelector('[data-testid="home-hero-banner"]');
+          const shaderEl = document.querySelector('[data-testid="home-hero-shader"]');
+          const canvasEl = shaderEl ? shaderEl.querySelector('canvas') : null;
+          const shaderMode = shaderEl?.getAttribute('data-shader-mode') || '';
+          const canvasWidth = canvasEl ? canvasEl.width : 0;
+          const canvasHeight = canvasEl ? canvasEl.height : 0;
+          const hasScrim = Boolean(heroEl && heroEl.querySelector('.folio-hero-scrim'));
+          const shaderHeroCheck = {
+            hasHeroEl: Boolean(heroEl),
+            hasShaderEl: Boolean(shaderEl),
+            shaderMode,
+            hasCanvas: Boolean(canvasEl),
+            canvasWidth,
+            canvasHeight,
+            hasScrim,
+            ok:
+              Boolean(heroEl && shaderEl && hasScrim) &&
+              ((shaderMode === 'webgl' && canvasWidth > 0 && canvasHeight > 0) ||
+                shaderMode === 'css-fallback'),
+          };
           return {
             href: window.location.href,
             origin: window.location.origin,
@@ -177,13 +441,34 @@ function createMainWindow(): BrowserWindow {
             hasCryptoSubtle: typeof window.crypto?.subtle?.generateKey === 'function',
             hasIndexedDB: Boolean(window.indexedDB),
             hasFolioDesktop: Boolean(window.folioDesktop?.isElectron),
+            hasUiZoomBridge:
+              typeof window.folioDesktop?.setUiZoomFactor === 'function' &&
+              typeof window.folioDesktop?.getUiZoomFactor === 'function',
+            uiScale: window.folioDesktop?.getUiZoomFactor?.() ?? null,
+            hasFullscreenBridge: typeof window.folioDesktop?.toggleFullscreen === 'function',
+            hasAiProxyFetch: typeof window.folioDesktop?.aiFetch === 'function',
+            hasUpdaterBridge:
+              typeof window.folioDesktop?.updater?.getStatus === 'function' &&
+              typeof window.folioDesktop?.updater?.restartAndInstall === 'function',
+            hasPrintBridge:
+              typeof window.folioDesktop?.print?.getPrinters === 'function' &&
+              typeof window.folioDesktop?.print?.printSheets === 'function',
+            hasFontsBridge:
+              typeof window.folioDesktop?.fonts?.listSystemFonts === 'function',
             nodeLeaked: typeof window.require !== 'undefined' || typeof window.process !== 'undefined',
             rootChildren: document.getElementById('root')?.children.length ?? 0,
             bodyTextSample: (document.body?.innerText || '').slice(0, 120),
             pdfWorkerCheck,
+            shaderHeroCheck,
           };
         })()`);
-        console.log('SMOKE_REPORT', JSON.stringify({ ...report, consoleErrors }));
+        const hasNoMenuBar =
+          process.platform === 'darwin' ||
+          (Menu.getApplicationMenu() === null && !win.isMenuBarVisible());
+        console.log(
+          'SMOKE_REPORT',
+          JSON.stringify({ ...report, hasNoMenuBar, consoleErrors, cspWarnings }),
+        );
         const workerOk =
           !workerFile ||
           (report.pdfWorkerCheck?.status === 200 &&
@@ -193,10 +478,19 @@ function createMainWindow(): BrowserWindow {
           report.hasCryptoSubtle &&
           report.hasIndexedDB &&
           report.hasFolioDesktop &&
+          report.hasUiZoomBridge &&
+          report.hasFullscreenBridge &&
+          win.isFullScreenable() &&
+          report.hasAiProxyFetch &&
+          report.hasUpdaterBridge &&
+          report.hasPrintBridge &&
+          hasNoMenuBar &&
           !report.nodeLeaked &&
           report.rootChildren > 0 &&
           workerOk &&
-          consoleErrors.length === 0;
+          Boolean(report.shaderHeroCheck?.ok) &&
+          consoleErrors.length === 0 &&
+          cspWarnings.length === 0;
         app.exit(ok ? 0 : 1);
       } catch (err) {
         console.error('SMOKE_EVAL_ERROR', err);
@@ -244,13 +538,26 @@ if (!gotSingleInstanceLock) {
     mainWindow.focus();
   });
 
+  let cleanupUpdater: (() => void) | null = null;
+
   app.whenReady().then(() => {
     if (process.platform === 'win32') {
       app.setAppUserModelId('com.folionotes.desktop');
     }
+    if (process.platform !== 'darwin') {
+      Menu.setApplicationMenu(null);
+    }
 
     const distRoot = path.resolve(__dirname, '../dist');
     registerAppProtocol(distRoot);
+    registerAiProxyIpc();
+    registerWindowIpc();
+    registerPrintIpc();
+    registerFontsIpc();
+    cleanupUpdater = initHybridUpdater({
+      getMainWindow: () => mainWindow,
+      isSmokeCheck: IS_SMOKE_CHECK,
+    }).cleanup;
 
     mainWindow = createMainWindow();
 
@@ -259,6 +566,11 @@ if (!gotSingleInstanceLock) {
         mainWindow = createMainWindow();
       }
     });
+  });
+
+  app.on('before-quit', () => {
+    cleanupUpdater?.();
+    cleanupUpdater = null;
   });
 
   app.on('window-all-closed', () => {

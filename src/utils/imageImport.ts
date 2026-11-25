@@ -89,17 +89,29 @@ export function buildPlacedPageImage(params: {
   centerX: number;
   centerY: number;
   zIndex: number;
+  unbounded?: boolean;
 }): PageImage {
-  const { dataUrl, naturalWidth, naturalHeight, paper, centerX, centerY, zIndex } = params;
-  const maxW = paper.width * 0.5;
-  const maxH = paper.height * 0.6;
+  const {
+    dataUrl,
+    naturalWidth,
+    naturalHeight,
+    paper,
+    centerX,
+    centerY,
+    zIndex,
+    unbounded = false,
+  } = params;
+  const maxW = unbounded ? 480 : paper.width * 0.5;
+  const maxH = unbounded ? 480 : paper.height * 0.6;
   const fitScale = Math.min(maxW / naturalWidth, maxH / naturalHeight, 1);
 
   const width = Math.max(40, Math.round(naturalWidth * fitScale));
   const height = Math.max(40, Math.round(naturalHeight * fitScale));
 
-  const x = Math.max(8, Math.min(paper.width - width - 8, Math.round(centerX - width / 2)));
-  const y = Math.max(8, Math.min(paper.height - height - 8, Math.round(centerY - height / 2)));
+  const rawX = Math.round(centerX - width / 2);
+  const rawY = Math.round(centerY - height / 2);
+  const x = unbounded ? rawX : Math.max(8, Math.min(paper.width - width - 8, rawX));
+  const y = unbounded ? rawY : Math.max(8, Math.min(paper.height - height - 8, rawY));
 
   const now = Date.now();
   return {
