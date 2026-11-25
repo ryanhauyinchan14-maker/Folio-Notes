@@ -1,4 +1,4 @@
-import type { PaperConfig } from '../types/notes';
+import type { BoundingBox, PaperConfig } from '../types/notes';
 
 function hexToRgb(hex: string): { r: number; g: number; b: number } | null {
   const cleaned = hex.replace('#', '').trim();
@@ -99,73 +99,130 @@ export function resolvePaperLineColors(paper: PaperConfig): {
 export function renderPaperBackground(
   ctx: CanvasRenderingContext2D,
   paper: PaperConfig,
+  clipBounds?: BoundingBox,
 ): void {
   const { width, height, pattern } = paper;
   const spacing = Math.max(12, Math.min(96, paper.spacing || 32));
   const colors = resolvePaperLineColors(paper);
 
+  const clipMinX = Math.max(0, clipBounds ? clipBounds.minX : 0);
+  const clipMinY = Math.max(0, clipBounds ? clipBounds.minY : 0);
+  const clipMaxX = Math.min(width, clipBounds ? clipBounds.maxX : width);
+  const clipMaxY = Math.min(height, clipBounds ? clipBounds.maxY : height);
+  if (clipMaxX <= clipMinX || clipMaxY <= clipMinY) return;
+
   ctx.save();
 
-  // Base paper fill
+  // Base paper fill across clipped region
   ctx.fillStyle = paper.paperColor || '#FFFFFF';
-  ctx.fillRect(0, 0, width, height);
+  ctx.fillRect(clipMinX, clipMinY, clipMaxX - clipMinX, clipMaxY - clipMinY);
 
   if (pattern === 'ruled') {
     const topStart = Math.max(spacing * 2.25, 68);
     const bottomLimit = height - Math.max(spacing, 28);
+    const yEnd = Math.min(bottomLimit, clipMaxY);
+    if (yEnd >= topStart) {
+      let lineStep = spacing;
+      while ((yEnd - Math.max(topStart, clipMinY)) / lineStep > 1200) {
+        lineStep *= 2;
+      }
+      const firstIndex = Math.max(0, Math.ceil((clipMinY - topStart) / lineStep));
+      const firstY = topStart + firstIndex * lineStep;
+
+      ctx.strokeStyle = colors.primaryLine;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      for (let y = firstY; y <= yEnd; y += lineStep) {
+        const alignedY = Math.round(y) + 0.5;
+        ctx.moveTo(clipMinX, alignedY);
+        ctx.lineTo(clipMaxX, alignedY);
+      }
+      ctx.stroke();
+    }
+  } else if (pattern === 'grid') {
+    let lineStep = spacing;
+    while ((clipMaxX - clipMinX) / lineStep + (clipMaxY - clipMinY) / lineStep > 1200) {
+      lineStep *= 2;
+    }
+    const startX = Math.max(lineStep, Math.ceil(clipMinX / lineStep) * lineStep);
+    const endX = Math.min(width - 0.001, clipMaxX);
+    const startY = Math.max(lineStep, Math.ceil(clipMinY / lineStep) * lineStep);
+    const endY = Math.min(height - 0.001, clipMaxY);
 
     ctx.strokeStyle = colors.primaryLine;
     ctx.lineWidth = 1;
     ctx.beginPath();
-    for (let y = topStart; y <= bottomLimit; y += spacing) {
-      const alignedY = Math.round(y) + 0.5;
-      ctx.moveTo(0, alignedY);
-      ctx.lineTo(width, alignedY);
-    }
-    ctx.stroke();
-  } else if (pattern === 'grid') {
-    ctx.strokeStyle = colors.primaryLine;
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    for (let x = spacing; x < width; x += spacing) {
+    for (let x = startX; x <= endX; x += lineStep) {
       const alignedX = Math.round(x) + 0.5;
-      ctx.moveTo(alignedX, 0);
-      ctx.lineTo(alignedX, height);
+      ctx.moveTo(alignedX, clipMinY);
+      ctx.lineTo(alignedX, clipMaxY);
     }
-    for (let y = spacing; y < height; y += spacing) {
+    for (let y = startY; y <= endY; y += lineStep) {
       const alignedY = Math.round(y) + 0.5;
-      ctx.moveTo(0, alignedY);
-      ctx.lineTo(width, alignedY);
+      ctx.moveTo(clipMinX, alignedY);
+      ctx.lineTo(clipMaxX, alignedY);
     }
     ctx.stroke();
   } else if (pattern === 'dotted') {
-    ctx.fillStyle = colors.dotColor;
-    const radius = Math.max(1, Math.min(1.8, spacing * 0.045));
-    for (let x = spacing; x <= width - spacing * 0.5; x += spacing) {
-      for (let y = spacing; y <= height - spacing * 0.5; y += spacing) {
-        ctx.beginPath();
-        ctx.arc(x, y, radius, 0, Math.PI * 2);
-        ctx.fill();
+    let dotStep = spacing;
+    while (((clipMaxX - clipMinX) / dotStep) * ((clipMaxY - clipMinY) / dotStep) > 6000) {
+      dotStep *= 2;
+    }
+    const startX = Math.max(dotStep, Math.ceil(clipMinX / dotStep) * dotStep);
+    const endX = Math.min(width - dotStep * 0.5, clipMaxX);
+    const startY = Math.max(dotStep, Math.ceil(clipMinY / dotStep) * dotStep);
+    const endY = Math.min(height - dotStep * 0.5, clipMaxY);
+
+    if (endX >= startX && endY >= startY) {
+      ctx.fillStyle = colors.dotColor;
+      const radius = Math.max(1, Math.min(1.8, spacing * 0.045));
+      ctx.beginPath();
+      for (let x = startX; x <= endX; x += dotStep) {
+        for (let y = startY; y <= endY; y += dotStep) {
+          ctx.moveTo(x + radius, y);
+          ctx.arc(x, y, radius, 0, Math.PI * 2);
+        }
       }
+      ctx.fill();
     }
   } else if (pattern === 'cornell') {
     const topHeaderY = Math.round(Math.max(72, Math.min(110, height * 0.095)));
     const summaryY = Math.round(height - Math.max(140, Math.min(200, height * 0.175)));
     const cueX = Math.round(Math.max(150, Math.min(240, width * 0.275)));
 
-    // Ruled lines inside notes area (and subtle lines inside summary section)
+    let lineStep = spacing;
+    while ((clipMaxY - clipMinY) / lineStep > 1200) {
+      lineStep *= 2;
+    }
+
+    // Ruled lines inside notes area & summary section
     ctx.strokeStyle = colors.primaryLine;
     ctx.lineWidth = 1;
     ctx.beginPath();
-    for (let y = topHeaderY + spacing; y < summaryY - 4; y += spacing) {
-      const alignedY = Math.round(y) + 0.5;
-      ctx.moveTo(cueX, alignedY);
-      ctx.lineTo(width - 24, alignedY);
+    const notesStart = topHeaderY + spacing;
+    const notesEnd = Math.min(summaryY - 4, clipMaxY);
+    const notesLineX1 = Math.max(cueX, clipMinX);
+    const notesLineX2 = Math.min(width - 24, clipMaxX);
+    if (notesLineX2 > notesLineX1 && notesEnd > notesStart) {
+      const idx0 = Math.max(0, Math.ceil((clipMinY - notesStart) / lineStep));
+      for (let y = notesStart + idx0 * lineStep; y < notesEnd; y += lineStep) {
+        const alignedY = Math.round(y) + 0.5;
+        ctx.moveTo(notesLineX1, alignedY);
+        ctx.lineTo(notesLineX2, alignedY);
+      }
     }
-    for (let y = summaryY + spacing; y < height - 20; y += spacing) {
-      const alignedY = Math.round(y) + 0.5;
-      ctx.moveTo(24, alignedY);
-      ctx.lineTo(width - 24, alignedY);
+
+    const sumStart = summaryY + spacing;
+    const sumEnd = Math.min(height - 20, clipMaxY);
+    const sumLineX1 = Math.max(24, clipMinX);
+    const sumLineX2 = Math.min(width - 24, clipMaxX);
+    if (sumLineX2 > sumLineX1 && sumEnd > sumStart) {
+      const idx0 = Math.max(0, Math.ceil((clipMinY - sumStart) / lineStep));
+      for (let y = sumStart + idx0 * lineStep; y < sumEnd; y += lineStep) {
+        const alignedY = Math.round(y) + 0.5;
+        ctx.moveTo(sumLineX1, alignedY);
+        ctx.lineTo(sumLineX2, alignedY);
+      }
     }
     ctx.stroke();
 
@@ -173,13 +230,10 @@ export function renderPaperBackground(
     ctx.strokeStyle = colors.accentLine;
     ctx.lineWidth = 1.75;
     ctx.beginPath();
-    // Header divider
     ctx.moveTo(24, topHeaderY + 0.5);
     ctx.lineTo(width - 24, topHeaderY + 0.5);
-    // Summary divider
     ctx.moveTo(24, summaryY + 0.5);
     ctx.lineTo(width - 24, summaryY + 0.5);
-    // Cue column vertical divider
     ctx.moveTo(cueX + 0.5, topHeaderY + 0.5);
     ctx.lineTo(cueX + 0.5, summaryY + 0.5);
     ctx.stroke();
@@ -188,11 +242,106 @@ export function renderPaperBackground(
   // Optional vertical margin line (applicable across Blank, Ruled, Grid, Dotted, or Cornell if toggled)
   if (paper.marginLine) {
     const marginX = Math.round(paper.marginOffset ?? Math.min(96, width * 0.12)) + 0.5;
-    ctx.strokeStyle = colors.marginLine;
-    ctx.lineWidth = 1.25;
+    if (marginX >= clipMinX - 2 && marginX <= clipMaxX + 2) {
+      ctx.strokeStyle = colors.marginLine;
+      ctx.lineWidth = 1.25;
+      ctx.beginPath();
+      ctx.moveTo(marginX, clipMinY);
+      ctx.lineTo(marginX, clipMaxY);
+      ctx.stroke();
+    }
+  }
+
+  ctx.restore();
+}
+
+/**
+ * Renders an unbounded camera-tracked background pattern (`dotted`, `grid`, `ruled`,
+ * or `blank`) across `visibleWorld` in world coordinates (supports positive and negative coords).
+ */
+export function renderWhiteboardBackground(
+  ctx: CanvasRenderingContext2D,
+  paper: PaperConfig,
+  visibleWorld: BoundingBox,
+  zoom: number,
+): void {
+  const safeZoom = Math.max(0.02, zoom || 1);
+  const baseSpacing = Math.max(12, Math.min(96, paper.spacing || 32));
+  const step =
+    safeZoom < 0.1
+      ? baseSpacing * 8
+      : safeZoom < 0.25
+        ? baseSpacing * 4
+        : safeZoom < 0.5
+          ? baseSpacing * 2
+          : baseSpacing;
+  const colors = resolvePaperLineColors(paper);
+
+  const minX = visibleWorld.minX;
+  const minY = visibleWorld.minY;
+  const width = Math.max(1, visibleWorld.maxX - visibleWorld.minX);
+  const height = Math.max(1, visibleWorld.maxY - visibleWorld.minY);
+
+  ctx.save();
+  ctx.fillStyle = paper.paperColor || '#FFFFFF';
+  ctx.fillRect(minX, minY, width, height);
+
+  const startX = Math.floor(minX / step) * step;
+  const endX = Math.ceil(visibleWorld.maxX / step) * step;
+  const startY = Math.floor(minY / step) * step;
+  const endY = Math.ceil(visibleWorld.maxY / step) * step;
+
+  if (paper.pattern === 'dotted') {
+    const radius = Math.max(1.1, Math.min(2.2, baseSpacing * 0.045)) / safeZoom;
+    ctx.fillStyle = colors.dotColor;
     ctx.beginPath();
-    ctx.moveTo(marginX, 0);
-    ctx.lineTo(marginX, height);
+    for (let x = startX; x <= endX; x += step) {
+      for (let y = startY; y <= endY; y += step) {
+        ctx.moveTo(x + radius, y);
+        ctx.arc(x, y, radius, 0, Math.PI * 2);
+      }
+    }
+    ctx.fill();
+  } else if (paper.pattern === 'grid') {
+    ctx.strokeStyle = colors.primaryLine;
+    ctx.lineWidth = 1 / safeZoom;
+    ctx.beginPath();
+    for (let x = startX; x <= endX; x += step) {
+      ctx.moveTo(x, minY);
+      ctx.lineTo(x, visibleWorld.maxY);
+    }
+    for (let y = startY; y <= endY; y += step) {
+      ctx.moveTo(minX, y);
+      ctx.lineTo(visibleWorld.maxX, y);
+    }
+    ctx.stroke();
+  } else if (paper.pattern === 'ruled') {
+    ctx.strokeStyle = colors.primaryLine;
+    ctx.lineWidth = 1 / safeZoom;
+    ctx.beginPath();
+    for (let y = startY; y <= endY; y += step) {
+      ctx.moveTo(minX, y);
+      ctx.lineTo(visibleWorld.maxX, y);
+    }
+    ctx.stroke();
+  }
+
+  // Subtle world-origin (0, 0) crosshair when visible on dotted or grid boards
+  if (
+    (paper.pattern === 'dotted' || paper.pattern === 'grid') &&
+    minX <= 16 &&
+    visibleWorld.maxX >= -16 &&
+    minY <= 16 &&
+    visibleWorld.maxY >= -16
+  ) {
+    const arm = 10 / safeZoom;
+    ctx.strokeStyle = colors.accentLine;
+    ctx.lineWidth = 1.5 / safeZoom;
+    ctx.beginPath();
+    ctx.moveTo(-arm, 0);
+    ctx.lineTo(arm, 0);
+    ctx.moveTo(0, -arm);
+    ctx.lineTo(0, arm);
     ctx.stroke();
   }
 

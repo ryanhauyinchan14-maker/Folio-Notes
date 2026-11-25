@@ -4,6 +4,7 @@ import { drawCommittedImage } from './imageRenderer';
 import { renderPaperBackground } from './paperRenderer';
 import { drawCommittedStroke } from './strokeRenderer';
 import { drawCommittedTextbox } from './textLayout';
+import { normalizeWhiteboardPageForExport, WHITEBOARD_EXPORT_MARGIN } from './whiteboard';
 
 /**
  * Generates a crisp PNG data URL thumbnail capturing the paper background
@@ -16,12 +17,46 @@ export function generatePageThumbnail(
   textboxes: Textbox[] = [],
   images: PageImage[] = [],
   backgroundSource?: CanvasImageSource | null,
+  isWhiteboard = false,
 ): string {
   if (typeof document === 'undefined') return '';
 
-  const aspect = paper.height / Math.max(1, paper.width);
-  const width = Math.max(80, Math.round(targetWidth));
-  const height = Math.max(80, Math.round(width * aspect));
+  let effPaper = paper;
+  let effStrokes = strokes;
+  let effTextboxes = textboxes;
+  let effImages = images;
+  if (isWhiteboard && !backgroundSource) {
+    const normalized = normalizeWhiteboardPageForExport(
+      {
+        id: 'thumb',
+        notebookId: '',
+        paper,
+        strokes,
+        textboxes,
+        images,
+        createdAt: 0,
+        updatedAt: 0,
+      },
+      WHITEBOARD_EXPORT_MARGIN,
+    );
+    effPaper = normalized.paper;
+    effStrokes = normalized.strokes;
+    effTextboxes = normalized.textboxes ?? [];
+    effImages = normalized.images ?? [];
+  }
+
+  const aspect = effPaper.height / Math.max(1, effPaper.width);
+  const maxDim = Math.max(360, Math.round(targetWidth * 1.6));
+  let width = Math.max(80, Math.round(targetWidth));
+  let height = Math.max(80, Math.round(width * aspect));
+  if (height > maxDim) {
+    height = maxDim;
+    width = Math.max(48, Math.round(height / Math.max(0.01, aspect)));
+  }
+  if (width > maxDim) {
+    width = maxDim;
+    height = Math.max(48, Math.round(width * aspect));
+  }
 
   const canvas = document.createElement('canvas');
   canvas.width = width;
@@ -30,26 +65,26 @@ export function generatePageThumbnail(
   const ctx = canvas.getContext('2d');
   if (!ctx) return '';
 
-  const scale = width / Math.max(1, paper.width);
+  const scale = width / Math.max(1, effPaper.width);
   ctx.save();
   ctx.scale(scale, scale);
 
   if (backgroundSource) {
     ctx.fillStyle = '#FFFFFF';
-    ctx.fillRect(0, 0, paper.width, paper.height);
-    ctx.drawImage(backgroundSource, 0, 0, paper.width, paper.height);
+    ctx.fillRect(0, 0, effPaper.width, effPaper.height);
+    ctx.drawImage(backgroundSource, 0, 0, effPaper.width, effPaper.height);
   } else {
-    renderPaperBackground(ctx, paper);
+    renderPaperBackground(ctx, effPaper);
   }
 
-  const sortedImages = [...images].sort((a, b) => a.zIndex - b.zIndex);
+  const sortedImages = [...effImages].sort((a, b) => a.zIndex - b.zIndex);
   for (const img of sortedImages) {
     drawCommittedImage(ctx, img);
   }
-  for (const stroke of strokes) {
+  for (const stroke of effStrokes) {
     drawCommittedStroke(ctx, stroke, true);
   }
-  for (const tb of textboxes) {
+  for (const tb of effTextboxes) {
     drawCommittedTextbox(ctx, tb);
   }
 
@@ -65,6 +100,7 @@ export async function generatePdfAwarePageThumbnail(
   page: Page,
   targetWidth = 240,
   masterKey?: CryptoKey | null,
+  isWhiteboard = false,
 ): Promise<string> {
   if (typeof document === 'undefined') return '';
 
@@ -75,6 +111,8 @@ export async function generatePdfAwarePageThumbnail(
       targetWidth,
       page.textboxes ?? [],
       page.images ?? [],
+      undefined,
+      isWhiteboard,
     );
   }
 
@@ -100,6 +138,7 @@ export async function generatePdfAwarePageThumbnail(
           page.textboxes ?? [],
           page.images ?? [],
           bgCanvas,
+          isWhiteboard,
         );
       }
     }
@@ -113,5 +152,7 @@ export async function generatePdfAwarePageThumbnail(
     targetWidth,
     page.textboxes ?? [],
     page.images ?? [],
+    undefined,
+    isWhiteboard,
   );
 }

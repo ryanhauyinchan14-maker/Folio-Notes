@@ -5,6 +5,7 @@ import {
   doesEraserHitStroke,
   getStrokesInLasso,
   sampleShapePoints,
+  snapLineEndToCardinalAxis,
   translateStroke,
 } from '../geometry';
 
@@ -58,5 +59,24 @@ describe('geometry hit-testing & transforms', () => {
     });
     expect(moved.bounds.minX).toBe(stroke.bounds.minX + 25);
     expect(moved.bounds.minY).toBe(stroke.bounds.minY - 10);
+  });
+
+  it('snaps line endpoints dynamically to horizontal or vertical cardinal axes', () => {
+    // Horizontal dominant (positive and negative X)
+    expect(snapLineEndToCardinalAxis(100, 120, 280, 165)).toEqual({ x2: 280, y2: 120 });
+    expect(snapLineEndToCardinalAxis(200, 120, 45, 95)).toEqual({ x2: 45, y2: 120 });
+
+    // Vertical dominant (positive and negative Y)
+    expect(snapLineEndToCardinalAxis(100, 120, 140, 310)).toEqual({ x2: 100, y2: 310 });
+    expect(snapLineEndToCardinalAxis(100, 300, 75, 110)).toEqual({ x2: 100, y2: 110 });
+
+    // Exact 45-degree tie defaults cleanly to horizontal
+    expect(snapLineEndToCardinalAxis(50, 50, 110, 110)).toEqual({ x2: 110, y2: 50 });
+
+    // Negative whiteboard coordinates
+    expect(snapLineEndToCardinalAxis(-120, -80, -260, -110)).toEqual({
+      x2: -260,
+      y2: -80,
+    });
   });
 });

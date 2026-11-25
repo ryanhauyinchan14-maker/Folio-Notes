@@ -1,4 +1,4 @@
-import type { Stroke, StrokePoint } from '../types/notes';
+import type { BoundingBox, Stroke, StrokePoint } from '../types/notes';
 import { createId } from '../utils/id';
 import { computeBoundsFromPoints, distance } from './geometry';
 
@@ -16,25 +16,27 @@ function computePathLength(points: StrokePoint[]): number {
  */
 export function isHandwritingCandidateStroke(stroke: Stroke): boolean {
   if (stroke.tool !== 'pen' || stroke.shape || stroke.isTidied) return false;
-  if (stroke.points.length < 3) return false;
+  if (stroke.points.length < 2) return false;
 
   const width = stroke.bounds.maxX - stroke.bounds.minX;
   const height = stroke.bounds.maxY - stroke.bounds.minY;
 
   // Reject tall diagrams, frames, or full-page boxes
-  if (height > 92) return false;
+  if (height > 220) return false;
   // Reject huge wide sketches
-  if (width > 380) return false;
+  if (width > 640) return false;
+  // Reject sparse geometric box / diagram frames (e.g. 4-point rectangles)
+  if (width >= 100 && height >= 140 && stroke.points.length <= 8) return false;
 
   const pathLen = computePathLength(stroke.points);
-  if (pathLen < 6) return false;
+  if (pathLen < 4) return false;
 
   const first = stroke.points[0];
   const last = stroke.points[stroke.points.length - 1];
   const endToEnd = distance(first.x, first.y, last.x, last.y);
 
   // Reject long straight divider lines / underlines
-  if (width > 125 && height < 14 && pathLen <= endToEnd * 1.22) {
+  if (width > 180 && height < 14 && pathLen <= endToEnd * 1.22) {
     return false;
   }
 
@@ -64,6 +66,9 @@ export function findHandwritingCluster(
   while (expanded) {
     expanded = false;
     const clusterCenterY = (minY + maxY) / 2;
+    const clusterH = Math.max(24, maxY - minY);
+    const maxHorizGap = Math.max(75, Math.min(180, clusterH * 1.15));
+    const maxVertDist = Math.max(52, Math.min(140, clusterH * 0.9));
 
     for (const candidate of strokes) {
       if (inCluster.has(candidate.id)) continue;
@@ -77,7 +82,7 @@ export function findHandwritingCluster(
       );
       const vertDist = Math.abs(candCenterY - clusterCenterY);
 
-      if (horizGap <= 75 && vertDist <= 52) {
+      if (horizGap <= maxHorizGap && vertDist <= maxVertDist) {
         inCluster.add(candidate.id);
         cluster.push(candidate);
         minX = Math.min(minX, candidate.bounds.minX);
@@ -90,12 +95,12 @@ export function findHandwritingCluster(
   }
 
   const totalHeight = maxY - minY;
-  if (totalHeight > 115) return [];
+  if (totalHeight > 260) return [];
 
   const totalPathLen = cluster.reduce((sum, s) => sum + computePathLength(s.points), 0);
   const maxPoints = Math.max(...cluster.map((s) => s.points.length));
 
-  if (totalPathLen < 24 || (cluster.length === 1 && maxPoints < 6)) {
+  if (totalPathLen < 14 || (cluster.length === 1 && maxPoints < 4)) {
     return [];
   }
 
@@ -337,4 +342,98 @@ export function tidyHandwritingCluster(cluster: Stroke[]): Stroke[] {
       bounds: computeBoundsFromPoints(normalized, stroke.size * 0.6),
     };
   });
+}
+
+/**
+ * Combines two bounding boxes into their union bounds.
+ */
+export function expandBoundingBox(
+  a: BoundingBox | null,
+  b: BoundingBox,
+): BoundingBox {
+  if (!a) return { ...b };
+  return {
+    minX: Math.min(a.minX, b.minX),
+    minY: Math.min(a.minY, b.minY),
+    maxX: Math.max(a.maxX, b.maxX),
+    maxY: Math.max(a.maxY, b.maxY),
+  };
+}
+
+/**
+ * Determines whether a new stroke start point breaks away horizontally or vertically
+ * into a new word or line relative to the currently buffered handwriting word bounds.
+ */
+export function isNewHandwritingWordStart(
+  activeBounds: BoundingBox,
+  point: { x: number; y: number },
+): boolean {
+  const wordHeight = Math.max(20, activeBounds.maxY - activeBounds.minY);
+  const rightGap = Math.max(30, Math.min(160, wordHeight * 1.15));
+  const leftGap = Math.max(32, Math.min(140, wordHeight * 1.05));
+  const downGap = Math.max(26, Math.min(72, wordHeight * 0.55));
+  const upGap = Math.max(48, Math.min(140, wordHeight * 1.4));
+
+  return (
+    point.x > activeBounds.maxX + rightGap ||
+    point.x < activeBounds.minX - leftGap ||
+    point.y > activeBounds.maxY + downGap ||
+    point.y < activeBounds.minY - upGap
+  );
+}
+
+/**
+ * Matches small punctuation/diacritic strokes ('i' dot, apostrophe, period, 't' bar, exponent)
+ * drawn near the active word so they travel with that word's AI conversion cluster.
+ */
+export function isHandwritingAccessoryStroke(
+  stroke: Stroke,
+  activeBounds: BoundingBox,
+): boolean {
+  if (stroke.tool !== 'pen' || stroke.shape || stroke.isTidied || stroke.locked) {
+    return false;
+  }
+  const width = stroke.bounds.maxX - stroke.bounds.minX;
+  const height = stroke.bounds.maxY - stroke.bounds.minY;
+  const wordHeight = Math.max(28, activeBounds.maxY - activeBounds.minY);
+  const maxDim = Math.max(36, Math.min(95, wordHeight * 0.62));
+  if (width > maxDim || height > maxDim) return false;
+
+  const xLeftPad = Math.max(20, wordHeight * 0.35);
+  const xRightPad = Math.max(28, wordHeight * 0.55);
+  const yTopPad = Math.max(36, wordHeight * 0.68);
+  const yBottomPad = Math.max(18, wordHeight * 0.32);
+
+  return (
+    stroke.bounds.maxX >= activeBounds.minX - xLeftPad &&
+    stroke.bounds.minX <= activeBounds.maxX + xRightPad &&
+    stroke.bounds.maxY >= activeBounds.minY - yTopPad &&
+    stroke.bounds.minY <= activeBounds.maxY + yBottomPad
+  );
+}
+
+/**
+ * Validates that a buffered word stroke cluster contains enough real handwriting
+ * content to send to Vision OCR.
+ */
+export function isHandwritingClusterReady(cluster: Stroke[]): boolean {
+  if (cluster.length === 0) return false;
+  if (!cluster.some((s) => isHandwritingCandidateStroke(s))) return false;
+
+  let minY = Infinity;
+  let maxY = -Infinity;
+  let totalPathLen = 0;
+  let maxPoints = 0;
+
+  for (const s of cluster) {
+    if (s.bounds.minY < minY) minY = s.bounds.minY;
+    if (s.bounds.maxY > maxY) maxY = s.bounds.maxY;
+    totalPathLen += computePathLength(s.points);
+    if (s.points.length > maxPoints) maxPoints = s.points.length;
+  }
+
+  if (maxY - minY > 260) return false;
+  if (totalPathLen < 14) return false;
+  if (cluster.length === 1 && maxPoints < 4) return false;
+  return true;
 }

@@ -53,6 +53,7 @@ export function computeDragAlignment(params: {
   axisLock: boolean;
   bypassSnap: boolean;
   snapThreshold?: number;
+  isWhiteboard?: boolean;
 }): DragAlignmentResult {
   const {
     originBounds,
@@ -63,6 +64,7 @@ export function computeDragAlignment(params: {
     axisLock,
     bypassSnap,
     snapThreshold = 5,
+    isWhiteboard = false,
   } = params;
 
   let dx = rawDx;
@@ -75,22 +77,24 @@ export function computeDragAlignment(params: {
       dy = 0;
       lockAxis = 'x';
       const cy = (originBounds.minY + originBounds.maxY) / 2;
+      const cx = (originBounds.minX + originBounds.maxX) / 2;
       guides.push({
         orientation: 'horizontal',
         pos: cy,
-        start: 0,
-        end: paper.width,
+        start: isWhiteboard ? cx - 4000 : 0,
+        end: isWhiteboard ? cx + 4000 : paper.width,
         kind: 'axis',
       });
     } else {
       dx = 0;
       lockAxis = 'y';
       const cx = (originBounds.minX + originBounds.maxX) / 2;
+      const cy = (originBounds.minY + originBounds.maxY) / 2;
       guides.push({
         orientation: 'vertical',
         pos: cx,
-        start: 0,
-        end: paper.height,
+        start: isWhiteboard ? cy - 4000 : 0,
+        end: isWhiteboard ? cy + 4000 : paper.height,
         kind: 'axis',
       });
     }
@@ -110,11 +114,13 @@ export function computeDragAlignment(params: {
   // X snapping (allowed unless axis-locked purely vertically)
   if (lockAxis !== 'y') {
     const xAnchors = [cand.minX, (cand.minX + cand.maxX) / 2, cand.maxX];
-    const xTargets: { pos: number; start: number; end: number }[] = [
-      { pos: paper.width / 2, start: 0, end: paper.height },
-      { pos: 48, start: 0, end: paper.height },
-      { pos: Math.max(48, paper.width - 48), start: 0, end: paper.height },
-    ];
+    const xTargets: { pos: number; start: number; end: number }[] = isWhiteboard
+      ? []
+      : [
+          { pos: paper.width / 2, start: 0, end: paper.height },
+          { pos: 48, start: 0, end: paper.height },
+          { pos: Math.max(48, paper.width - 48), start: 0, end: paper.height },
+        ];
     for (const ob of otherTextboxBounds) {
       const spanStart = Math.min(cand.minY, ob.minY) - 12;
       const spanEnd = Math.max(cand.maxY, ob.maxY) + 12;
@@ -146,8 +152,8 @@ export function computeDragAlignment(params: {
       guides.push({
         orientation: 'vertical',
         pos: bestTarget.pos,
-        start: Math.max(0, bestTarget.start),
-        end: Math.min(paper.height, bestTarget.end),
+        start: isWhiteboard ? bestTarget.start : Math.max(0, bestTarget.start),
+        end: isWhiteboard ? bestTarget.end : Math.min(paper.height, bestTarget.end),
         kind: 'snap',
       });
     }
@@ -156,11 +162,13 @@ export function computeDragAlignment(params: {
   // Y snapping (allowed unless axis-locked purely horizontally)
   if (lockAxis !== 'x') {
     const yAnchors = [cand.minY, (cand.minY + cand.maxY) / 2, cand.maxY];
-    const yTargets: { pos: number; start: number; end: number }[] = [
-      { pos: paper.height / 2, start: 0, end: paper.width },
-      { pos: 48, start: 0, end: paper.width },
-      { pos: Math.max(48, paper.height - 48), start: 0, end: paper.width },
-    ];
+    const yTargets: { pos: number; start: number; end: number }[] = isWhiteboard
+      ? []
+      : [
+          { pos: paper.height / 2, start: 0, end: paper.width },
+          { pos: 48, start: 0, end: paper.width },
+          { pos: Math.max(48, paper.height - 48), start: 0, end: paper.width },
+        ];
     for (const ob of otherTextboxBounds) {
       const spanStart = Math.min(cand.minX, ob.minX) - 12;
       const spanEnd = Math.max(cand.maxX, ob.maxX) + 12;
@@ -192,8 +200,8 @@ export function computeDragAlignment(params: {
       guides.push({
         orientation: 'horizontal',
         pos: bestTarget.pos,
-        start: Math.max(0, bestTarget.start),
-        end: Math.min(paper.width, bestTarget.end),
+        start: isWhiteboard ? bestTarget.start : Math.max(0, bestTarget.start),
+        end: isWhiteboard ? bestTarget.end : Math.min(paper.width, bestTarget.end),
         kind: 'snap',
       });
     }

@@ -3,13 +3,15 @@ import type { ShapeGeometry, Stroke, StrokePoint } from '../types/notes';
 import { resolveSmartDarkInkColor } from './paperRenderer';
 
 interface CachedStrokePath {
+  tool: 'pen' | 'highlighter';
   pointsLen: number;
   size: number;
   simulatePressure: boolean;
+  isTidied: boolean;
   path: Path2D;
 }
 
-const strokePathCache = new WeakMap<Stroke, CachedStrokePath>();
+const strokePathCache = new WeakMap<StrokePoint[], CachedStrokePath>();
 
 function average(a: number, b: number): number {
   return (a + b) / 2;
@@ -96,8 +98,29 @@ export function getFreehandStrokeOutline(
   size: number,
   simulatePressure: boolean,
   isLast = true,
+  isTidied = false,
 ): number[][] {
   const pfInput = points.map((p) => [p.x, p.y, p.pressure] as [number, number, number]);
+
+  if (isTidied && tool === 'pen') {
+    return getStroke(pfInput, {
+      size,
+      thinning: 0.16,
+      smoothing: 0.58,
+      streamline: 0.45,
+      simulatePressure: false,
+      easing: (t) => t,
+      start: {
+        taper: 0,
+        cap: true,
+      },
+      end: {
+        taper: 0,
+        cap: true,
+      },
+      last: isLast,
+    });
+  }
 
   return getStroke(pfInput, {
     size,
@@ -124,18 +147,29 @@ export function getFreehandStrokePath(
   size: number,
   simulatePressure: boolean,
   isLast = true,
+  isTidied = false,
 ): Path2D {
-  const outline = getFreehandStrokeOutline(points, tool, size, simulatePressure, isLast);
+  const outline = getFreehandStrokeOutline(
+    points,
+    tool,
+    size,
+    simulatePressure,
+    isLast,
+    isTidied,
+  );
   return buildPath2DFromOutline(outline);
 }
 
 function getCachedStrokePath(stroke: Stroke): Path2D {
-  const cached = strokePathCache.get(stroke);
+  const isTidied = Boolean(stroke.isTidied);
+  const cached = strokePathCache.get(stroke.points);
   if (
     cached &&
+    cached.tool === stroke.tool &&
     cached.pointsLen === stroke.points.length &&
     cached.size === stroke.size &&
-    cached.simulatePressure === stroke.simulatePressure
+    cached.simulatePressure === stroke.simulatePressure &&
+    cached.isTidied === isTidied
   ) {
     return cached.path;
   }
@@ -146,11 +180,14 @@ function getCachedStrokePath(stroke: Stroke): Path2D {
     stroke.size,
     stroke.simulatePressure,
     true,
+    isTidied,
   );
-  strokePathCache.set(stroke, {
+  strokePathCache.set(stroke.points, {
+    tool: stroke.tool,
     pointsLen: stroke.points.length,
     size: stroke.size,
     simulatePressure: stroke.simulatePressure,
+    isTidied,
     path,
   });
   return path;

@@ -389,3 +389,33 @@ export function computeAlignedElements(
     changed: true,
   };
 }
+
+/**
+ * Returns `true` when an element's center has left the paper page OR more than 85%
+ * of its bounding-box area falls outside the paper boundary.
+ */
+export function isBoundsOffPage(
+  bounds: BoundingBox,
+  paper: Pick<PaperConfig, 'width' | 'height'>,
+): boolean {
+  const w = Math.max(0.001, bounds.maxX - bounds.minX);
+  const h = Math.max(0.001, bounds.maxY - bounds.minY);
+  const cx = (bounds.minX + bounds.maxX) / 2;
+  const cy = (bounds.minY + bounds.maxY) / 2;
+
+  if (cx < 0 || cx > paper.width || cy < 0 || cy > paper.height) {
+    return true;
+  }
+
+  const interW = Math.max(
+    0,
+    Math.min(bounds.maxX, paper.width) - Math.max(bounds.minX, 0),
+  );
+  const interH = Math.max(
+    0,
+    Math.min(bounds.maxY, paper.height) - Math.max(bounds.minY, 0),
+  );
+  const area = w * h;
+  const insideFraction = (interW * interH) / area;
+  return 1 - insideFraction > 0.85;
+}

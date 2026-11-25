@@ -1,4 +1,5 @@
 import type { BoundingBox, ImageCropRect, PageImage } from '../types/notes';
+import { MAX_ELEMENT_DIMENSION } from './textLayout';
 
 interface CachedImageEntry {
   img: HTMLImageElement;
@@ -160,7 +161,14 @@ export function resizeImageFromCorner(
     effectiveMin / Math.max(1, img.width),
     effectiveMin / Math.max(1, img.height),
   );
-  const clampedScale = Math.max(minScale, Math.min(6, rawScale));
+  const maxScale = Math.min(
+    MAX_ELEMENT_DIMENSION / Math.max(1, img.width),
+    MAX_ELEMENT_DIMENSION / Math.max(1, img.height),
+  );
+  const clampedScale = Math.max(
+    minScale,
+    Math.min(Math.max(minScale, maxScale), rawScale),
+  );
 
   const newW = img.width * clampedScale;
   const newH = newW / aspect;

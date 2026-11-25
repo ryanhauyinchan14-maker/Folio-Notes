@@ -22,6 +22,7 @@ import {
 } from '../geminiClient';
 import {
   captureLassoCropSnapshot,
+  captureViewportSnapshot,
   computePaddedCropRect,
   selectMultiPageWindow,
   type SnapshotImagePart,
@@ -523,5 +524,304 @@ describe('Gemini AI Study Suite (Offline Mocked @google/genai)', () => {
     });
     container.remove();
     await useAppStore.getState().closeNotebook();
+  });
+
+  it('captures current Screen viewport at full sharpness on 24000x24000 pages, fixes oversized Lasso crops, and defaults AiSidebar to Screen scope', async () => {
+    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(() => {
+      return {
+        fillStyle: '#FFFFFF',
+        strokeStyle: '#000000',
+        lineWidth: 1,
+        globalAlpha: 1,
+        globalCompositeOperation: 'source-over',
+        save: vi.fn(),
+        restore: vi.fn(),
+        scale: vi.fn(),
+        translate: vi.fn(),
+        clearRect: vi.fn(),
+        fillRect: vi.fn(),
+        beginPath: vi.fn(),
+        moveTo: vi.fn(),
+        lineTo: vi.fn(),
+        quadraticCurveTo: vi.fn(),
+        closePath: vi.fn(),
+        fill: vi.fn(),
+        stroke: vi.fn(),
+        arc: vi.fn(),
+        drawImage: vi.fn(),
+        measureText: vi.fn((t: string) => ({ width: t.length * 8 })),
+        fillText: vi.fn(),
+      } as unknown as CanvasRenderingContext2D;
+    });
+    vi.spyOn(HTMLCanvasElement.prototype, 'toDataURL').mockReturnValue(
+      'data:image/png;base64,QUI=',
+    );
+
+    const hugePage: Page = {
+      id: 'huge-ai-pg',
+      notebookId: 'nb-huge-ai',
+      paper: {
+        ...DEFAULT_PAPER_CONFIG,
+        sizePreset: 'custom',
+        width: 24000,
+        height: 24000,
+      },
+      strokes: [
+        {
+          id: 's-visible',
+          tool: 'pen',
+          color: '#072D59',
+          size: 4,
+          opacity: 1,
+          simulatePressure: false,
+          points: [
+            { x: 5100, y: 6100, pressure: 0.5 },
+            { x: 5400, y: 6250, pressure: 0.5 },
+          ],
+          bounds: { minX: 5100, minY: 6100, maxX: 5400, maxY: 6250 },
+          createdAt: 1,
+        },
+        {
+          id: 's-far-away',
+          tool: 'pen',
+          color: '#072D59',
+          size: 4,
+          opacity: 1,
+          simulatePressure: false,
+          points: [
+            { x: 22000, y: 22000, pressure: 0.5 },
+            { x: 22300, y: 22200, pressure: 0.5 },
+          ],
+          bounds: { minX: 22000, minY: 22000, maxX: 22300, maxY: 22200 },
+          createdAt: 2,
+        },
+      ],
+      createdAt: 1,
+      updatedAt: 1,
+    };
+
+    // 1. Viewport snapshot captures only the current visible rect at 1.5x sharpness and omits cropRect
+    const viewSnap = await captureViewportSnapshot(
+      hugePage,
+      1,
+      { x: 5000, y: 6000, width: 1000, height: 700 },
+      { scale: 1.5 },
+    );
+    expect(viewSnap.label).toBe('Current Screen (Page 1)');
+    expect(viewSnap.width).toBe(1500);
+    expect(viewSnap.height).toBe(1050);
+    expect(viewSnap.cropRect).toBeUndefined();
+
+    // 2. Whiteboard negative-coordinate viewport snapshot captures cleanly
+    const wbViewSnap = await captureViewportSnapshot(
+      hugePage,
+      1,
+      { x: -800, y: -500, width: 900, height: 600 },
+      { scale: 1.5, isWhiteboard: true },
+    );
+    expect(wbViewSnap.label).toBe('Current Screen (Whiteboard)');
+    expect(wbViewSnap.width).toBe(1350);
+    expect(wbViewSnap.height).toBe(900);
+
+    // 3. Fallback to full page if viewportRect is null
+    const fallbackSnap = await captureViewportSnapshot(hugePage, 1, null, { scale: 1.5 });
+    expect(fallbackSnap.label).toBe('Page 1');
+
+    // 4. Oversized fixed-page Lasso crop renders directly at crisp coordinates
+    const oversizedLasso = await captureLassoCropSnapshot(hugePage, 1, ['s-visible'], {
+      scale: 1.5,
+      padding: 16,
+    });
+    expect(oversizedLasso.cropRect).toEqual({ x: 5084, y: 6084, width: 332, height: 182 });
+    expect(oversizedLasso.width).toBe(498);
+    expect(oversizedLasso.height).toBe(273);
+
+    // 5. AiSidebar defaults to 'Screen' (ai-scope-view) and invokes getVisibleRect on submit
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root: Root = createRoot(container);
+
+    await act(async () => {
+      await useAppStore.getState().initApp();
+      useAppStore.getState().setGeminiApiKey('AIzaScreenScopeTest');
+      useAppStore.getState().setBlockAiOnVaultLocked(false);
+    });
+
+    const getVisibleRectMock = vi.fn(() => ({
+      x: 5000,
+      y: 6000,
+      width: 1000,
+      height: 700,
+    }));
+
+    await act(async () => {
+      root.render(
+        <AiSidebar
+          open={true}
+          activePage={hugePage}
+          activePageIndex={0}
+          pages={[hugePage]}
+          getVisibleRect={getVisibleRectMock}
+          pendingLassoAction={null}
+          onConsumePendingLassoAction={() => {}}
+          onInsertTextbox={() => {}}
+          onInsertImageDataUrl={async () => {}}
+          onOpenSettings={() => {}}
+          onClose={() => {}}
+        />,
+      );
+    });
+
+    const screenBtn = container.querySelector<HTMLButtonElement>('[data-testid="ai-scope-view"]');
+    expect(screenBtn).not.toBeNull();
+    expect(screenBtn?.getAttribute('aria-pressed')).toBe('true');
+
+    generateContentMock.mockResolvedValueOnce({
+      text: 'Summary of visible area only.',
+    });
+
+    const chatInput = container.querySelector<HTMLTextAreaElement>(
+      '[data-testid="ai-chat-input"]',
+    )!;
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(
+        HTMLTextAreaElement.prototype,
+        'value',
+      )!.set!;
+      setter.call(chatInput, 'What am I looking at?');
+      chatInput.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>('[data-testid="ai-chat-send-btn"]')!.click();
+      await new Promise((r) => setTimeout(r, 20));
+    });
+
+    expect(getVisibleRectMock).toHaveBeenCalledTimes(1);
+    expect(generateContentMock).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      useAppStore.getState().clearStoredGeminiApiKey();
+      root.unmount();
+    });
+    container.remove();
+  });
+
+  it('renders Markdown headings, lists, and KaTeX equations in AiSidebar and inserts Unicode-formatted text into textboxes', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root: Root = createRoot(container);
+
+    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(() => {
+      return {
+        fillStyle: '#FFFFFF',
+        strokeStyle: '#000000',
+        lineWidth: 1,
+        globalAlpha: 1,
+        globalCompositeOperation: 'source-over',
+        save: vi.fn(),
+        restore: vi.fn(),
+        scale: vi.fn(),
+        translate: vi.fn(),
+        clearRect: vi.fn(),
+        fillRect: vi.fn(),
+        beginPath: vi.fn(),
+        moveTo: vi.fn(),
+        lineTo: vi.fn(),
+        quadraticCurveTo: vi.fn(),
+        closePath: vi.fn(),
+        fill: vi.fn(),
+        stroke: vi.fn(),
+        arc: vi.fn(),
+        drawImage: vi.fn(),
+        measureText: vi.fn((t: string) => ({ width: t.length * 8 })),
+        fillText: vi.fn(),
+      } as unknown as CanvasRenderingContext2D;
+    });
+    vi.spyOn(HTMLCanvasElement.prototype, 'toDataURL').mockReturnValue(
+      'data:image/png;base64,QUI=',
+    );
+
+    const insertedTexts: string[] = [];
+    const page: Page = {
+      id: 'pg-math-render',
+      notebookId: 'nb-1',
+      paper: { ...DEFAULT_PAPER_CONFIG },
+      strokes: [],
+      createdAt: 1,
+      updatedAt: 1,
+    };
+
+    await act(async () => {
+      await useAppStore.getState().initApp();
+      useAppStore.getState().setGeminiApiKey('AIzaKatexRenderKey');
+      useAppStore.getState().setBlockAiOnVaultLocked(false);
+    });
+
+    await act(async () => {
+      root.render(
+        <AiSidebar
+          open={true}
+          activePage={page}
+          activePageIndex={0}
+          pages={[page]}
+          pendingLassoAction={null}
+          onConsumePendingLassoAction={() => {}}
+          onInsertTextbox={(txt) => insertedTexts.push(txt)}
+          onInsertImageDataUrl={async () => {}}
+          onOpenSettings={() => {}}
+          onClose={() => {}}
+        />,
+      );
+    });
+
+    generateContentMock.mockResolvedValueOnce({
+      text: [
+        '### 1. Outer Boundary',
+        '* **Vertex:** $V_1 \\approx (0.73, 0.95)$',
+        '$$\\partial\\Omega = \\bigcup_{i=1}^{4} \\overline{V_i V_{i+1}}$$',
+      ].join('\n'),
+    });
+
+    const chatInput = container.querySelector<HTMLTextAreaElement>(
+      '[data-testid="ai-chat-input"]',
+    )!;
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(
+        HTMLTextAreaElement.prototype,
+        'value',
+      )!.set!;
+      setter.call(chatInput, 'Describe the geometry');
+      chatInput.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>('[data-testid="ai-chat-send-btn"]')!.click();
+      await new Promise((r) => setTimeout(r, 20));
+    });
+
+    const msgEl = container.querySelector('[data-testid="ai-chat-assistant-msg"]')!;
+    expect(msgEl).not.toBeNull();
+    expect(msgEl.querySelector('h3')?.textContent).toBe('1. Outer Boundary');
+    expect(msgEl.querySelector('ul > li strong')?.textContent).toBe('Vertex:');
+    expect(msgEl.querySelectorAll('.katex').length).toBeGreaterThanOrEqual(2);
+    expect(msgEl.querySelectorAll('.katex-display')).toHaveLength(1);
+    expect(msgEl.textContent).not.toContain('###');
+    expect(msgEl.textContent).not.toContain('$$');
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="ai-insert-textbox-btn"]')!
+        .click();
+    });
+
+    expect(insertedTexts[0]).not.toContain('###');
+    expect(insertedTexts[0]).not.toContain('$$');
+    expect(insertedTexts[0]).toContain('• Vertex: V₁ ≈ (0.73, 0.95)');
+    expect(insertedTexts[0]).toContain('∂Ω = ⋃');
+
+    await act(async () => {
+      useAppStore.getState().clearStoredGeminiApiKey();
+      root.unmount();
+    });
+    container.remove();
   });
 });

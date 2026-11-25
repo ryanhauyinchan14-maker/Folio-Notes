@@ -6,6 +6,21 @@ export function distance(x1: number, y1: number, x2: number, y2: number): number
 }
 
 /**
+ * Locks a line's endpoint to the horizontal or vertical axis relative to its origin,
+ * choosing whichever axis has the larger cursor displacement.
+ */
+export function snapLineEndToCardinalAxis(
+  x1: number,
+  y1: number,
+  x: number,
+  y: number,
+): { x2: number; y2: number } {
+  return Math.abs(x - x1) >= Math.abs(y - y1)
+    ? { x2: x, y2: y1 }
+    : { x2: x1, y2: y };
+}
+
+/**
  * Generates dense sample points along a geometric shape so that stroke erasing,
  * lasso selection, and bounding box calculations treat snapped shapes identically to freehand strokes.
  */
@@ -552,7 +567,7 @@ export function scaleStroke(
       : rawOrigH < 1
         ? scaleX
         : Math.sqrt(Math.max(0.04, scaleX * scaleY));
-  const nextSize = Math.max(1.5, Math.min(64, Number((stroke.size * avgScale).toFixed(2))));
+  const nextSize = Math.max(1.5, Math.min(512, Number((stroke.size * avgScale).toFixed(2))));
 
   let nextShape: ShapeGeometry | undefined;
   let nextPoints: StrokePoint[];

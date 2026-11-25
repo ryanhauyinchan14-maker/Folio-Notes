@@ -3,6 +3,10 @@ import type { Stroke, StrokePoint } from '../../types/notes';
 import { computeBoundsFromPoints } from '../geometry';
 import {
   findHandwritingCluster,
+  isHandwritingAccessoryStroke,
+  isHandwritingCandidateStroke,
+  isHandwritingClusterReady,
+  isNewHandwritingWordStart,
   tidyHandwritingCluster,
 } from '../handwritingCorrection';
 
@@ -97,5 +101,48 @@ describe('handwritingCorrection', () => {
     // Baseline slope is significantly leveled after tidying
     const tidySlope = Math.abs(linearSlope(tidied));
     expect(tidySlope).toBeLessThan(rawSlope * 0.35);
+  });
+
+  it('accepts large tall handwriting, quick 2-point strokes, and scaled accessories/exponents', () => {
+    // Large 135px tall cursive letter like "Hello" / "very" with rich sample points
+    const tallPts: StrokePoint[] = Array.from({ length: 14 }, (_, idx) => ({
+      x: 120 + Math.sin(idx * 0.5) * 28 + idx * 3,
+      y: 100 + idx * (135 / 13),
+      pressure: 0.5,
+    }));
+    const largeLetter = makeStroke('tall-h', tallPts);
+    expect(isHandwritingCandidateStroke(largeLetter)).toBe(true);
+    expect(findHandwritingCluster([largeLetter], 'tall-h')).toHaveLength(1);
+    expect(isHandwritingClusterReady([largeLetter])).toBe(true);
+
+    // Quick 2-point mouse strokes like '=' bars or '1'
+    const eqTop = makeStroke('eq-1', [
+      { x: 200, y: 150, pressure: 0.5 },
+      { x: 224, y: 150, pressure: 0.5 },
+    ]);
+    const eqBot = makeStroke('eq-2', [
+      { x: 200, y: 164, pressure: 0.5 },
+      { x: 224, y: 164, pressure: 0.5 },
+    ]);
+    expect(isHandwritingCandidateStroke(eqTop)).toBe(true);
+    expect(isHandwritingClusterReady([eqTop, eqBot])).toBe(true);
+
+    // Large word bounds should treat a t-crossbar or exponent '²' as an accessory (not a new word break)
+    const activeWordBounds = { minX: 120, minY: 110, maxX: 340, maxY: 235 };
+    const largeTBar = makeStroke('t-bar', [
+      { x: 135, y: 135, pressure: 0.5 },
+      { x: 185, y: 135, pressure: 0.5 },
+    ]);
+    const raisedExponent = makeStroke('exp-2', [
+      { x: 350, y: 85, pressure: 0.5 },
+      { x: 372, y: 84, pressure: 0.5 },
+      { x: 352, y: 115, pressure: 0.5 },
+      { x: 376, y: 115, pressure: 0.5 },
+    ]);
+    expect(isHandwritingAccessoryStroke(largeTBar, activeWordBounds)).toBe(true);
+    expect(isHandwritingAccessoryStroke(raisedExponent, activeWordBounds)).toBe(true);
+
+    // Dropping down onto the next notebook line MUST start a new line cluster immediately
+    expect(isNewHandwritingWordStart(activeWordBounds, { x: 140, y: 315 })).toBe(true);
   });
 });

@@ -1,6 +1,10 @@
-import { getCombinedBounds } from '../canvas/geometry';
+import { getCombinedBounds, translateStroke } from '../canvas/geometry';
 import type { BoundingBox, Page } from '../types/notes';
-import { renderPageToCanvas } from '../utils/exportNotebook';
+import {
+  MAX_EXPORT_CANVAS_DIMENSION,
+  MAX_EXPORT_CANVAS_PIXELS,
+  renderPageToCanvas,
+} from '../utils/exportNotebook';
 
 export interface SnapshotCropRect {
   x: number;
@@ -23,6 +27,7 @@ export interface SnapshotCaptureOptions {
   scale?: number;
   padding?: number;
   maxPages?: number;
+  isWhiteboard?: boolean;
   resolvePdfBytes?: (assetId: string) => Promise<ArrayBuffer | null>;
 }
 
@@ -95,17 +100,92 @@ export async function capturePageSnapshot(
   pageNumber: number,
   options?: SnapshotCaptureOptions,
 ): Promise<SnapshotImagePart> {
-  const scale = options?.scale ?? 1.5;
+  const requestedScale = options?.scale ?? 1.5;
+  const maxSpan = Math.max(1, page.paper.width, page.paper.height);
+  const scale = Math.min(requestedScale, 2048 / maxSpan);
   const canvas = await renderPageToCanvas(page, {
     scale,
     includeBackground: true,
     includeAnnotations: true,
     transparentBackground: false,
+    isWhiteboard: options?.isWhiteboard,
     resolvePdfBytes: options?.resolvePdfBytes,
   });
   const dataUrl = canvas.toDataURL('image/png');
   return {
-    label: `Page ${pageNumber}`,
+    label: options?.isWhiteboard ? 'Whiteboard' : `Page ${pageNumber}`,
+    mimeType: 'image/png',
+    base64: stripPngDataUrlPrefix(dataUrl),
+    dataUrl,
+    width: canvas.width,
+    height: canvas.height,
+  };
+}
+
+export async function captureViewportSnapshot(
+  page: Page,
+  pageNumber: number,
+  viewportRect: SnapshotCropRect | null | undefined,
+  options?: SnapshotCaptureOptions,
+): Promise<SnapshotImagePart> {
+  if (
+    !viewportRect ||
+    !Number.isFinite(viewportRect.x) ||
+    !Number.isFinite(viewportRect.y) ||
+    !Number.isFinite(viewportRect.width) ||
+    !Number.isFinite(viewportRect.height) ||
+    viewportRect.width <= 0 ||
+    viewportRect.height <= 0
+  ) {
+    return capturePageSnapshot(page, pageNumber, options);
+  }
+
+  let rect: SnapshotCropRect;
+  if (options?.isWhiteboard) {
+    rect = {
+      x: Math.floor(viewportRect.x),
+      y: Math.floor(viewportRect.y),
+      width: Math.max(32, Math.ceil(viewportRect.width)),
+      height: Math.max(32, Math.ceil(viewportRect.height)),
+    };
+  } else {
+    const safeW = Math.max(1, page.paper.width);
+    const safeH = Math.max(1, page.paper.height);
+    const x1 = Math.max(0, Math.floor(viewportRect.x));
+    const y1 = Math.max(0, Math.floor(viewportRect.y));
+    const x2 = Math.min(safeW, Math.ceil(viewportRect.x + viewportRect.width));
+    const y2 = Math.min(safeH, Math.ceil(viewportRect.y + viewportRect.height));
+    if (x2 <= x1 || y2 <= y1) {
+      return capturePageSnapshot(page, pageNumber, options);
+    }
+    const width = Math.max(Math.min(32, safeW), x2 - x1);
+    const height = Math.max(Math.min(32, safeH), y2 - y1);
+    rect = {
+      x: Math.min(x1, Math.max(0, safeW - width)),
+      y: Math.min(y1, Math.max(0, safeH - height)),
+      width,
+      height,
+    };
+  }
+
+  const requestedScale = options?.scale ?? 1.5;
+  const maxSpan = Math.max(1, rect.width, rect.height);
+  const scale = Math.min(requestedScale, 2048 / maxSpan);
+  const canvas = await renderPageToCanvas(page, {
+    scale,
+    includeBackground: true,
+    includeAnnotations: true,
+    transparentBackground: false,
+    isWhiteboard: options?.isWhiteboard,
+    cropRect: rect,
+    resolvePdfBytes: options?.resolvePdfBytes,
+  });
+  const dataUrl = canvas.toDataURL('image/png');
+  // Omit cropRect so "Insert as Textbox" centers inside the current screen instead of below it
+  return {
+    label: options?.isWhiteboard
+      ? 'Current Screen (Whiteboard)'
+      : `Current Screen (Page ${pageNumber})`,
     mimeType: 'image/png',
     base64: stripPngDataUrlPrefix(dataUrl),
     dataUrl,
@@ -133,7 +213,81 @@ export async function captureLassoCropSnapshot(
 
   const scale = options?.scale ?? 1.5;
   const padding = options?.padding ?? 16;
+
+  if (options?.isWhiteboard) {
+    const originX = Math.floor(bounds.minX - padding);
+    const originY = Math.floor(bounds.minY - padding);
+    const cropW = Math.max(32, Math.ceil(bounds.maxX + padding) - originX);
+    const cropH = Math.max(32, Math.ceil(bounds.maxY + padding) - originY);
+    const cropRect: SnapshotCropRect = {
+      x: originX,
+      y: originY,
+      width: cropW,
+      height: cropH,
+    };
+
+    const tempPage: Page = {
+      ...page,
+      paper: {
+        ...page.paper,
+        sizePreset: 'custom',
+        width: cropW,
+        height: cropH,
+        marginLine: false,
+      },
+      strokes: selected.map((s) => translateStroke(s, -originX, -originY)),
+      textboxes: [],
+      images: [],
+      pdfBackground: null,
+    };
+
+    const cropCanvas = await renderPageToCanvas(tempPage, {
+      scale,
+      includeBackground: true,
+      includeAnnotations: true,
+      transparentBackground: false,
+    });
+    const dataUrl = cropCanvas.toDataURL('image/png');
+    return {
+      label: 'Lasso Selection (Whiteboard)',
+      mimeType: 'image/png',
+      base64: stripPngDataUrlPrefix(dataUrl),
+      dataUrl,
+      width: cropCanvas.width,
+      height: cropCanvas.height,
+      cropRect,
+    };
+  }
+
   const cropRect = computePaddedCropRect(bounds, page.paper.width, page.paper.height, padding);
+  const rawW = page.paper.width * scale;
+  const rawH = page.paper.height * scale;
+  const isOversizedForCrop =
+    rawW > MAX_EXPORT_CANVAS_DIMENSION ||
+    rawH > MAX_EXPORT_CANVAS_DIMENSION ||
+    rawW * rawH > MAX_EXPORT_CANVAS_PIXELS;
+
+  if (isOversizedForCrop) {
+    const directScale = Math.min(scale, 2048 / Math.max(1, cropRect.width, cropRect.height));
+    const cropCanvas = await renderPageToCanvas(page, {
+      scale: directScale,
+      includeBackground: true,
+      includeAnnotations: true,
+      transparentBackground: false,
+      cropRect,
+      resolvePdfBytes: options?.resolvePdfBytes,
+    });
+    const dataUrl = cropCanvas.toDataURL('image/png');
+    return {
+      label: `Lasso Selection (Page ${pageNumber})`,
+      mimeType: 'image/png',
+      base64: stripPngDataUrlPrefix(dataUrl),
+      dataUrl,
+      width: cropCanvas.width,
+      height: cropCanvas.height,
+      cropRect,
+    };
+  }
 
   const fullCanvas = await renderPageToCanvas(page, {
     scale,
