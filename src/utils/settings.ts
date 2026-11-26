@@ -226,6 +226,28 @@ export const DESK_BACKDROP_PRESETS: Array<{
   { id: 'warm-linen', label: 'Warm Linen', previewColor: '#F4EFE6' },
 ];
 
+export function resolveDeskBackdropProps(
+  deskBackdrop: DeskBackdropPresetId,
+  deskCustomColor: string,
+): { className: string; style?: { backgroundColor: string } } {
+  if (deskBackdrop === 'dot-mat') {
+    return { className: 'folio-desk-dotmat' };
+  }
+  const colorMap: Record<Exclude<DeskBackdropPresetId, 'dot-mat' | 'custom'>, string> = {
+    'cool-gray': '#E2E8F0',
+    'seal-mist': '#EBF4FA',
+    'midnight-navy': '#0F1D32',
+    'warm-linen': '#F4EFE6',
+  };
+  return {
+    className: '',
+    style: {
+      backgroundColor:
+        deskBackdrop === 'custom' ? deskCustomColor : colorMap[deskBackdrop] ?? '#E2E8F0',
+    },
+  };
+}
+
 export const DEFAULT_WORKSPACE_PREFERENCES: WorkspacePreferences = {
   penSlots: DEFAULT_PEN_SLOTS.map((s) => ({ ...s })),
   deskBackdrop: 'cool-gray',

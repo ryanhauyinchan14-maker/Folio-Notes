@@ -220,7 +220,7 @@ export const CustomizePaperModal: React.FC<CustomizePaperModalProps> = ({
         role="dialog"
         aria-modal="true"
         aria-labelledby="customize-paper-title"
-        className="folio-modal-card flex max-h-[92vh] w-full max-w-3xl flex-col overflow-hidden rounded-2xl text-[var(--navy-900)]"
+        className="folio-modal-card flex max-h-full w-full max-w-3xl flex-col overflow-hidden rounded-2xl text-[var(--navy-900)]"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}

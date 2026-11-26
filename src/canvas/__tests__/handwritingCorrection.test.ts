@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { Stroke, StrokePoint } from '../../types/notes';
 import { computeBoundsFromPoints } from '../geometry';
 import {
+  expandClusterWithAdjacentUntidiedStrokes,
   findHandwritingCluster,
   isHandwritingAccessoryStroke,
   isHandwritingCandidateStroke,
@@ -144,5 +145,70 @@ describe('handwritingCorrection', () => {
 
     // Dropping down onto the next notebook line MUST start a new line cluster immediately
     expect(isNewHandwritingWordStart(activeWordBounds, { x: 140, y: 315 })).toBe(true);
+  });
+
+  it('sweeps adjacent recently-drawn untidied strokes into the active flush while skipping old, in-flight, or other-line strokes', () => {
+    const now = 1_700_000_000_000;
+    const seed = {
+      ...makeStroke('seed-00x', [
+        { x: 240, y: 120, pressure: 0.5 },
+        { x: 265, y: 165, pressure: 0.5 },
+        { x: 285, y: 125, pressure: 0.5 },
+      ]),
+      createdAt: now - 1000,
+    };
+    const strandedLeft = {
+      ...makeStroke('stranded-5', [
+        { x: 185, y: 118, pressure: 0.5 },
+        { x: 185, y: 142, pressure: 0.5 },
+        { x: 205, y: 162, pressure: 0.5 },
+      ]),
+      createdAt: now - 2500,
+    };
+    const farLeft = {
+      ...makeStroke('far-y', [
+        { x: 125, y: 120, pressure: 0.5 },
+        { x: 145, y: 165, pressure: 0.5 },
+      ]),
+      createdAt: now - 4000,
+    };
+    const alreadyTidied = {
+      ...makeStroke('tidied', [
+        { x: 300, y: 125, pressure: 0.5 },
+        { x: 325, y: 160, pressure: 0.5 },
+      ]),
+      isTidied: true,
+      createdAt: now - 500,
+    };
+    const inFlight = {
+      ...makeStroke('inflight', [
+        { x: 305, y: 125, pressure: 0.5 },
+        { x: 325, y: 160, pressure: 0.5 },
+      ]),
+      createdAt: now - 500,
+    };
+    const oldDoodle = {
+      ...makeStroke('old-stroke', [
+        { x: 295, y: 125, pressure: 0.5 },
+        { x: 320, y: 160, pressure: 0.5 },
+      ]),
+      createdAt: now - 120_000,
+    };
+    const nextLine = {
+      ...makeStroke('next-line', [
+        { x: 200, y: 265, pressure: 0.5 },
+        { x: 240, y: 310, pressure: 0.5 },
+      ]),
+      createdAt: now - 1000,
+    };
+
+    const expanded = expandClusterWithAdjacentUntidiedStrokes(
+      [seed],
+      [farLeft, strandedLeft, seed, alreadyTidied, inFlight, oldDoodle, nextLine],
+      new Set(['inflight']),
+      now,
+      45_000,
+    );
+    expect(expanded.map((s) => s.id)).toEqual(['far-y', 'stranded-5', 'seed-00x']);
   });
 });

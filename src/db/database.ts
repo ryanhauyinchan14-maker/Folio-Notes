@@ -58,6 +58,16 @@ export class GoodNotesDatabase extends Dexie {
       customFonts: 'id, name, createdAt',
     });
 
+    this.version(5).stores({
+      folders: 'id, parentId, name, updatedAt',
+      notebooks: 'id, folderId, mode, title, updatedAt',
+      pages: 'id, notebookId, updatedAt',
+      templates: 'id, category, name, updatedAt',
+      pdfAssets: 'id, notebookId, createdAt',
+      trashedNotebooks: 'id, deletedAt, expiresAt',
+      customFonts: 'id, name, createdAt',
+    });
+
     // Runs strictly once on initial database creation.
     // Deleting the starter notebook keeps it deleted across reloads.
     this.on('populate', async (tx) => {

@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { BookOpen, ImagePlus, Palette, Presentation, X } from 'lucide-react';
+import { BookOpen, FileText, ImagePlus, Palette, Presentation, X } from 'lucide-react';
 import { DEFAULT_WHITEBOARD_PAPER } from '../../canvas/whiteboard';
 import { COVER_PRESETS } from '../../constants/covers';
 import {
@@ -8,6 +8,11 @@ import {
   formatPaperPatternLabel,
 } from '../../constants/papers';
 import { repository } from '../../db/repository';
+import {
+  DEFAULT_SLIDE_SIZE_PRESET,
+  SLIDE_SIZE_PRESETS,
+  resolveSlidePaperConfig,
+} from '../../slides/slidePresets';
 import { useAppStore } from '../../store/useAppStore';
 import type {
   CoverConfig,
@@ -17,6 +22,7 @@ import type {
   PageImage,
   PaperConfig,
   PaperPattern,
+  SlideSizePresetId,
   Stroke,
   Textbox,
 } from '../../types/notes';
@@ -27,6 +33,7 @@ import { CoverPreview } from '../shelf/CoverPreview';
 interface NotebookModalProps {
   open: boolean;
   editingNotebook?: Notebook | null;
+  initialMode?: NotebookMode;
   defaultFolderId: string | null;
   onClose: () => void;
 }
@@ -62,6 +69,7 @@ async function resizeImageToDataUrl(file: File, maxW = 420, maxH = 540): Promise
 export const NotebookModal: React.FC<NotebookModalProps> = ({
   open,
   editingNotebook,
+  initialMode = 'notebook',
   defaultFolderId,
   onClose,
 }) => {
@@ -71,8 +79,13 @@ export const NotebookModal: React.FC<NotebookModalProps> = ({
   const defaultPaperPattern = useAppStore((s) => s.defaultPaperPattern);
 
   const [title, setTitle] = useState('');
-  const [mode, setMode] = useState<NotebookMode>('notebook');
+  const [mode, setMode] = useState<NotebookMode>(initialMode);
   const [boardPattern, setBoardPattern] = useState<'dotted' | 'grid' | 'blank'>('dotted');
+  const [slideSizePreset, setSlideSizePreset] = useState<SlideSizePresetId>(
+    DEFAULT_SLIDE_SIZE_PRESET,
+  );
+  const [customSlideWidth, setCustomSlideWidth] = useState(1920);
+  const [customSlideHeight, setCustomSlideHeight] = useState(1080);
   const [folderId, setFolderId] = useState<string | null>(defaultFolderId);
   const [allFolders, setAllFolders] = useState<Folder[]>([]);
   const [cover, setCover] = useState<CoverConfig>({ ...COVER_PRESETS[0].cover });
@@ -101,14 +114,17 @@ export const NotebookModal: React.FC<NotebookModalProps> = ({
         ALL_BUILT_IN_PAPER_VARIANTS.find((b) => b.paper.pattern === defaultPaperPattern) ??
         ALL_BUILT_IN_PAPER_VARIANTS[0];
       setTitle('');
-      setMode('notebook');
+      setMode(initialMode);
       setBoardPattern('dotted');
+      setSlideSizePreset(DEFAULT_SLIDE_SIZE_PRESET);
+      setCustomSlideWidth(1920);
+      setCustomSlideHeight(1080);
       setFolderId(defaultFolderId);
       setCover({ ...COVER_PRESETS[0].cover });
       setSelectedTemplateId(preferredPreset.id);
     }
     setSaving(false);
-  }, [open, editingNotebook, defaultFolderId, defaultPaperPattern]);
+  }, [open, editingNotebook, initialMode, defaultFolderId, defaultPaperPattern]);
 
   if (!open) return null;
 
@@ -133,7 +149,13 @@ export const NotebookModal: React.FC<NotebookModalProps> = ({
     e.preventDefault();
     setSaving(true);
     const defaultUntitled =
-      mode === 'whiteboard' ? 'Untitled Whiteboard' : 'Untitled Notebook';
+      mode === 'slides'
+        ? 'Untitled Presentation'
+        : mode === 'notes'
+          ? 'Untitled Document'
+          : mode === 'whiteboard'
+            ? 'Untitled Whiteboard'
+            : 'Untitled Board';
     const finalTitle = title.trim() || defaultUntitled;
 
     if (editingNotebook) {
@@ -148,14 +170,16 @@ export const NotebookModal: React.FC<NotebookModalProps> = ({
     }
 
     let paper: PaperConfig =
-      mode === 'whiteboard'
-        ? { ...DEFAULT_WHITEBOARD_PAPER, pattern: boardPattern as PaperPattern }
-        : DEFAULT_PAPER_CONFIG;
+      mode === 'slides'
+        ? resolveSlidePaperConfig(slideSizePreset, customSlideWidth, customSlideHeight)
+        : mode === 'whiteboard'
+          ? { ...DEFAULT_WHITEBOARD_PAPER, pattern: boardPattern as PaperPattern }
+          : DEFAULT_PAPER_CONFIG;
     let initialStrokes: Stroke[] = [];
     let initialTextboxes: Textbox[] = [];
     let initialImages: PageImage[] = [];
 
-    if (mode !== 'whiteboard') {
+    if (mode === 'notebook') {
       const customTpl = customTemplates.find((t) => t.id === selectedTemplateId);
       if (customTpl) {
         paper = customTpl.paper;
@@ -173,6 +197,7 @@ export const NotebookModal: React.FC<NotebookModalProps> = ({
     await createNotebook({
       title: finalTitle,
       mode,
+      ...(mode === 'slides' ? { slideSizePreset } : {}),
       folderId,
       cover,
       paper,
@@ -194,7 +219,7 @@ export const NotebookModal: React.FC<NotebookModalProps> = ({
         role="dialog"
         aria-modal="true"
         aria-labelledby="notebook-modal-title"
-        className="folio-modal-card flex max-h-[92vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl text-[var(--navy-900)]"
+        className="folio-modal-card flex max-h-full w-full max-w-2xl flex-col overflow-hidden rounded-2xl text-[var(--navy-900)]"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="folio-modal-header flex items-center justify-between px-5 py-4">
@@ -234,7 +259,14 @@ export const NotebookModal: React.FC<NotebookModalProps> = ({
                 cover={cover}
                 mode={mode}
                 title={
-                  title || (mode === 'whiteboard' ? 'Untitled Whiteboard' : 'Untitled Notebook')
+                  title ||
+                  (mode === 'slides'
+                    ? 'Untitled Presentation'
+                    : mode === 'notes'
+                      ? 'Untitled Document'
+                      : mode === 'whiteboard'
+                        ? 'Untitled Whiteboard'
+                        : 'Untitled Board')
                 }
                 className="relative z-10 h-56 w-40"
               />
@@ -248,7 +280,7 @@ export const NotebookModal: React.FC<NotebookModalProps> = ({
               {!editingNotebook && (
                 <div>
                   <label className="folio-section-label mb-1.5 block">
-                    Canvas Type
+                    Workspace Mode
                   </label>
                   <div
                     ref={modeTrackRef}
@@ -261,7 +293,7 @@ export const NotebookModal: React.FC<NotebookModalProps> = ({
                       data-morph-key="notebook"
                       aria-pressed={mode === 'notebook'}
                       onClick={() => setMode('notebook')}
-                      className={`folio-press relative z-10 inline-flex items-center justify-center gap-1.5 rounded-lg px-3 py-2 text-xs font-bold ${
+                      className={`folio-press relative z-10 inline-flex items-center justify-center gap-1.5 rounded-lg px-2.5 py-2 text-xs font-bold ${
                         mode === 'notebook'
                           ? modeIndicator.ready
                             ? 'text-white'
@@ -269,8 +301,8 @@ export const NotebookModal: React.FC<NotebookModalProps> = ({
                           : 'text-[var(--navy-600)] hover:text-[var(--navy-900)]'
                       }`}
                     >
-                      <BookOpen className="h-3.5 w-3.5" />
-                      <span>Notebook</span>
+                      <Palette className="h-3.5 w-3.5" />
+                      <span>Drawing Board</span>
                     </button>
                     <button
                       type="button"
@@ -278,7 +310,7 @@ export const NotebookModal: React.FC<NotebookModalProps> = ({
                       data-morph-key="whiteboard"
                       aria-pressed={mode === 'whiteboard'}
                       onClick={() => setMode('whiteboard')}
-                      className={`folio-press relative z-10 inline-flex items-center justify-center gap-1.5 rounded-lg px-3 py-2 text-xs font-bold ${
+                      className={`folio-press relative z-10 inline-flex items-center justify-center gap-1.5 rounded-lg px-2.5 py-2 text-xs font-bold ${
                         mode === 'whiteboard'
                           ? modeIndicator.ready
                             ? 'text-white'
@@ -286,8 +318,42 @@ export const NotebookModal: React.FC<NotebookModalProps> = ({
                           : 'text-[var(--navy-600)] hover:text-[var(--navy-900)]'
                       }`}
                     >
+                      <BookOpen className="h-3.5 w-3.5 text-[var(--crimson-500)]" />
+                      <span>Infinite Board</span>
+                    </button>
+                    <button
+                      type="button"
+                      data-testid="notebook-mode-notes"
+                      data-morph-key="notes"
+                      aria-pressed={mode === 'notes'}
+                      onClick={() => setMode('notes')}
+                      className={`folio-press relative z-10 inline-flex items-center justify-center gap-1.5 rounded-lg px-2.5 py-2 text-xs font-bold ${
+                        mode === 'notes'
+                          ? modeIndicator.ready
+                            ? 'text-white'
+                            : 'folio-glass-active'
+                          : 'text-[var(--navy-600)] hover:text-[var(--navy-900)]'
+                      }`}
+                    >
+                      <FileText className="h-3.5 w-3.5 text-[var(--crimson-500)]" />
+                      <span>Notes Doc</span>
+                    </button>
+                    <button
+                      type="button"
+                      data-testid="notebook-mode-slides"
+                      data-morph-key="slides"
+                      aria-pressed={mode === 'slides'}
+                      onClick={() => setMode('slides')}
+                      className={`folio-press relative z-10 inline-flex items-center justify-center gap-1.5 rounded-lg px-2.5 py-2 text-xs font-bold ${
+                        mode === 'slides'
+                          ? modeIndicator.ready
+                            ? 'text-white'
+                            : 'folio-glass-active'
+                          : 'text-[var(--navy-600)] hover:text-[var(--navy-900)]'
+                      }`}
+                    >
                       <Presentation className="h-3.5 w-3.5 text-[var(--crimson-500)]" />
-                      <span>Whiteboard</span>
+                      <span>Slides Deck</span>
                     </button>
                   </div>
                 </div>
@@ -298,7 +364,13 @@ export const NotebookModal: React.FC<NotebookModalProps> = ({
                   htmlFor="notebook-title-input"
                   className="folio-section-label mb-1 block"
                 >
-                  {mode === 'whiteboard' ? 'Whiteboard Title' : 'Notebook Title'}
+                  {mode === 'slides'
+                    ? 'Presentation Title'
+                    : mode === 'notes'
+                      ? 'Document Title'
+                      : mode === 'whiteboard'
+                        ? 'Infinite Board Title'
+                        : 'Drawing Board Title'}
                 </label>
                 <input
                   id="notebook-title-input"
@@ -307,9 +379,13 @@ export const NotebookModal: React.FC<NotebookModalProps> = ({
                   value={title}
                   onChange={(e) => setTitle(e.target.value)}
                   placeholder={
-                    mode === 'whiteboard'
-                      ? 'e.g., System Architecture Brainstorm'
-                      : 'e.g., Physics Lecture Notes'
+                    mode === 'slides'
+                      ? 'e.g., Q4 Product Pitch Deck'
+                      : mode === 'notes'
+                        ? 'e.g., Lecture 5 Summary & Research'
+                        : mode === 'whiteboard'
+                          ? 'e.g., System Architecture Brainstorm'
+                          : 'e.g., Anatomy Sketchbook'
                   }
                   className="folio-input w-full rounded-xl px-3.5 py-2 text-sm"
                 />
@@ -402,9 +478,86 @@ export const NotebookModal: React.FC<NotebookModalProps> = ({
                 </div>
               </div>
 
-              {/* Paper Template or Board Background (only when creating) */}
+              {/* Mode-Specific Setup (only when creating) */}
               {!editingNotebook &&
-                (mode === 'whiteboard' ? (
+                (mode === 'slides' ? (
+                  <div className="space-y-2.5">
+                    <label className="folio-section-label block">
+                      Slide Dimensions (16:9 Default)
+                    </label>
+                    <div className="grid grid-cols-3 gap-1.5">
+                      {SLIDE_SIZE_PRESETS.map((preset) => (
+                        <button
+                          key={preset.id}
+                          type="button"
+                          data-testid={`slide-size-preset-${preset.id}`}
+                          aria-pressed={slideSizePreset === preset.id}
+                          onClick={() => setSlideSizePreset(preset.id)}
+                          className={`folio-press rounded-xl border px-2 py-1.5 text-left ${
+                            slideSizePreset === preset.id
+                              ? 'folio-glass-active'
+                              : 'border-[var(--border-subtle)] bg-[var(--surface-elevated)] text-[var(--navy-900)] hover:bg-[var(--surface-tint)]'
+                          }`}
+                        >
+                          <div className="text-[11px] font-bold">{preset.id}</div>
+                          <div className="text-[10px] opacity-75">
+                            {preset.width}×{preset.height}
+                          </div>
+                        </button>
+                      ))}
+                      <button
+                        type="button"
+                        data-testid="slide-size-preset-custom"
+                        aria-pressed={slideSizePreset === 'custom'}
+                        onClick={() => setSlideSizePreset('custom')}
+                        className={`folio-press rounded-xl border px-2 py-1.5 text-left ${
+                          slideSizePreset === 'custom'
+                            ? 'folio-glass-active'
+                            : 'border-[var(--border-subtle)] bg-[var(--surface-elevated)] text-[var(--navy-900)] hover:bg-[var(--surface-tint)]'
+                        }`}
+                      >
+                        <div className="text-[11px] font-bold">Custom</div>
+                        <div className="text-[10px] opacity-75">Any W × H</div>
+                      </button>
+                    </div>
+                    {slideSizePreset === 'custom' && (
+                      <div className="grid grid-cols-2 gap-2">
+                        <label className="text-xs font-semibold text-[var(--navy-600)]">
+                          Width (px)
+                          <input
+                            type="number"
+                            min={320}
+                            max={4096}
+                            data-testid="custom-slide-width-input"
+                            value={customSlideWidth}
+                            onChange={(e) =>
+                              setCustomSlideWidth(Math.max(320, Number(e.target.value) || 320))
+                            }
+                            className="folio-input mt-1 w-full rounded-xl px-2.5 py-1.5 text-xs"
+                          />
+                        </label>
+                        <label className="text-xs font-semibold text-[var(--navy-600)]">
+                          Height (px)
+                          <input
+                            type="number"
+                            min={320}
+                            max={4096}
+                            data-testid="custom-slide-height-input"
+                            value={customSlideHeight}
+                            onChange={(e) =>
+                              setCustomSlideHeight(Math.max(320, Number(e.target.value) || 320))
+                            }
+                            className="folio-input mt-1 w-full rounded-xl px-2.5 py-1.5 text-xs"
+                          />
+                        </label>
+                      </div>
+                    )}
+                  </div>
+                ) : mode === 'notes' ? (
+                  <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-tint)]/55 px-3 py-2 text-xs text-[var(--navy-600)]">
+                    Creates a rich-text Google Docs-style document with headings, checklists, tables, outline navigation, and PDF/Markdown export.
+                  </div>
+                ) : mode === 'whiteboard' ? (
                   <div>
                     <label className="folio-section-label mb-1.5 block">
                       Board Background
@@ -488,9 +641,13 @@ export const NotebookModal: React.FC<NotebookModalProps> = ({
                 ? 'Saving...'
                 : editingNotebook
                   ? 'Save Changes'
-                  : mode === 'whiteboard'
-                    ? 'Create Whiteboard'
-                    : 'Create Notebook'}
+                  : mode === 'slides'
+                    ? 'Create Slides Deck'
+                    : mode === 'notes'
+                      ? 'Create Document'
+                      : mode === 'whiteboard'
+                        ? 'Create Infinite Board'
+                        : 'Create Drawing Board'}
             </button>
           </div>
         </form>

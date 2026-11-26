@@ -10,9 +10,10 @@ import {
   Maximize2,
   Minus,
   MousePointer2,
+  PaintBucket,
   PenTool,
+  Pipette,
   Plus,
-  Type,
 } from 'lucide-react';
 import {
   getNotebookMinZoom,
@@ -34,6 +35,7 @@ interface BottomDocksProps {
   rightClickLassoActive?: boolean;
   drawerOpen?: boolean;
   aiSidebarOpen?: boolean;
+  aiSidebarWidth?: number;
   onPrevPage: () => void;
   onNextPage: () => void;
   onFitWidth: () => void;
@@ -54,6 +56,7 @@ export const BottomDocks: React.FC<BottomDocksProps> = ({
   rightClickLassoActive = false,
   drawerOpen = false,
   aiSidebarOpen = false,
+  aiSidebarWidth = 340,
   onPrevPage,
   onNextPage,
   onFitWidth,
@@ -172,10 +175,16 @@ export const BottomDocks: React.FC<BottomDocksProps> = ({
       icon: <Lasso className="h-4 w-4" />,
     },
     {
-      id: 'text',
-      label: 'Text',
-      shortcut: formatShortcutCompact(keyboardShortcuts.toolText),
-      icon: <Type className="h-4 w-4" />,
+      id: 'fill',
+      label: 'Fill',
+      shortcut: 'G',
+      icon: <PaintBucket className="h-4 w-4" />,
+    },
+    {
+      id: 'eyedropper',
+      label: 'Eyedropper',
+      shortcut: 'I',
+      icon: <Pipette className="h-4 w-4" />,
     },
   ];
   const insertImageShortcutLabel = formatShortcutCompact(keyboardShortcuts.insertImage);
@@ -445,19 +454,25 @@ export const BottomDocks: React.FC<BottomDocksProps> = ({
     </div>
   );
 
+  const aiSidebarOffsetStyle = aiSidebarOpen
+    ? ({ '--ai-sidebar-offset': `${aiSidebarWidth + 16}px` } as React.CSSProperties)
+    : undefined;
+
   if (dockPosition === 'top') {
     return (
       <>
         <div
+          style={aiSidebarOffsetStyle}
           className={`pointer-events-none fixed inset-x-0 top-[116px] z-30 flex justify-center px-4 transition-all duration-150 ${
             drawerOpen ? 'sm:pl-[268px]' : ''
-          } ${aiSidebarOpen ? 'sm:pr-[356px]' : ''}`}
+          } ${aiSidebarOpen ? 'sm:pr-[var(--ai-sidebar-offset)]' : ''}`}
         >
           {toolDockElement}
         </div>
         <div
+          style={aiSidebarOffsetStyle}
           className={`pointer-events-none fixed bottom-4 z-30 flex justify-end transition-all duration-150 ${
-            aiSidebarOpen ? 'right-4 sm:right-[356px]' : 'right-4'
+            aiSidebarOpen ? 'right-4 sm:right-[var(--ai-sidebar-offset)]' : 'right-4'
           }`}
         >
           {zoomPillElement}
@@ -477,8 +492,9 @@ export const BottomDocks: React.FC<BottomDocksProps> = ({
           {toolDockElement}
         </div>
         <div
+          style={aiSidebarOffsetStyle}
           className={`pointer-events-none fixed bottom-4 z-30 flex justify-end transition-all duration-150 ${
-            aiSidebarOpen ? 'right-4 sm:right-[356px]' : 'right-4'
+            aiSidebarOpen ? 'right-4 sm:right-[var(--ai-sidebar-offset)]' : 'right-4'
           }`}
         >
           {zoomPillElement}
@@ -489,13 +505,14 @@ export const BottomDocks: React.FC<BottomDocksProps> = ({
 
   return (
     <div
-      className={`pointer-events-none fixed inset-x-0 bottom-4 z-30 flex flex-wrap items-center justify-center px-4 transition-all duration-150 ${
+      style={aiSidebarOffsetStyle}
+      className={`pointer-events-none fixed inset-x-0 bottom-[calc(0.75rem+env(safe-area-inset-bottom,0px))] z-30 flex flex-wrap items-center justify-center px-3 transition-all duration-150 sm:bottom-4 sm:px-4 ${
         aiSidebarOpen
-          ? 'gap-2.5 sm:pr-[356px]'
-          : 'gap-2 lg:grid lg:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] lg:items-center lg:gap-3'
+          ? 'gap-2.5 sm:pr-[var(--ai-sidebar-offset)]'
+          : 'gap-2 xl:grid xl:grid-cols-[minmax(max-content,1fr)_auto_minmax(max-content,1fr)] xl:items-center xl:gap-3'
       }`}
     >
-      {!aiSidebarOpen && <div className="hidden lg:block" aria-hidden="true" />}
+      {!aiSidebarOpen && <div className="hidden xl:block" aria-hidden="true" />}
       {toolDockElement}
       {zoomPillElement}
     </div>

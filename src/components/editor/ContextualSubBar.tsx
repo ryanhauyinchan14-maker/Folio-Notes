@@ -24,7 +24,10 @@ import {
   Loader2,
   Lock,
   Minus,
+  PaintBucket,
+  Pipette,
   Plus,
+  RotateCw,
   Sparkles,
   Trash2,
   Type,
@@ -361,6 +364,7 @@ export const ContextualSubBar: React.FC<ContextualSubBarProps> = ({
   );
   const commitLassoRecolor = useAppStore((s) => s.commitLassoRecolor);
   const commitStrokeScale = useAppStore((s) => s.commitStrokeScale);
+  const commitStrokeTransform = useAppStore((s) => s.commitStrokeTransform);
 
   const [confirmClear, setConfirmClear] = useState(false);
   const [slotSavePickerOpen, setSlotSavePickerOpen] = useState(false);
@@ -1213,6 +1217,48 @@ export const ContextualSubBar: React.FC<ContextualSubBarProps> = ({
           />
         )}
 
+        <div className="flex shrink-0 items-center gap-0.5 rounded-lg border border-[#072D59]/12 bg-white p-0.5">
+          <button
+            type="button"
+            data-testid="stroke-flip-h-btn"
+            disabled={selectionSummary.allLocked}
+            title="Flip Selected Strokes Horizontal"
+            aria-label="Flip Horizontal"
+            onClick={() =>
+              commitStrokeTransform(activePage.id, lassoSelection.strokeIds, 'flipX')
+            }
+            className="inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-xs font-semibold text-[#072D59] transition duration-150 hover:bg-[#DBF2FC]/65 disabled:opacity-40"
+          >
+            <FlipHorizontal2 className="h-3.5 w-3.5" />
+          </button>
+          <button
+            type="button"
+            data-testid="stroke-flip-v-btn"
+            disabled={selectionSummary.allLocked}
+            title="Flip Selected Strokes Vertical"
+            aria-label="Flip Vertical"
+            onClick={() =>
+              commitStrokeTransform(activePage.id, lassoSelection.strokeIds, 'flipY')
+            }
+            className="inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-xs font-semibold text-[#072D59] transition duration-150 hover:bg-[#DBF2FC]/65 disabled:opacity-40"
+          >
+            <FlipVertical2 className="h-3.5 w-3.5" />
+          </button>
+          <button
+            type="button"
+            data-testid="stroke-rotate-90-btn"
+            disabled={selectionSummary.allLocked}
+            title="Rotate Selected Strokes 90°"
+            aria-label="Rotate 90 Degrees"
+            onClick={() =>
+              commitStrokeTransform(activePage.id, lassoSelection.strokeIds, 'rotate90')
+            }
+            className="inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-xs font-semibold text-[#072D59] transition duration-150 hover:bg-[#DBF2FC]/65 disabled:opacity-40"
+          >
+            <RotateCw className="h-3.5 w-3.5" />
+          </button>
+        </div>
+
         <SelectionActionsGroup
           summary={selectionSummary}
           onGroup={() => groupSelection(activePage.id)}
@@ -1664,6 +1710,63 @@ export const ContextualSubBar: React.FC<ContextualSubBarProps> = ({
               </button>
             </div>
           ))}
+      </div>
+    );
+  }
+
+  // Mode 4b: ColorDrop Fill active
+  if (activeTool === 'fill') {
+    return (
+      <div
+        data-testid="contextual-subbar"
+        data-mode="fill"
+        className="folio-glass-island folio-island-morph pointer-events-auto flex min-h-[44px] max-w-full shrink-0 items-center justify-center gap-2.5 overflow-x-auto rounded-2xl px-3 py-1 text-[var(--navy-900)]"
+      >
+        <div className="flex items-center gap-1.5 text-xs font-bold text-[var(--navy-900)]">
+          <PaintBucket className="h-3.5 w-3.5 text-[var(--crimson-500)]" />
+          <span>ColorDrop Fill</span>
+        </div>
+        <div className="flex shrink-0 items-center gap-1 rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-elevated)] px-2 py-1">
+          {inkSwatches.map((swatch, idx) => (
+            <button
+              key={`fill-${idx}-${swatch}`}
+              type="button"
+              title={UNIFIED_INK_SWATCH_NAMES[swatch] ?? swatch}
+              aria-label={`Fill color ${swatch}`}
+              onClick={() => setActiveColor(swatch)}
+              className={`h-4.5 w-4.5 rounded-full border border-black/15 transition ${
+                inkColor.toLowerCase() === swatch.toLowerCase()
+                  ? 'scale-110 ring-2 ring-[var(--crimson-500)] ring-offset-1'
+                  : 'hover:scale-105'
+              }`}
+              style={{ backgroundColor: swatch }}
+            />
+          ))}
+        </div>
+        <span className="hidden text-[11px] font-medium text-[var(--navy-600)] sm:inline">
+          Click inside an enclosed shape to fill
+        </span>
+      </div>
+    );
+  }
+
+  // Mode 4c: Eyedropper active
+  if (activeTool === 'eyedropper') {
+    return (
+      <div
+        data-testid="contextual-subbar"
+        data-mode="eyedropper"
+        className="folio-glass-island folio-island-morph pointer-events-auto flex min-h-[44px] max-w-full shrink-0 items-center justify-center gap-2.5 rounded-2xl px-3.5 py-1 text-[var(--navy-900)]"
+      >
+        <Pipette className="h-3.5 w-3.5 text-[var(--crimson-500)]" />
+        <span className="text-xs font-bold">Eyedropper</span>
+        <span
+          className="h-4 w-4 rounded-full border border-black/15"
+          style={{ backgroundColor: inkColor }}
+        />
+        <span className="text-[11px] font-medium text-[var(--navy-600)]">
+          Click anywhere on the canvas to sample ink color
+        </span>
       </div>
     );
   }

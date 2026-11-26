@@ -7,7 +7,33 @@ interface CachedImageEntry {
   listeners: Set<() => void>;
 }
 
+const MAX_CACHED_IMAGES = 48;
 const imageElementCache = new Map<string, CachedImageEntry>();
+
+function evictOldestCachedImage(): void {
+  const oldestKey = imageElementCache.keys().next().value;
+  if (oldestKey === undefined) return;
+  const oldest = imageElementCache.get(oldestKey);
+  imageElementCache.delete(oldestKey);
+  if (oldest) {
+    oldest.listeners.clear();
+    oldest.img.onload = null;
+    oldest.img.src = '';
+  }
+}
+
+export function clearImageElementCache(): void {
+  for (const entry of imageElementCache.values()) {
+    entry.listeners.clear();
+    entry.img.onload = null;
+    entry.img.src = '';
+  }
+  imageElementCache.clear();
+}
+
+export function getImageElementCacheSize(): number {
+  return imageElementCache.size;
+}
 
 export function getCachedHtmlImage(
   dataUrl: string,
@@ -16,7 +42,14 @@ export function getCachedHtmlImage(
   if (typeof Image === 'undefined') return null;
 
   let entry = imageElementCache.get(dataUrl);
-  if (!entry) {
+  if (entry) {
+    // Promote accessed entry to most-recently-used.
+    imageElementCache.delete(dataUrl);
+    imageElementCache.set(dataUrl, entry);
+  } else {
+    while (imageElementCache.size >= MAX_CACHED_IMAGES) {
+      evictOldestCachedImage();
+    }
     const img = new Image();
     const newEntry: CachedImageEntry = {
       img,

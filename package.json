@@ -1,7 +1,7 @@
 {
   "name": "goodnotes",
-  "version": "1.4.20",
-  "description": "Folio Notes — Local-First Digital Notes",
+  "version": "2.0.0",
+  "description": "Folio Studio — Drawing Board, Notes & Slides Workspace",
   "author": "Folio Notes",
   "main": "dist-electron/main.js",
   "scripts": {
@@ -12,13 +12,28 @@
     "test": "vitest run",
     "electron:compile": "node scripts/generate-icon.mjs --prepare-electron && tsc -p tsconfig.electron.json",
     "electron:dev": "concurrently -k \"vite --port 5173 --strictPort\" \"wait-on tcp:5173 && npm run electron:compile && electron . --dev\"",
-    "electron:build": "npm run build && npm run electron:compile && electron-builder --win && node scripts/write-local-update-manifest.mjs"
+    "electron:build": "npm run build && npm run electron:compile && electron-builder --win && node scripts/write-local-update-manifest.mjs",
+    "electron:build:mac": "npm run build && npm run electron:compile && electron-builder --mac",
+    "electron:build:linux": "npm run build && npm run electron:compile && electron-builder --linux"
   },
   "keywords": [],
   "type": "module",
   "dependencies": {
     "@google/genai": "^3.6.1",
     "@paper-design/shaders-react": "^0.0.82",
+    "@tiptap/extension-highlight": "^3.35.0",
+    "@tiptap/extension-image": "^3.35.0",
+    "@tiptap/extension-link": "^3.35.0",
+    "@tiptap/extension-placeholder": "^3.35.0",
+    "@tiptap/extension-table": "^3.35.0",
+    "@tiptap/extension-task-item": "^3.35.0",
+    "@tiptap/extension-task-list": "^3.35.0",
+    "@tiptap/extension-text-align": "^3.35.0",
+    "@tiptap/extension-text-style": "^3.35.0",
+    "@tiptap/extension-underline": "^3.35.0",
+    "@tiptap/pm": "^3.35.0",
+    "@tiptap/react": "^3.35.0",
+    "@tiptap/starter-kit": "^3.35.0",
     "dexie": "^4.4.7",
     "electron-updater": "^6.8.11",
     "jszip": "^3.10.2",
@@ -102,6 +117,49 @@
     },
     "portable": {
       "artifactName": "Folio-Notes-Portable-${version}.${ext}"
+    },
+    "mac": {
+      "icon": "build/icon.png",
+      "category": "public.app-category.productivity",
+      "hardenedRuntime": false,
+      "gatekeeperAssess": false,
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "Folio-Notes-${version}-${arch}.${ext}"
+    },
+    "linux": {
+      "icon": "build/icon.png",
+      "category": "Office",
+      "maintainer": "Folio Notes",
+      "target": [
+        {
+          "target": "AppImage",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "deb",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "Folio-Notes-${version}-${arch}.${ext}"
     }
   }
 }

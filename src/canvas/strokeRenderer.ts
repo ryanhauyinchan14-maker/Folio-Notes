@@ -1,5 +1,6 @@
 import getStroke from 'perfect-freehand';
-import type { ShapeGeometry, Stroke, StrokePoint } from '../types/notes';
+import type { BrushPresetId, ShapeGeometry, Stroke, StrokePoint } from '../types/notes';
+import { getBrushPreset } from './brushEngine';
 import { resolveSmartDarkInkColor } from './paperRenderer';
 
 interface CachedStrokePath {
@@ -8,6 +9,7 @@ interface CachedStrokePath {
   size: number;
   simulatePressure: boolean;
   isTidied: boolean;
+  brushId?: BrushPresetId;
   path: Path2D;
 }
 
@@ -99,11 +101,11 @@ export function getFreehandStrokeOutline(
   simulatePressure: boolean,
   isLast = true,
   isTidied = false,
+  brushId?: BrushPresetId,
+  streamlineOverride?: number,
 ): number[][] {
-  const pfInput = points.map((p) => [p.x, p.y, p.pressure] as [number, number, number]);
-
   if (isTidied && tool === 'pen') {
-    return getStroke(pfInput, {
+    return getStroke(points, {
       size,
       thinning: 0.16,
       smoothing: 0.58,
@@ -122,11 +124,34 @@ export function getFreehandStrokeOutline(
     });
   }
 
-  return getStroke(pfInput, {
+  if (brushId && tool === 'pen') {
+    const preset = getBrushPreset(brushId);
+    const taperStart = preset.taperStart > 0 ? Math.min(size * 1.4, preset.taperStart) : 0;
+    const taperEnd = preset.taperEnd > 0 ? Math.min(size * 1.4, preset.taperEnd) : 0;
+    return getStroke(points, {
+      size,
+      thinning: preset.thinning,
+      smoothing: preset.smoothing,
+      streamline: streamlineOverride ?? preset.streamline,
+      simulatePressure,
+      easing: (t) => t,
+      start: {
+        taper: taperStart,
+        cap: true,
+      },
+      end: {
+        taper: taperEnd,
+        cap: true,
+      },
+      last: isLast,
+    });
+  }
+
+  return getStroke(points, {
     size,
     thinning: tool === 'highlighter' ? 0.04 : 0.52,
     smoothing: tool === 'highlighter' ? 0.45 : 0.5,
-    streamline: tool === 'highlighter' ? 0.55 : 0.45,
+    streamline: streamlineOverride ?? (tool === 'highlighter' ? 0.55 : 0.45),
     simulatePressure: tool === 'highlighter' ? false : simulatePressure,
     easing: (t) => t,
     start: {
@@ -148,6 +173,8 @@ export function getFreehandStrokePath(
   simulatePressure: boolean,
   isLast = true,
   isTidied = false,
+  brushId?: BrushPresetId,
+  streamlineOverride?: number,
 ): Path2D {
   const outline = getFreehandStrokeOutline(
     points,
@@ -156,12 +183,15 @@ export function getFreehandStrokePath(
     simulatePressure,
     isLast,
     isTidied,
+    brushId,
+    streamlineOverride,
   );
   return buildPath2DFromOutline(outline);
 }
 
 function getCachedStrokePath(stroke: Stroke): Path2D {
   const isTidied = Boolean(stroke.isTidied);
+  const brushId = stroke.brushId;
   const cached = strokePathCache.get(stroke.points);
   if (
     cached &&
@@ -169,7 +199,8 @@ function getCachedStrokePath(stroke: Stroke): Path2D {
     cached.pointsLen === stroke.points.length &&
     cached.size === stroke.size &&
     cached.simulatePressure === stroke.simulatePressure &&
-    cached.isTidied === isTidied
+    cached.isTidied === isTidied &&
+    cached.brushId === brushId
   ) {
     return cached.path;
   }
@@ -181,6 +212,7 @@ function getCachedStrokePath(stroke: Stroke): Path2D {
     stroke.simulatePressure,
     true,
     isTidied,
+    brushId,
   );
   strokePathCache.set(stroke.points, {
     tool: stroke.tool,
@@ -188,6 +220,7 @@ function getCachedStrokePath(stroke: Stroke): Path2D {
     size: stroke.size,
     simulatePressure: stroke.simulatePressure,
     isTidied,
+    brushId,
     path,
   });
   return path;
@@ -227,6 +260,30 @@ export function drawShapeGeometry(
   ctx.restore();
 }
 
+function drawGrainAccent(
+  ctx: CanvasRenderingContext2D,
+  points: StrokePoint[],
+  color: string,
+  size: number,
+  alpha: number,
+): void {
+  if (points.length < 2) return;
+  ctx.save();
+  ctx.strokeStyle = color;
+  ctx.lineWidth = Math.max(0.75, size * 0.34);
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  ctx.setLineDash([1.6, 2.2]);
+  ctx.globalAlpha = alpha;
+  ctx.beginPath();
+  ctx.moveTo(points[0].x, points[0].y);
+  for (let i = 1; i < points.length; i++) {
+    ctx.lineTo(points[i].x, points[i].y);
+  }
+  ctx.stroke();
+  ctx.restore();
+}
+
 export function drawCommittedStroke(
   ctx: CanvasRenderingContext2D,
   stroke: Stroke,
@@ -251,16 +308,42 @@ export function drawCommittedStroke(
   if (stroke.points.length === 0) return;
 
   const resolvedColor = resolveSmartDarkInkColor(stroke.color, darkPaperActive, isHighlighter);
+  const preset =
+    stroke.brushId && stroke.brushId !== 'technical' && stroke.brushId !== 'highlighter'
+      ? getBrushPreset(stroke.brushId)
+      : null;
+
   ctx.save();
   if (applyMultiply && isHighlighter) {
     ctx.globalCompositeOperation = darkPaperActive ? 'screen' : 'multiply';
+  } else if (preset?.blendHint === 'multiply' && applyMultiply && !darkPaperActive) {
+    ctx.globalCompositeOperation = 'multiply';
   }
-  ctx.globalAlpha = darkPaperActive && isHighlighter ? Math.min(stroke.opacity, 0.36) : stroke.opacity;
+
+  const baseAlpha =
+    darkPaperActive && isHighlighter ? Math.min(stroke.opacity, 0.36) : stroke.opacity;
+  const effectiveAlpha = preset ? baseAlpha * preset.opacityMultiplier : baseAlpha;
+  ctx.globalAlpha = preset && preset.grainAlpha > 0 ? effectiveAlpha * 0.85 : effectiveAlpha;
   ctx.fillStyle = resolvedColor;
+
+  if (preset && preset.shadowBlurFactor > 0) {
+    ctx.shadowColor = resolvedColor;
+    ctx.shadowBlur = Math.max(2, stroke.size * preset.shadowBlurFactor);
+  }
 
   const path = getCachedStrokePath(stroke);
   ctx.fill(path);
   ctx.restore();
+
+  if (preset && preset.grainAlpha > 0) {
+    drawGrainAccent(
+      ctx,
+      stroke.points,
+      resolvedColor,
+      stroke.size,
+      effectiveAlpha * preset.grainAlpha,
+    );
+  }
 }
 
 export function drawActiveFreehandStroke(
@@ -272,15 +355,41 @@ export function drawActiveFreehandStroke(
   opacity: number,
   simulatePressure: boolean,
   darkPaperActive = false,
+  brushId?: BrushPresetId,
+  streamlineOverride?: number,
 ): void {
   if (points.length === 0) return;
   const isHighlighter = tool === 'highlighter';
   const resolvedColor = resolveSmartDarkInkColor(color, darkPaperActive, isHighlighter);
+  const preset =
+    brushId && brushId !== 'technical' && brushId !== 'highlighter'
+      ? getBrushPreset(brushId)
+      : null;
+
   ctx.save();
-  ctx.globalAlpha = darkPaperActive && isHighlighter ? Math.min(opacity, 0.36) : opacity;
+  const baseAlpha = darkPaperActive && isHighlighter ? Math.min(opacity, 0.36) : opacity;
+  const effectiveAlpha = preset ? baseAlpha * preset.opacityMultiplier : baseAlpha;
+  ctx.globalAlpha = preset && preset.grainAlpha > 0 ? effectiveAlpha * 0.85 : effectiveAlpha;
   ctx.fillStyle = resolvedColor;
+  if (preset && preset.shadowBlurFactor > 0) {
+    ctx.shadowColor = resolvedColor;
+    ctx.shadowBlur = Math.max(2, size * preset.shadowBlurFactor);
+  }
   // On the top active canvas, CSS `mix-blend-mode` handles highlighter live blend cleanly
-  const path = getFreehandStrokePath(points, tool, size, simulatePressure, false);
+  const path = getFreehandStrokePath(
+    points,
+    tool,
+    size,
+    simulatePressure,
+    false,
+    false,
+    brushId,
+    streamlineOverride,
+  );
   ctx.fill(path);
   ctx.restore();
+
+  if (preset && preset.grainAlpha > 0) {
+    drawGrainAccent(ctx, points, resolvedColor, size, effectiveAlpha * preset.grainAlpha);
+  }
 }

@@ -11,22 +11,6 @@ import {
 } from './aiClient';
 import { type SnapshotImagePart, stripPngDataUrlPrefix } from './pageSnapshot';
 
-function isLightHexColor(hex: string): boolean {
-  const clean = hex.replace('#', '').trim();
-  const full =
-    clean.length === 3
-      ? clean
-          .split('')
-          .map((c) => c + c)
-          .join('')
-      : clean;
-  if (!/^[0-9a-f]{6}/i.test(full)) return false;
-  const r = parseInt(full.slice(0, 2), 16);
-  const g = parseInt(full.slice(2, 4), 16);
-  const b = parseInt(full.slice(4, 6), 16);
-  return 0.299 * r + 0.587 * g + 0.114 * b > 195;
-}
-
 /**
  * Picks the most prominent ink color across a stroke cluster so converted
  * Handwriting textboxes match the writer's chosen pen color.
@@ -114,11 +98,21 @@ export function renderStrokeClusterToPng(
   ctx.scale(scale, scale);
   ctx.translate(-bounds.minX + padding, -bounds.minY + padding);
 
+  const clusterHeight = Math.max(20, bounds.maxY - bounds.minY);
   for (const s of strokes) {
-    const contrastStroke: Stroke = isLightHexColor(s.color)
-      ? { ...s, color: '#0F172A' }
-      : s;
-    drawCommittedStroke(ctx, contrastStroke, false, false);
+    const ocrSize = Math.max(
+      s.size || 2,
+      Math.min(8, Math.max(3.6, clusterHeight * 0.045)),
+    );
+    const ocrStroke: Stroke = {
+      ...s,
+      color: '#0F172A',
+      opacity: 1,
+      size: ocrSize,
+      simulatePressure: false,
+      isTidied: true,
+    };
+    drawCommittedStroke(ctx, ocrStroke, false, false);
   }
   ctx.restore();
 
@@ -141,6 +135,14 @@ function cleanRecognizedText(raw: string): string {
   const fenced = /^```(?:text|markdown|plain)?\s*\n?([\s\S]*?)\n?```$/i.exec(cleaned);
   if (fenced) {
     cleaned = fenced[1].trim();
+  }
+  if (
+    cleaned.length >= 2 &&
+    ((cleaned.startsWith('`') && cleaned.endsWith('`') && !cleaned.slice(1, -1).includes('`')) ||
+      (cleaned.startsWith('"') && cleaned.endsWith('"') && !cleaned.slice(1, -1).includes('"')) ||
+      (cleaned.startsWith("'") && cleaned.endsWith("'") && !cleaned.slice(1, -1).includes("'")))
+  ) {
+    cleaned = cleaned.slice(1, -1).trim();
   }
   return cleaned;
 }
@@ -173,20 +175,20 @@ export async function cleanHandwritingStrokesWithAi(params: {
 
   const rawText = await runMultimodalTextCompletion(params.config, {
     systemPrompt: isLive
-      ? 'Exact handwriting OCR inside a digital notebook. Transcribe what is written verbatim without solving, simplifying, or rewording.'
+      ? 'Exact handwriting OCR inside a digital notebook. The crop shows a handwritten word, line, or short math fragment. Transcribe what is written verbatim without solving, simplifying, or rewording.'
       : 'You are a precision handwriting OCR engine inside a digital notebook app. Transcribe handwritten words, formulas, or short notes verbatim without rewriting, simplifying, or solving them.',
     userPrompt: isLive
-      ? 'Transcribe the handwritten word(s) or math expression verbatim.\n' +
+      ? 'Transcribe the handwritten word(s), digits, or math fragment shown verbatim (even if it is just 1-3 characters like y=, 50, x², +, or I am).\n' +
         '- Preserve exponents/superscripts using Unicode superscripts (like 500x²) or ^{...} / ^2 (like 500x^2, e^{-x}).\n' +
         '- Preserve subscripts using Unicode subscripts or _{...} (like H₂O or H_2O).\n' +
         '- Do NOT rewrite, simplify, or solve the math, and do NOT add quotes, $ delimiters, markdown fences, or commentary.\n' +
-        '- Reply EMPTY only if this is purely a doodle, geometric box, arrow, or straight line with no readable text, digits, or math.'
+        '- Reply EMPTY ONLY if this is unmistakably a non-text drawing (box, arrow, star, or pure scribble) with zero readable letters, digits, or math symbols.'
       : 'Transcribe the exact handwritten text shown in this image verbatim, preserving intentional line breaks.\n' +
         '- Keep exponents/superscripts as Unicode superscripts (like 500x²) or ^{...} / ^2 (like 500x^2, e^{-x}), and subscripts as Unicode subscripts or _{...} (like H₂O or H_2O).\n' +
         '- Do NOT simplify, solve, or reword what is written, and do NOT add quotes, $ math delimiters, markdown fences, labels, or explanations.\n' +
         '- If the strokes are purely a doodle, geometric shape, arrow, underline, or drawing with no readable text or math expression, reply with the exact single word: EMPTY',
     snapshots: [snapshot],
-    maxTokens: isLive ? 160 : 280,
+    maxTokens: 2048,
     guard: params.guard,
   });
 

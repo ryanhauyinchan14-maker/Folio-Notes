@@ -5,6 +5,7 @@ import zlib from 'node:zlib';
 
 const ROOT_DIR = path.resolve(import.meta.dirname, '..');
 const BUILD_DIR = path.join(ROOT_DIR, 'build');
+const PUBLIC_ICONS_DIR = path.join(ROOT_DIR, 'public', 'icons');
 const DIST_ELECTRON_DIR = path.join(ROOT_DIR, 'dist-electron');
 
 function clamp01(v) {
@@ -255,16 +256,24 @@ function encodeIco(frames) {
 }
 
 fs.mkdirSync(BUILD_DIR, { recursive: true });
+fs.mkdirSync(PUBLIC_ICONS_DIR, { recursive: true });
 
-const sizes = [32, 48, 256];
+const sizes = [32, 48, 180, 192, 256, 512];
 const frames = sizes.map((size) => ({
   size,
   png: encodePng(renderIconRgba(size), size, size),
 }));
 
-const png256 = frames.find((f) => f.size === 256).png;
-fs.writeFileSync(path.join(BUILD_DIR, 'icon.png'), png256);
-fs.writeFileSync(path.join(BUILD_DIR, 'icon.ico'), encodeIco(frames));
+const png180 = frames.find((f) => f.size === 180).png;
+const png192 = frames.find((f) => f.size === 192).png;
+const png512 = frames.find((f) => f.size === 512).png;
+const icoFrames = frames.filter((f) => f.size === 32 || f.size === 48 || f.size === 256);
+
+fs.writeFileSync(path.join(BUILD_DIR, 'icon.png'), png512);
+fs.writeFileSync(path.join(BUILD_DIR, 'icon.ico'), encodeIco(icoFrames));
+fs.writeFileSync(path.join(PUBLIC_ICONS_DIR, 'apple-touch-icon.png'), png180);
+fs.writeFileSync(path.join(PUBLIC_ICONS_DIR, 'icon-192.png'), png192);
+fs.writeFileSync(path.join(PUBLIC_ICONS_DIR, 'icon-512.png'), png512);
 
 if (process.argv.includes('--prepare-electron')) {
   fs.mkdirSync(DIST_ELECTRON_DIR, { recursive: true });
@@ -291,4 +300,6 @@ if (process.argv.includes('--prepare-electron')) {
   console.log(`Generated dist-electron/build-meta.json (${buildMeta.buildId})`);
 }
 
-console.log('Generated build/icon.png (256x256) and build/icon.ico (32, 48, 256)');
+console.log(
+  'Generated build/icon.png (512x512), build/icon.ico (32, 48, 256), and public/icons/{180,192,512}.png',
+);

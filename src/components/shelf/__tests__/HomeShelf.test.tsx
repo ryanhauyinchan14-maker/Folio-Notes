@@ -75,14 +75,16 @@ describe('Seal & Crimson Canva-inspired HomeShelf', () => {
     expect(hero).not.toBeNull();
     expect(hero.querySelector('[data-testid="home-hero-shader"]')).not.toBeNull();
     expect(hero.textContent).toContain('Your Notes, Ready.');
-    expect(hero.textContent).toContain('notebook');
+    expect(hero.textContent).toContain('drawing board');
     expect(hero.textContent).not.toContain('LOCAL-FIRST');
     expect(hero.textContent).not.toContain('Cover, folder & template');
 
     expect(container.querySelector('[data-testid="hero-new-notebook-btn"]')?.textContent).toContain(
-      'New Notebook',
+      'New Drawing Board',
     );
     expect(container.querySelector('[data-testid="quick-create-whiteboard"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="quick-create-note"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="quick-create-slides"]')).not.toBeNull();
     expect(container.querySelector('[data-testid="import-pdf-btn"]')?.textContent).toContain(
       'Import PDF',
     );

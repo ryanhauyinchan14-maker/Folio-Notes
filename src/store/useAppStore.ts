@@ -1,10 +1,18 @@
 import { create } from 'zustand';
 import {
+  clearImageElementCache,
+} from '../canvas/imageRenderer';
+import { getBrushPreset } from '../canvas/brushEngine';
+import { type ColorPalettePreset, DEFAULT_COLOR_PALETTES, normalizeHex } from '../canvas/colorMath';
+import {
   cloneStrokeWithNewId,
+  flipStroke,
   getCombinedBounds,
+  rotateStroke,
   scaleStroke,
   translateStroke,
 } from '../canvas/geometry';
+import { type SymmetryMode } from '../canvas/symmetry';
 import {
   computeAlignedElements,
   type ElementAlignment,
@@ -33,23 +41,30 @@ import { db } from '../db/database';
 import { NOTEBOOK_UNDO_WINDOW_MS, repository } from '../db/repository';
 import type {
   BoundingBox,
+  BrushPresetId,
   CoverConfig,
   CustomFontRecord,
+  DrawingLayer,
   Folder,
   Notebook,
   NotebookMode,
+  NoteDocumentData,
   Page,
   PageImage,
   PaperConfig,
   PaperPattern,
   PaperTemplate,
   PdfPageBackground,
+  SlideData,
+  SlideSizePresetId,
   Stroke,
   Textbox,
   ToolType,
   TrashedNotebookRecord,
   UploadedInterfaceFontMeta,
+  WorkspaceCategory,
 } from '../types/notes';
+import { getWorkspaceCategory } from '../types/notes';
 import {
   type FolioWorkspaceBackup,
   parseFolioNotebookExport,
@@ -115,6 +130,8 @@ export type HistoryCommand =
       pageId: string;
       prevStrokes: Stroke[];
       nextStrokes: Stroke[];
+      prevLayers?: DrawingLayer[];
+      nextLayers?: DrawingLayer[];
     }
   | {
       type: 'textboxes';
@@ -326,6 +343,7 @@ async function persistNotebookLastPageAndThumbnail(
 interface AppState {
   // Shelf state
   currentFolderId: string | null;
+  activeWorkspaceFilter: 'all' | WorkspaceCategory;
   folders: Folder[];
   notebooks: Notebook[];
   breadcrumbs: Folder[];
@@ -351,6 +369,12 @@ interface AppState {
 
   // Tool & Canvas settings
   activeTool: ToolType;
+  activeBrushId: BrushPresetId;
+  brushOpacity: number;
+  brushStreamline: number;
+  symmetryMode: SymmetryMode;
+  activeLayerIdByPage: Record<string, string>;
+  savedColorPalettes: ColorPalettePreset[];
   inkColor: string;
   inkSwatches: string[];
   penColor: string;
@@ -414,6 +438,7 @@ interface AppState {
   initApp: () => Promise<void>;
   refreshShelf: () => Promise<void>;
   refreshTemplates: () => Promise<void>;
+  setActiveWorkspaceFilter: (filter: 'all' | WorkspaceCategory) => void;
   navigateToFolder: (folderId: string | null) => Promise<void>;
   createFolder: (name: string, color: string) => Promise<void>;
   renameFolder: (id: string, name: string, color?: string) => Promise<void>;
@@ -422,6 +447,7 @@ interface AppState {
   createNotebook: (params: {
     title: string;
     mode?: NotebookMode;
+    slideSizePreset?: SlideSizePresetId;
     folderId: string | null;
     cover: CoverConfig;
     paper: PaperConfig;
@@ -432,7 +458,7 @@ interface AppState {
   }) => Promise<Notebook>;
   updateNotebookMeta: (
     id: string,
-    patch: Partial<Pick<Notebook, 'title' | 'folderId' | 'cover' | 'defaultPaper'>>,
+    patch: Partial<Pick<Notebook, 'title' | 'folderId' | 'cover' | 'defaultPaper' | 'slideSizePreset'>>,
   ) => Promise<void>;
   duplicateNotebook: (id: string) => Promise<void>;
   deleteNotebook: (id: string) => Promise<void>;
@@ -496,9 +522,32 @@ interface AppState {
   duplicatePage: (pageId: string) => Promise<void>;
   deletePage: (pageId: string) => Promise<void>;
   reorderPages: (newOrder: string[]) => Promise<void>;
+  saveNotePageData: (pageId: string, noteData: NoteDocumentData) => void;
+  saveSlidePageData: (pageId: string, slideData: SlideData, paper?: PaperConfig) => void;
+  addSlidePage: (slideData?: SlideData, afterPageId?: string) => Promise<Page | null>;
+  resizeActiveSlideDeck: (params: {
+    preset: SlideSizePresetId;
+    width: number;
+    height: number;
+    scaleElements: boolean;
+  }) => Promise<void>;
 
   // Actions — Tools & View
   setActiveTool: (tool: ToolType) => void;
+  setActiveBrushId: (brushId: BrushPresetId) => void;
+  setBrushOpacity: (opacity: number) => void;
+  setBrushStreamline: (streamline: number) => void;
+  setSymmetryMode: (mode: SymmetryMode) => void;
+  setActiveLayerForPage: (pageId: string, layerId: string) => void;
+  addDrawingLayer: (pageId: string) => void;
+  updateDrawingLayer: (pageId: string, layerId: string, patch: Partial<DrawingLayer>) => void;
+  duplicateDrawingLayer: (pageId: string, layerId: string) => void;
+  reorderDrawingLayer: (pageId: string, layerId: string, direction: 'up' | 'down') => void;
+  mergeDrawingLayerDown: (pageId: string, layerId: string) => void;
+  clearDrawingLayer: (pageId: string, layerId: string) => void;
+  deleteDrawingLayer: (pageId: string, layerId: string) => void;
+  addColorToPalette: (paletteId: string, hex: string) => void;
+  removeColorFromPalette: (paletteId: string, hex: string) => void;
   setActiveColor: (color: string) => void;
   replaceToolSwatch: (index: number, color: string) => void;
   setActiveSize: (size: number) => void;
@@ -553,6 +602,12 @@ interface AppState {
 
   // Actions — Strokes, Handwriting Correction, Textboxes, Paper, Lasso, Undo/Redo
   commitNewStroke: (pageId: string, stroke: Stroke) => void;
+  commitNewStrokesBatch: (pageId: string, strokes: Stroke[]) => void;
+  commitStrokeTransform: (
+    pageId: string,
+    strokeIds: string[],
+    kind: 'rotate90' | 'flipX' | 'flipY',
+  ) => void;
   discardRecentPenStrokes: (pageId: string, strokeIds: string[]) => void;
   commitEraseStrokes: (pageId: string, strokeIdsToDelete: string[]) => void;
   commitPrecisionErase: (pageId: string, prevStrokes: Stroke[], nextStrokes: Stroke[]) => void;
@@ -725,6 +780,52 @@ interface AppState {
 const MAX_HISTORY = 60;
 const initialPrefs = getWorkspacePreferences();
 setUiSoundEnabled(initialPrefs.uiSoundsEnabled);
+
+const PALETTES_STORAGE_KEY = 'folio-studio-color-palettes-v1';
+
+function loadSavedColorPalettes(): ColorPalettePreset[] {
+  try {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      const raw = window.localStorage.getItem(PALETTES_STORAGE_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw) as ColorPalettePreset[];
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          return parsed;
+        }
+      }
+    }
+  } catch {
+    // Fallback to curated default palettes
+  }
+  return DEFAULT_COLOR_PALETTES.map((p) => ({ ...p, colors: [...p.colors] }));
+}
+
+function persistColorPalettes(palettes: ColorPalettePreset[]): void {
+  try {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      window.localStorage.setItem(PALETTES_STORAGE_KEY, JSON.stringify(palettes));
+    }
+  } catch {
+    // Ignore storage quota errors
+  }
+}
+
+export function ensurePageLayers(page: Pick<Page, 'layers'>): DrawingLayer[] {
+  if (page.layers && page.layers.length > 0) {
+    return page.layers;
+  }
+  return [
+    {
+      id: 'layer-default',
+      name: 'Layer 1',
+      visible: true,
+      opacity: 1,
+      blendMode: 'source-over',
+      locked: false,
+      alphaLock: false,
+    },
+  ];
+}
 
 function applyShortcutBinding(
   current: KeyboardShortcutsMap,
@@ -921,6 +1022,7 @@ async function finalizeDeletedFolderState(
   set: (partial: Partial<AppState>) => void,
 ): Promise<void> {
   clearPdfDocumentCache();
+  clearImageElementCache();
   const { currentFolderId, activeNotebook } = get();
   const currentFolderStillExists = currentFolderId
     ? Boolean(await db.folders.get(currentFolderId))
@@ -943,6 +1045,7 @@ async function finalizeDeletedNotebookState(
   set: (partial: Partial<AppState>) => void,
 ): Promise<void> {
   clearPdfDocumentCache();
+  clearImageElementCache();
   if (get().activeNotebook?.id === notebookId) {
     set(CLEARED_EDITOR_RUNTIME_STATE);
   } else if (clearMasterKey) {
@@ -953,6 +1056,7 @@ async function finalizeDeletedNotebookState(
 
 export const useAppStore = create<AppState>((set, get) => ({
   currentFolderId: null,
+  activeWorkspaceFilter: 'all',
   folders: [],
   notebooks: [],
   breadcrumbs: [],
@@ -976,6 +1080,12 @@ export const useAppStore = create<AppState>((set, get) => ({
   activePaneSide: 'left',
 
   activeTool: initialPrefs.defaultTool,
+  activeBrushId: 'technical',
+  brushOpacity: 1,
+  brushStreamline: 0.45,
+  symmetryMode: 'off',
+  activeLayerIdByPage: {},
+  savedColorPalettes: loadSavedColorPalettes(),
   inkColor: UNIFIED_INK_SWATCHES[0],
   inkSwatches: [...UNIFIED_INK_SWATCHES],
   penColor: UNIFIED_INK_SWATCHES[0],
@@ -1117,9 +1227,14 @@ export const useAppStore = create<AppState>((set, get) => ({
     await get().refreshTrash();
   },
 
+  setActiveWorkspaceFilter: (filter) => {
+    set({ activeWorkspaceFilter: filter });
+  },
+
   createNotebook: async ({
     title,
     mode = 'notebook',
+    slideSizePreset,
     folderId,
     cover,
     paper,
@@ -1131,6 +1246,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     const { notebook } = await repository.createNotebook({
       title,
       mode,
+      slideSizePreset,
       folderId,
       cover,
       paper,
@@ -1323,11 +1439,13 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   lockNow: async () => {
     clearPdfDocumentCache();
+    clearImageElementCache();
     await get().closeNotebook();
   },
 
   lockAllNotebooksNow: async () => {
     clearPdfDocumentCache();
+    clearImageElementCache();
     const { activeNotebook, splitPane } = get();
     if (activeNotebook?.isLocked) {
       await get().closeNotebook();
@@ -1356,11 +1474,15 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
 
     const { defaultTool, defaultZoomMode } = get();
+    const resolvedDefaultTool: ToolType =
+      (defaultTool as ToolType) === 'text' && getWorkspaceCategory(notebook.mode) === 'drawing'
+        ? 'pen'
+        : defaultTool;
     set({
       activeNotebook: notebook,
       pages,
       activePageId: targetPageId,
-      activeTool: defaultTool,
+      activeTool: resolvedDefaultTool,
       zoom: defaultZoomMode === '100' ? 1 : get().zoom,
       undoStack: [],
       redoStack: [],
@@ -1411,6 +1533,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
 
     clearPdfDocumentCache();
+    clearImageElementCache();
     set({
       ...CLEARED_EDITOR_RUNTIME_STATE,
       handwritingTidyToast: null,
@@ -1690,11 +1813,15 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   setActiveTool: (tool) => {
     const prevTool = get().activeTool;
-    const keepText = tool === 'text' || tool === 'pan';
-    const keepImages = tool === 'pan';
-    const keepStrokes = tool === 'lasso' || tool === 'pan';
+    const resolvedTool: ToolType =
+      tool === 'text' && getWorkspaceCategory(get().activeNotebook?.mode) === 'drawing'
+        ? 'pan'
+        : tool;
+    const keepText = resolvedTool === 'text' || resolvedTool === 'pan';
+    const keepImages = resolvedTool === 'pan';
+    const keepStrokes = resolvedTool === 'lasso' || resolvedTool === 'pan';
     set({
-      activeTool: tool,
+      activeTool: resolvedTool,
       lassoSelection: keepStrokes ? get().lassoSelection : null,
       isDraggingLasso: false,
       activeTextboxId: null,
@@ -1703,9 +1830,469 @@ export const useAppStore = create<AppState>((set, get) => ({
       selectedImageIds: keepImages ? get().selectedImageIds : [],
       croppingImageId: null,
     });
-    if (prevTool !== tool) {
+    if (prevTool !== resolvedTool) {
       playUiSound('switch');
     }
+  },
+
+  saveNotePageData: (pageId, noteData) => {
+    const { activeNotebook, pages, unlockedMasterKey } = get();
+    if (!activeNotebook) return;
+    const now = Date.now();
+    set({
+      saveStatus: 'saving',
+      pages: pages.map((p) => (p.id === pageId ? { ...p, noteData, updatedAt: now } : p)),
+    });
+    void repository
+      .saveNoteDocument(activeNotebook.id, pageId, noteData, unlockedMasterKey)
+      .finally(() => {
+        set({ saveStatus: 'saved' });
+      });
+  },
+
+  saveSlidePageData: (pageId, slideData, paper) => {
+    const { activeNotebook, pages, unlockedMasterKey } = get();
+    if (!activeNotebook) return;
+    const now = Date.now();
+    set({
+      saveStatus: 'saving',
+      pages: pages.map((p) =>
+        p.id === pageId
+          ? { ...p, slideData, ...(paper ? { paper } : {}), updatedAt: now }
+          : p,
+      ),
+    });
+    void repository
+      .saveSlidePage(activeNotebook.id, pageId, slideData, paper, unlockedMasterKey)
+      .finally(() => {
+        set({ saveStatus: 'saved' });
+      });
+  },
+
+  addSlidePage: async (slideData, afterPageId) => {
+    const { activeNotebook, activePageId, pages, unlockedMasterKey } = get();
+    if (!activeNotebook) return null;
+    const basePaper = pages[0]?.paper ?? activeNotebook.defaultPaper;
+    const initialSlideData: SlideData = slideData ?? {
+      background: { kind: 'solid', color: '#FFFFFF' },
+      speakerNotes: '',
+      transition: 'fade',
+      elements: [],
+      inkStrokes: [],
+    };
+    const created = await repository.addPageToNotebook({
+      notebookId: activeNotebook.id,
+      paper: { ...basePaper },
+      initialSlideData,
+      afterPageId: afterPageId ?? activePageId ?? undefined,
+      masterKey: unlockedMasterKey,
+    });
+    if (!created) return null;
+    const refreshed = await repository.getNotebookWithPages(
+      activeNotebook.id,
+      unlockedMasterKey,
+    );
+    if (refreshed) {
+      set({
+        activeNotebook: refreshed.notebook,
+        pages: refreshed.pages,
+        activePageId: created.id,
+      });
+    }
+    return created;
+  },
+
+  resizeActiveSlideDeck: async ({ preset, width, height, scaleElements }) => {
+    const { activeNotebook, pages, unlockedMasterKey } = get();
+    if (!activeNotebook) return;
+    const nextWidth = Math.max(320, Math.min(4096, Math.round(width)));
+    const nextHeight = Math.max(320, Math.min(4096, Math.round(height)));
+    const nextDefaultPaper: PaperConfig = {
+      ...activeNotebook.defaultPaper,
+      sizePreset: 'custom',
+      orientation: nextWidth >= nextHeight ? 'landscape' : 'portrait',
+      width: nextWidth,
+      height: nextHeight,
+    };
+
+    const updatedPages: Page[] = pages.map((p) => {
+      const oldW = Math.max(1, p.paper.width);
+      const oldH = Math.max(1, p.paper.height);
+      const sx = nextWidth / oldW;
+      const sy = nextHeight / oldH;
+      const fontScale = Math.min(sx, sy);
+      const nextPaper: PaperConfig = {
+        ...p.paper,
+        sizePreset: 'custom',
+        orientation: nextWidth >= nextHeight ? 'landscape' : 'portrait',
+        width: nextWidth,
+        height: nextHeight,
+      };
+      if (!p.slideData || !scaleElements) {
+        return { ...p, paper: nextPaper, updatedAt: Date.now() };
+      }
+      const scaledElements = p.slideData.elements.map((el) => {
+        const baseScaled = {
+          ...el,
+          x: Math.round(el.x * sx),
+          y: Math.round(el.y * sy),
+          width: Math.max(12, Math.round(el.width * sx)),
+          height: Math.max(6, Math.round(el.height * sy)),
+        };
+        if (baseScaled.kind === 'text') {
+          return {
+            ...baseScaled,
+            fontSize: Math.max(10, Math.round(baseScaled.fontSize * fontScale)),
+          };
+        }
+        return baseScaled;
+      });
+      return {
+        ...p,
+        paper: nextPaper,
+        slideData: {
+          ...p.slideData,
+          elements: scaledElements,
+        },
+        updatedAt: Date.now(),
+      };
+    });
+
+    set({
+      activeNotebook: {
+        ...activeNotebook,
+        slideSizePreset: preset,
+        defaultPaper: nextDefaultPaper,
+        updatedAt: Date.now(),
+      },
+      pages: updatedPages,
+      saveStatus: 'saving',
+    });
+
+    await repository.updateNotebook(activeNotebook.id, {
+      slideSizePreset: preset,
+      defaultPaper: nextDefaultPaper,
+    });
+    for (const p of updatedPages) {
+      if (p.slideData) {
+        await repository.saveSlidePage(
+          activeNotebook.id,
+          p.id,
+          p.slideData,
+          p.paper,
+          unlockedMasterKey,
+        );
+      }
+    }
+    set({ saveStatus: 'saved' });
+  },
+
+  setActiveBrushId: (brushId) => {
+    const preset = getBrushPreset(brushId);
+    const nextTool: ToolType = brushId === 'highlighter' ? 'highlighter' : 'pen';
+    set({
+      activeBrushId: brushId,
+      activeTool: nextTool,
+      brushStreamline: preset.streamline,
+      penSize: brushId === 'highlighter' ? get().penSize : preset.defaultSize,
+      highlighterSize: brushId === 'highlighter' ? preset.defaultSize : get().highlighterSize,
+    });
+    playUiSound('switch');
+  },
+
+  setBrushOpacity: (opacity) => {
+    const clamped = Math.max(0.1, Math.min(1, Number(opacity.toFixed(2))));
+    set({ brushOpacity: clamped });
+  },
+
+  setBrushStreamline: (streamline) => {
+    const clamped = Math.max(0, Math.min(1, Number(streamline.toFixed(2))));
+    set({ brushStreamline: clamped });
+  },
+
+  setSymmetryMode: (mode) => set({ symmetryMode: mode }),
+
+  setActiveLayerForPage: (pageId, layerId) =>
+    set((s) => ({
+      activeLayerIdByPage: { ...s.activeLayerIdByPage, [pageId]: layerId },
+    })),
+
+  addDrawingLayer: (pageId) => {
+    const { activeNotebook, pages, unlockedMasterKey, activeLayerIdByPage } = get();
+    const targetPage = pages.find((p) => p.id === pageId);
+    if (!targetPage || !activeNotebook) return;
+
+    const currentLayers = ensurePageLayers(targetPage);
+    const newLayer: DrawingLayer = {
+      id: `layer-${createId()}`,
+      name: `Layer ${currentLayers.length + 1}`,
+      visible: true,
+      opacity: 1,
+      blendMode: 'source-over',
+      locked: false,
+      alphaLock: false,
+    };
+    const nextLayers = [...currentLayers, newLayer];
+    const now = Date.now();
+    set({
+      pages: pages.map((p) =>
+        p.id === pageId ? { ...p, layers: nextLayers, updatedAt: now } : p,
+      ),
+      activeLayerIdByPage: { ...activeLayerIdByPage, [pageId]: newLayer.id },
+      saveStatus: 'saving',
+    });
+    void repository
+      .savePageLayers(activeNotebook.id, pageId, nextLayers, undefined, unlockedMasterKey)
+      .finally(() => set({ saveStatus: 'saved' }));
+  },
+
+  updateDrawingLayer: (pageId, layerId, patch) => {
+    const { activeNotebook, pages, unlockedMasterKey } = get();
+    const targetPage = pages.find((p) => p.id === pageId);
+    if (!targetPage || !activeNotebook) return;
+
+    const currentLayers = ensurePageLayers(targetPage);
+    const nextLayers = currentLayers.map((layer) =>
+      layer.id === layerId ? { ...layer, ...patch } : layer,
+    );
+    const now = Date.now();
+    set({
+      pages: pages.map((p) =>
+        p.id === pageId ? { ...p, layers: nextLayers, updatedAt: now } : p,
+      ),
+      saveStatus: 'saving',
+    });
+    void repository
+      .savePageLayers(activeNotebook.id, pageId, nextLayers, undefined, unlockedMasterKey)
+      .finally(() => set({ saveStatus: 'saved' }));
+  },
+
+  duplicateDrawingLayer: (pageId, layerId) => {
+    const { activeNotebook, pages, undoStack, unlockedMasterKey, activeLayerIdByPage } = get();
+    const targetPage = pages.find((p) => p.id === pageId);
+    if (!targetPage || !activeNotebook) return;
+
+    const currentLayers = ensurePageLayers(targetPage);
+    const srcIdx = currentLayers.findIndex((l) => l.id === layerId);
+    if (srcIdx === -1) return;
+    const srcLayer = currentLayers[srcIdx];
+    const clonedLayer: DrawingLayer = {
+      ...srcLayer,
+      id: `layer-${createId()}`,
+      name: `${srcLayer.name} Copy`,
+    };
+    const nextLayers = [
+      ...currentLayers.slice(0, srcIdx + 1),
+      clonedLayer,
+      ...currentLayers.slice(srcIdx + 1),
+    ];
+
+    const fallbackId = currentLayers[0]?.id;
+    const prevStrokes = targetPage.strokes;
+    const clonedStrokes = prevStrokes
+      .filter((s) => (s.layerId ?? fallbackId) === layerId)
+      .map((s) => ({
+        ...cloneStrokeWithNewId(s),
+        layerId: clonedLayer.id,
+      }));
+    const nextStrokes = [...prevStrokes, ...clonedStrokes];
+
+    const cmd: HistoryCommand = {
+      type: 'strokes',
+      pageId,
+      prevStrokes,
+      nextStrokes,
+      prevLayers: currentLayers,
+      nextLayers,
+    };
+
+    const now = Date.now();
+    set({
+      pages: pages.map((p) =>
+        p.id === pageId
+          ? { ...p, layers: nextLayers, strokes: nextStrokes, updatedAt: now }
+          : p,
+      ),
+      activeLayerIdByPage: { ...activeLayerIdByPage, [pageId]: clonedLayer.id },
+      undoStack: [...undoStack.slice(-(MAX_HISTORY - 1)), cmd],
+      redoStack: [],
+      saveStatus: 'saving',
+    });
+    void repository
+      .savePageLayers(activeNotebook.id, pageId, nextLayers, nextStrokes, unlockedMasterKey)
+      .finally(() => set({ saveStatus: 'saved' }));
+  },
+
+  reorderDrawingLayer: (pageId, layerId, direction) => {
+    const { activeNotebook, pages, unlockedMasterKey } = get();
+    const targetPage = pages.find((p) => p.id === pageId);
+    if (!targetPage || !activeNotebook) return;
+
+    const currentLayers = [...ensurePageLayers(targetPage)];
+    const idx = currentLayers.findIndex((l) => l.id === layerId);
+    if (idx === -1) return;
+    const swapIdx = direction === 'up' ? idx + 1 : idx - 1;
+    if (swapIdx < 0 || swapIdx >= currentLayers.length) return;
+
+    const temp = currentLayers[idx];
+    currentLayers[idx] = currentLayers[swapIdx];
+    currentLayers[swapIdx] = temp;
+
+    const now = Date.now();
+    set({
+      pages: pages.map((p) =>
+        p.id === pageId ? { ...p, layers: currentLayers, updatedAt: now } : p,
+      ),
+      saveStatus: 'saving',
+    });
+    void repository
+      .savePageLayers(activeNotebook.id, pageId, currentLayers, undefined, unlockedMasterKey)
+      .finally(() => set({ saveStatus: 'saved' }));
+  },
+
+  mergeDrawingLayerDown: (pageId, layerId) => {
+    const { activeNotebook, pages, undoStack, unlockedMasterKey, activeLayerIdByPage } = get();
+    const targetPage = pages.find((p) => p.id === pageId);
+    if (!targetPage || !activeNotebook) return;
+
+    const currentLayers = ensurePageLayers(targetPage);
+    const idx = currentLayers.findIndex((l) => l.id === layerId);
+    if (idx <= 0) return;
+    const targetLayer = currentLayers[idx - 1];
+    const nextLayers = currentLayers.filter((l) => l.id !== layerId);
+    const prevStrokes = targetPage.strokes;
+    const nextStrokes = prevStrokes.map((s) =>
+      s.layerId === layerId ? { ...s, layerId: targetLayer.id } : s,
+    );
+
+    const cmd: HistoryCommand = {
+      type: 'strokes',
+      pageId,
+      prevStrokes,
+      nextStrokes,
+      prevLayers: currentLayers,
+      nextLayers,
+    };
+
+    const now = Date.now();
+    set({
+      pages: pages.map((p) =>
+        p.id === pageId
+          ? { ...p, layers: nextLayers, strokes: nextStrokes, updatedAt: now }
+          : p,
+      ),
+      activeLayerIdByPage: { ...activeLayerIdByPage, [pageId]: targetLayer.id },
+      undoStack: [...undoStack.slice(-(MAX_HISTORY - 1)), cmd],
+      redoStack: [],
+      saveStatus: 'saving',
+    });
+    void repository
+      .savePageLayers(activeNotebook.id, pageId, nextLayers, nextStrokes, unlockedMasterKey)
+      .finally(() => set({ saveStatus: 'saved' }));
+  },
+
+  clearDrawingLayer: (pageId, layerId) => {
+    const { activeNotebook, pages, undoStack, unlockedMasterKey } = get();
+    const targetPage = pages.find((p) => p.id === pageId);
+    if (!targetPage || !activeNotebook) return;
+
+    const currentLayers = ensurePageLayers(targetPage);
+    const fallbackId = currentLayers[0]?.id;
+    const prevStrokes = targetPage.strokes;
+    const nextStrokes = prevStrokes.filter(
+      (s) => s.locked || (s.layerId ?? fallbackId) !== layerId,
+    );
+    if (nextStrokes.length === prevStrokes.length) return;
+
+    const cmd: HistoryCommand = {
+      type: 'strokes',
+      pageId,
+      prevStrokes,
+      nextStrokes,
+    };
+    const now = Date.now();
+    set({
+      pages: pages.map((p) =>
+        p.id === pageId ? { ...p, strokes: nextStrokes, updatedAt: now } : p,
+      ),
+      undoStack: [...undoStack.slice(-(MAX_HISTORY - 1)), cmd],
+      redoStack: [],
+    });
+    persistPageContentChange(
+      activeNotebook,
+      pageId,
+      targetPage.paper,
+      nextStrokes,
+      targetPage.textboxes ?? [],
+      targetPage.images ?? [],
+      unlockedMasterKey,
+      (status) => set({ saveStatus: status }),
+    );
+  },
+
+  deleteDrawingLayer: (pageId, layerId) => {
+    const { activeNotebook, pages, undoStack, unlockedMasterKey, activeLayerIdByPage } = get();
+    const targetPage = pages.find((p) => p.id === pageId);
+    if (!targetPage || !activeNotebook) return;
+
+    const currentLayers = ensurePageLayers(targetPage);
+    if (currentLayers.length <= 1) return;
+    const idx = currentLayers.findIndex((l) => l.id === layerId);
+    if (idx === -1) return;
+
+    const nextLayers = currentLayers.filter((l) => l.id !== layerId);
+    const nextActiveId = nextLayers[Math.max(0, idx - 1)].id;
+    const fallbackId = currentLayers[0]?.id;
+    const prevStrokes = targetPage.strokes;
+    const nextStrokes = prevStrokes.filter((s) => (s.layerId ?? fallbackId) !== layerId);
+
+    const cmd: HistoryCommand = {
+      type: 'strokes',
+      pageId,
+      prevStrokes,
+      nextStrokes,
+      prevLayers: currentLayers,
+      nextLayers,
+    };
+
+    const now = Date.now();
+    set({
+      pages: pages.map((p) =>
+        p.id === pageId
+          ? { ...p, layers: nextLayers, strokes: nextStrokes, updatedAt: now }
+          : p,
+      ),
+      activeLayerIdByPage: { ...activeLayerIdByPage, [pageId]: nextActiveId },
+      undoStack: [...undoStack.slice(-(MAX_HISTORY - 1)), cmd],
+      redoStack: [],
+      saveStatus: 'saving',
+    });
+    void repository
+      .savePageLayers(activeNotebook.id, pageId, nextLayers, nextStrokes, unlockedMasterKey)
+      .finally(() => set({ saveStatus: 'saved' }));
+  },
+
+  addColorToPalette: (paletteId, hex) => {
+    const normalized = normalizeHex(hex);
+    const next = get().savedColorPalettes.map((pal) =>
+      pal.id === paletteId &&
+      !pal.colors.some((c) => c.toUpperCase() === normalized)
+        ? { ...pal, colors: [...pal.colors, normalized] }
+        : pal,
+    );
+    set({ savedColorPalettes: next });
+    persistColorPalettes(next);
+  },
+
+  removeColorFromPalette: (paletteId, hex) => {
+    const normalized = normalizeHex(hex);
+    const next = get().savedColorPalettes.map((pal) =>
+      pal.id === paletteId
+        ? { ...pal, colors: pal.colors.filter((c) => c.toUpperCase() !== normalized) }
+        : pal,
+    );
+    set({ savedColorPalettes: next });
+    persistColorPalettes(next);
   },
 
   setActiveColor: (color) => {
@@ -2135,6 +2722,95 @@ export const useAppStore = create<AppState>((set, get) => ({
 
     set({
       pages: nextPages,
+      undoStack: [...undoStack.slice(-(MAX_HISTORY - 1)), cmd],
+      redoStack: [],
+    });
+
+    persistPageContentChange(
+      activeNotebook,
+      pageId,
+      targetPage.paper,
+      nextStrokes,
+      targetPage.textboxes ?? [],
+      targetPage.images ?? [],
+      unlockedMasterKey,
+      (status) => set({ saveStatus: status }),
+    );
+  },
+
+  commitNewStrokesBatch: (pageId, strokes) => {
+    if (strokes.length === 0) return;
+    const { activeNotebook, pages, undoStack, unlockedMasterKey } = get();
+    const targetPage = pages.find((p) => p.id === pageId);
+    if (!targetPage || !activeNotebook) return;
+
+    const prevStrokes = targetPage.strokes;
+    const nextStrokes = [...prevStrokes, ...strokes];
+
+    const cmd: HistoryCommand = {
+      type: 'strokes',
+      pageId,
+      prevStrokes,
+      nextStrokes,
+    };
+
+    const nextPages = pages.map((p) =>
+      p.id === pageId ? { ...p, strokes: nextStrokes, updatedAt: Date.now() } : p,
+    );
+
+    set({
+      pages: nextPages,
+      undoStack: [...undoStack.slice(-(MAX_HISTORY - 1)), cmd],
+      redoStack: [],
+    });
+
+    persistPageContentChange(
+      activeNotebook,
+      pageId,
+      targetPage.paper,
+      nextStrokes,
+      targetPage.textboxes ?? [],
+      targetPage.images ?? [],
+      unlockedMasterKey,
+      (status) => set({ saveStatus: status }),
+    );
+  },
+
+  commitStrokeTransform: (pageId, strokeIds, kind) => {
+    const { activeNotebook, pages, undoStack, unlockedMasterKey } = get();
+    const targetPage = pages.find((p) => p.id === pageId);
+    if (!targetPage || !activeNotebook || strokeIds.length === 0) return;
+
+    const idSet = new Set(strokeIds);
+    const unlockedSelected = targetPage.strokes.filter(
+      (s) => idSet.has(s.id) && !s.locked,
+    );
+    if (unlockedSelected.length === 0) return;
+
+    const combined = getCombinedBounds(unlockedSelected);
+    if (!combined) return;
+    const cx = (combined.minX + combined.maxX) / 2;
+    const cy = (combined.minY + combined.maxY) / 2;
+
+    const prevStrokes = targetPage.strokes;
+    const nextStrokes = prevStrokes.map((s) => {
+      if (!idSet.has(s.id) || s.locked) return s;
+      if (kind === 'rotate90') return rotateStroke(s, Math.PI / 2, cx, cy);
+      if (kind === 'flipX') return flipStroke(s, 'x', cx, cy);
+      return flipStroke(s, 'y', cx, cy);
+    });
+
+    const cmd: HistoryCommand = {
+      type: 'strokes',
+      pageId,
+      prevStrokes,
+      nextStrokes,
+    };
+
+    set({
+      pages: pages.map((p) =>
+        p.id === pageId ? { ...p, strokes: nextStrokes, updatedAt: Date.now() } : p,
+      ),
       undoStack: [...undoStack.slice(-(MAX_HISTORY - 1)), cmd],
       redoStack: [],
     });
@@ -4724,7 +5400,12 @@ export const useAppStore = create<AppState>((set, get) => ({
     const nextPages = pages.map((p) => {
       if (p.id !== cmd.pageId) return p;
       if (cmd.type === 'strokes') {
-        return { ...p, strokes: cmd.prevStrokes, updatedAt: Date.now() };
+        return {
+          ...p,
+          strokes: cmd.prevStrokes,
+          ...(cmd.prevLayers !== undefined ? { layers: cmd.prevLayers } : {}),
+          updatedAt: Date.now(),
+        };
       }
       if (cmd.type === 'textboxes') {
         return { ...p, textboxes: cmd.prevTextboxes, updatedAt: Date.now() };
@@ -4766,16 +5447,26 @@ export const useAppStore = create<AppState>((set, get) => ({
       cmd.type === 'images' ||
       cmd.type === 'page-content'
     ) {
-      persistPageContentChange(
-        activeNotebook,
-        cmd.pageId,
-        updatedPage.paper,
-        updatedPage.strokes,
-        updatedPage.textboxes ?? [],
-        updatedPage.images ?? [],
-        unlockedMasterKey,
-        (status) => set({ saveStatus: status }),
-      );
+      if (cmd.type === 'strokes' && (cmd.prevLayers !== undefined || cmd.nextLayers !== undefined) && updatedPage.layers) {
+        void repository.savePageLayers(
+          activeNotebook.id,
+          cmd.pageId,
+          updatedPage.layers,
+          updatedPage.strokes,
+          unlockedMasterKey,
+        );
+      } else {
+        persistPageContentChange(
+          activeNotebook,
+          cmd.pageId,
+          updatedPage.paper,
+          updatedPage.strokes,
+          updatedPage.textboxes ?? [],
+          updatedPage.images ?? [],
+          unlockedMasterKey,
+          (status) => set({ saveStatus: status }),
+        );
+      }
     } else {
       void repository.savePagePaper(activeNotebook.id, cmd.pageId, updatedPage.paper);
       if (!activeNotebook.isLocked) {
@@ -4803,7 +5494,12 @@ export const useAppStore = create<AppState>((set, get) => ({
     const nextPages = pages.map((p) => {
       if (p.id !== cmd.pageId) return p;
       if (cmd.type === 'strokes') {
-        return { ...p, strokes: cmd.nextStrokes, updatedAt: Date.now() };
+        return {
+          ...p,
+          strokes: cmd.nextStrokes,
+          ...(cmd.nextLayers !== undefined ? { layers: cmd.nextLayers } : {}),
+          updatedAt: Date.now(),
+        };
       }
       if (cmd.type === 'textboxes') {
         return { ...p, textboxes: cmd.nextTextboxes, updatedAt: Date.now() };
@@ -4845,16 +5541,26 @@ export const useAppStore = create<AppState>((set, get) => ({
       cmd.type === 'images' ||
       cmd.type === 'page-content'
     ) {
-      persistPageContentChange(
-        activeNotebook,
-        cmd.pageId,
-        updatedPage.paper,
-        updatedPage.strokes,
-        updatedPage.textboxes ?? [],
-        updatedPage.images ?? [],
-        unlockedMasterKey,
-        (status) => set({ saveStatus: status }),
-      );
+      if (cmd.type === 'strokes' && (cmd.prevLayers !== undefined || cmd.nextLayers !== undefined) && updatedPage.layers) {
+        void repository.savePageLayers(
+          activeNotebook.id,
+          cmd.pageId,
+          updatedPage.layers,
+          updatedPage.strokes,
+          unlockedMasterKey,
+        );
+      } else {
+        persistPageContentChange(
+          activeNotebook,
+          cmd.pageId,
+          updatedPage.paper,
+          updatedPage.strokes,
+          updatedPage.textboxes ?? [],
+          updatedPage.images ?? [],
+          unlockedMasterKey,
+          (status) => set({ saveStatus: status }),
+        );
+      }
     } else {
       void repository.savePagePaper(activeNotebook.id, cmd.pageId, updatedPage.paper);
       if (!activeNotebook.isLocked) {

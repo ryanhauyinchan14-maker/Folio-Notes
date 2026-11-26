@@ -1,18 +1,30 @@
-import * as pdfjsLib from 'pdfjs-dist';
 import type { PDFDocumentProxy } from 'pdfjs-dist';
 import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import { db } from '../db/database';
 import type { PaperConfig } from '../types/notes';
 import { decryptBinaryPayload } from './vaultCrypto';
 
-if (typeof window !== 'undefined' && window.location?.href) {
-  try {
-    pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(pdfWorkerUrl, window.location.href).href;
-  } catch {
-    pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
+let pdfjsModulePromise: Promise<typeof import('pdfjs-dist')> | null = null;
+
+async function loadPdfJs(): Promise<typeof import('pdfjs-dist')> {
+  if (!pdfjsModulePromise) {
+    pdfjsModulePromise = import('pdfjs-dist').then((pdfjsLib) => {
+      if (typeof window !== 'undefined' && window.location?.href) {
+        try {
+          pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
+            pdfWorkerUrl,
+            window.location.href,
+          ).href;
+        } catch {
+          pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
+        }
+      } else {
+        pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
+      }
+      return pdfjsLib;
+    });
   }
-} else {
-  pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
+  return pdfjsModulePromise;
 }
 
 const MAX_CACHED_DOCS = 6;
@@ -92,6 +104,7 @@ export async function loadPdfDocumentFromBytes(
       ? new Uint8Array(bytes.slice().buffer)
       : new Uint8Array(bytes.slice(0));
 
+  const pdfjsLib = await loadPdfJs();
   const task = pdfjsLib.getDocument({
     data: copy,
     useSystemFonts: true,

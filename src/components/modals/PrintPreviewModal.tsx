@@ -469,7 +469,7 @@ export const PrintPreviewModal: React.FC<PrintPreviewModalProps> = ({
         aria-modal="true"
         aria-labelledby="print-preview-title"
         data-testid="print-preview-modal"
-        className="folio-modal-card flex h-[88vh] max-h-[820px] w-full max-w-5xl flex-col overflow-hidden rounded-2xl text-[var(--navy-900)]"
+        className="folio-modal-card flex h-full max-h-[820px] w-full max-w-5xl flex-col overflow-hidden rounded-2xl text-[var(--navy-900)]"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Modal Header */}

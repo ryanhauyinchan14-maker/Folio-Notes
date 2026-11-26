@@ -50,8 +50,37 @@ import {
   IMAGE_GEMINI_MODEL,
   resolveActiveAiConfig,
 } from '../../utils/settings';
+import { getCssFallbackZoomFactor } from '../../utils/uiZoom';
 import { AiRichText } from './AiRichText';
 import { MorphingPill, useMorphingIndicator } from '../common/MorphingIndicator';
+
+export const AI_SIDEBAR_MIN_WIDTH = 320;
+export const AI_SIDEBAR_DEFAULT_WIDTH = 340;
+export const AI_SIDEBAR_ABS_MAX_WIDTH = 1100;
+export const AI_SIDEBAR_WIDTH_STORAGE_KEY = 'folio_ai_sidebar_width_v1';
+
+/**
+ * Computes the widest comfortable width for the right AI sidebar so users can expand
+ * across empty desk space while keeping the active page comfortably visible.
+ */
+export function computeAiSidebarMaxWidth(params: {
+  containerWidth: number;
+  drawerOpen: boolean;
+  isWhiteboard: boolean;
+  pageCssWidth: number;
+}): number {
+  const usableWidth = Math.max(
+    AI_SIDEBAR_MIN_WIDTH,
+    params.containerWidth - (params.drawerOpen ? 256 : 0),
+  );
+  const pageReserve =
+    !params.isWhiteboard && params.pageCssWidth > 0
+      ? Math.min(Math.round(params.pageCssWidth) + 64, Math.round(usableWidth * 0.62))
+      : Math.round(usableWidth * 0.42);
+  const minCanvasWidth = Math.max(320, pageReserve);
+  const hardCap = Math.min(AI_SIDEBAR_ABS_MAX_WIDTH, Math.round(usableWidth * 0.65));
+  return Math.max(AI_SIDEBAR_MIN_WIDTH, Math.min(hardCap, usableWidth - minCanvasWidth));
+}
 
 export type AiSidebarMode = 'chat' | 'math' | 'study' | 'transcribe' | 'visual';
 export type AiContextScope = 'view' | 'page' | 'lasso' | 'multi';
@@ -84,6 +113,10 @@ interface AiSidebarProps {
   onInsertImageDataUrl: (dataUrl: string) => Promise<void>;
   onOpenSettings: () => void;
   onClose: () => void;
+  width?: number;
+  maxWidth?: number;
+  onWidthChange?: (nextWidth: number) => void;
+  onResetWidth?: () => void;
 }
 
 const MODE_TABS: Array<{
@@ -118,7 +151,105 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
   onInsertImageDataUrl,
   onOpenSettings,
   onClose,
+  width,
+  maxWidth = AI_SIDEBAR_ABS_MAX_WIDTH,
+  onWidthChange,
+  onResetWidth,
 }) => {
+  const [internalWidth, setInternalWidth] = useState(AI_SIDEBAR_DEFAULT_WIDTH);
+  const [isResizing, setIsResizing] = useState(false);
+  const dragCleanupRef = useRef<(() => void) | null>(null);
+  const clampedMaxWidth = Math.max(AI_SIDEBAR_MIN_WIDTH, maxWidth);
+  const effectiveWidth = Math.max(
+    AI_SIDEBAR_MIN_WIDTH,
+    Math.min(width ?? internalWidth, clampedMaxWidth),
+  );
+
+  const commitWidth = useCallback(
+    (next: number) => {
+      const clamped = Math.max(
+        AI_SIDEBAR_MIN_WIDTH,
+        Math.min(Math.round(next), clampedMaxWidth),
+      );
+      if (width === undefined) setInternalWidth(clamped);
+      onWidthChange?.(clamped);
+    },
+    [clampedMaxWidth, onWidthChange, width],
+  );
+
+  useEffect(() => {
+    return () => {
+      dragCleanupRef.current?.();
+      dragCleanupRef.current = null;
+    };
+  }, []);
+
+  const handleResizePointerDown = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      if (e.button !== 0 && e.pointerType === 'mouse') return;
+      e.preventDefault();
+      e.stopPropagation();
+      dragCleanupRef.current?.();
+
+      const startX = e.clientX;
+      const startWidth = effectiveWidth;
+      const zoomFactor = getCssFallbackZoomFactor();
+      const prevCursor = document.body.style.cursor;
+      const prevUserSelect = document.body.style.userSelect;
+      document.body.style.cursor = 'col-resize';
+      document.body.style.userSelect = 'none';
+      setIsResizing(true);
+
+      const onPointerMove = (moveEvent: PointerEvent) => {
+        const deltaX = (startX - moveEvent.clientX) / zoomFactor;
+        commitWidth(startWidth + deltaX);
+      };
+
+      const finishDrag = () => {
+        window.removeEventListener('pointermove', onPointerMove);
+        window.removeEventListener('pointerup', finishDrag);
+        window.removeEventListener('pointercancel', finishDrag);
+        document.body.style.cursor = prevCursor;
+        document.body.style.userSelect = prevUserSelect;
+        setIsResizing(false);
+        dragCleanupRef.current = null;
+      };
+
+      dragCleanupRef.current = finishDrag;
+      window.addEventListener('pointermove', onPointerMove);
+      window.addEventListener('pointerup', finishDrag);
+      window.addEventListener('pointercancel', finishDrag);
+    },
+    [commitWidth, effectiveWidth],
+  );
+
+  const handleResizeKeyDown = useCallback(
+    (e: React.KeyboardEvent<HTMLDivElement>) => {
+      if (e.key === 'ArrowLeft') {
+        e.preventDefault();
+        commitWidth(effectiveWidth + 24);
+      } else if (e.key === 'ArrowRight') {
+        e.preventDefault();
+        commitWidth(effectiveWidth - 24);
+      } else if (e.key === 'Home') {
+        e.preventDefault();
+        commitWidth(AI_SIDEBAR_MIN_WIDTH);
+      } else if (e.key === 'End') {
+        e.preventDefault();
+        commitWidth(clampedMaxWidth);
+      }
+    },
+    [clampedMaxWidth, commitWidth, effectiveWidth],
+  );
+
+  const handleResetSidebarWidth = useCallback(() => {
+    if (width === undefined) setInternalWidth(AI_SIDEBAR_DEFAULT_WIDTH);
+    if (onResetWidth) {
+      onResetWidth();
+    } else {
+      onWidthChange?.(Math.min(AI_SIDEBAR_DEFAULT_WIDTH, clampedMaxWidth));
+    }
+  }, [clampedMaxWidth, onResetWidth, onWidthChange, width]);
   const activeNotebook = useAppStore((s) => s.activeNotebook);
   const unlockedMasterKey = useAppStore((s) => s.unlockedMasterKey);
   const lassoSelection = useAppStore((s) => s.lassoSelection);
@@ -599,12 +730,12 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
   const scopeIndicator = useMorphingIndicator(
     scopeTrackRef,
     showAiWorkspace ? scope : null,
-    [open, showAiWorkspace, activePageIndex, activeNotebook?.mode],
+    [open, showAiWorkspace, activePageIndex, activeNotebook?.mode, effectiveWidth],
   );
   const modeIndicator = useMorphingIndicator(
     modeTrackRef,
     showAiWorkspace ? mode : null,
-    [open, showAiWorkspace],
+    [open, showAiWorkspace, effectiveWidth],
   );
 
   if (!open) return null;
@@ -727,8 +858,34 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
     <aside
       data-testid="ai-sidebar"
       aria-label="AI Study Suite"
-      className="z-20 flex h-full w-80 shrink-0 flex-col border-l border-[var(--border-subtle)] bg-[var(--surface-elevated)] text-[var(--navy-900)] shadow-[var(--shadow-floating)] sm:w-[340px]"
+      style={{ width: `${effectiveWidth}px` }}
+      className="relative z-20 flex h-full max-w-full shrink-0 flex-col border-l border-[var(--border-subtle)] bg-[var(--surface-elevated)] text-[var(--navy-900)] shadow-[var(--shadow-floating)]"
     >
+      {/* Drag-to-resize Left Edge Handle */}
+      <div
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize AI Study Suite sidebar"
+        aria-valuemin={AI_SIDEBAR_MIN_WIDTH}
+        aria-valuemax={clampedMaxWidth}
+        aria-valuenow={effectiveWidth}
+        tabIndex={0}
+        data-testid="ai-sidebar-resize-handle"
+        title="Drag to resize · Double-click to reset"
+        onPointerDown={handleResizePointerDown}
+        onDoubleClick={handleResetSidebarWidth}
+        onKeyDown={handleResizeKeyDown}
+        className="group/resize absolute inset-y-0 -left-1.5 z-30 flex w-3 cursor-col-resize touch-none select-none items-center justify-center focus-visible:outline-2 focus-visible:outline-[var(--crimson-500)]"
+      >
+        <div
+          aria-hidden="true"
+          className={`h-14 w-1 rounded-full transition-all duration-150 ${
+            isResizing
+              ? 'h-24 w-1.5 bg-[var(--crimson-500)] shadow-xs'
+              : 'bg-[var(--navy-900)]/18 group-hover/resize:h-20 group-hover/resize:w-1.5 group-hover/resize:bg-[var(--navy-600)]/55'
+          }`}
+        />
+      </div>
       {/* Header */}
       <div className="flex items-center justify-between border-b border-[var(--border-subtle)] bg-[linear-gradient(135deg,#DBF2FC_0%,#F6FAFE_65%,#FCE7EE_100%)] px-3.5 py-2.5">
         <div className="flex min-w-0 items-center gap-2">

@@ -14,7 +14,7 @@ interface BookTiltCardProps {
   menuNode?: React.ReactNode;
 }
 
-export const BookTiltCard: React.FC<BookTiltCardProps> = ({
+const BookTiltCardInner: React.FC<BookTiltCardProps> = ({
   notebook,
   index,
   relativeUpdatedLabel,
@@ -221,8 +221,12 @@ export const BookTiltCard: React.FC<BookTiltCardProps> = ({
           </div>
           <div className="text-[11px] font-medium text-[var(--navy-600)] tabular-nums">
             {notebook.mode === 'whiteboard'
-              ? 'Whiteboard'
-              : `${notebook.pageOrder.length} page${notebook.pageOrder.length === 1 ? '' : 's'}`}{' '}
+              ? 'Infinite Board'
+              : notebook.mode === 'slides'
+                ? `${notebook.pageOrder.length} slide${notebook.pageOrder.length === 1 ? '' : 's'}`
+                : notebook.mode === 'notes'
+                  ? 'Notes Doc'
+                  : `${notebook.pageOrder.length} page${notebook.pageOrder.length === 1 ? '' : 's'}`}{' '}
             · {relativeUpdatedLabel}
           </div>
         </button>
@@ -246,3 +250,5 @@ export const BookTiltCard: React.FC<BookTiltCardProps> = ({
     </div>
   );
 };
+
+export const BookTiltCard = React.memo(BookTiltCardInner);

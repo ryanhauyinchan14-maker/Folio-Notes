@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from '../../../App';
 import { computeBoundsFromPoints } from '../../../canvas/geometry';
 import { DEFAULT_WHITEBOARD_PAPER } from '../../../canvas/whiteboard';
-import { UNIFIED_INK_SWATCHES } from '../../../constants/covers';
+import { COVER_PRESETS, UNIFIED_INK_SWATCHES } from '../../../constants/covers';
 import { DEFAULT_PAPER_CONFIG } from '../../../constants/papers';
 import { useAppStore } from '../../../store/useAppStore';
 import type { Stroke } from '../../../types/notes';
@@ -816,6 +816,168 @@ describe('v1.2.1 Editor Upgrades: Unified Color, AI Study Handwriting Relocation
       ctxSpy.mockReturnValue(null);
       toDataUrlSpy.mockRestore();
       globalThis.Path2D = origPath2D;
+    }
+  });
+
+  it('automatically retries a transient live AI handwriting failure once and replaces the raw stroke cleanly', async () => {
+    await act(async () => {
+      await useAppStore.getState().initApp();
+      await useAppStore.getState().createNotebook({
+        title: 'Live Handwriting Retry Test',
+        folderId: null,
+        cover: COVER_PRESETS[0].cover,
+        paper: { ...DEFAULT_PAPER_CONFIG },
+        openImmediately: true,
+      });
+    });
+
+    const pageId = useAppStore.getState().activePageId!;
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root: Root = createRoot(container);
+
+    const origPath2D = globalThis.Path2D;
+    globalThis.Path2D = class MockPath2D {
+      moveTo() {}
+      lineTo() {}
+      quadraticCurveTo() {}
+      closePath() {}
+    } as unknown as typeof Path2D;
+
+    const ctxSpy = vi
+      .spyOn(HTMLCanvasElement.prototype, 'getContext')
+      .mockImplementation(() => {
+        return {
+          fillStyle: '#FFFFFF',
+          strokeStyle: '#000000',
+          lineWidth: 1,
+          globalAlpha: 1,
+          globalCompositeOperation: 'source-over',
+          textBaseline: 'alphabetic',
+          textAlign: 'left',
+          font: '24px sans-serif',
+          setTransform: vi.fn(),
+          save: vi.fn(),
+          restore: vi.fn(),
+          scale: vi.fn(),
+          translate: vi.fn(),
+          clearRect: vi.fn(),
+          fillRect: vi.fn(),
+          strokeRect: vi.fn(),
+          fill: vi.fn(),
+          stroke: vi.fn(),
+          clip: vi.fn(),
+          beginPath: vi.fn(),
+          moveTo: vi.fn(),
+          lineTo: vi.fn(),
+          quadraticCurveTo: vi.fn(),
+          arc: vi.fn(),
+          closePath: vi.fn(),
+          setLineDash: vi.fn(),
+          measureText: vi.fn(() => ({ width: 20 })),
+          fillText: vi.fn(),
+        } as unknown as CanvasRenderingContext2D;
+      });
+    const toDataUrlSpy = vi
+      .spyOn(HTMLCanvasElement.prototype, 'toDataURL')
+      .mockReturnValue('data:image/png;base64,SldU');
+
+    const aiFetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        statusText: 'OK',
+        bodyText: JSON.stringify({ choices: [{ message: { content: '' } }] }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        statusText: 'OK',
+        bodyText: JSON.stringify({ choices: [{ message: { content: '50' } }] }),
+      });
+
+    window.folioDesktop = {
+      isElectron: true,
+      platform: 'win32',
+      setUiZoomFactor: (f) => f,
+      getUiZoomFactor: () => 1,
+      aiFetch: aiFetchMock,
+    };
+
+    function PageHarness() {
+      const page = useAppStore((s) => s.pages[0]);
+      if (!page) return null;
+      return (
+        <PageCanvas
+          page={page}
+          pageNumber={1}
+          totalPages={1}
+          zoom={1}
+          spacePressed={false}
+          onFocusPage={() => {}}
+          onRecordCursorPoint={() => {}}
+          onContextMenuRequest={() => {}}
+        />
+      );
+    }
+
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      await act(async () => {
+        useAppStore.getState().setActiveAiProvider('grok');
+        useAppStore.getState().setAiProviderKey('grok', 'xai-retry-test');
+        useAppStore.getState().setHandwritingCorrectionEnabled(true);
+        useAppStore.getState().setActiveTool('pen');
+        root.render(<PageHarness />);
+      });
+
+      const canvas = container.querySelector<HTMLCanvasElement>(
+        '[data-testid="active-canvas-1"]',
+      )!;
+      await act(async () => {
+        dispatchPointer(canvas, 'pointerdown', { clientX: 120, clientY: 220, pointerId: 3 });
+        for (const [px, py] of [
+          [135, 210],
+          [148, 232],
+          [162, 212],
+          [175, 232],
+        ]) {
+          dispatchPointer(canvas, 'pointermove', { clientX: px, clientY: py, pointerId: 3 });
+        }
+        dispatchPointer(canvas, 'pointerup', { clientX: 175, clientY: 232, pointerId: 3 });
+      });
+
+      await act(async () => {
+        vi.advanceTimersByTime(900);
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(aiFetchMock).toHaveBeenCalledTimes(1);
+      expect(useAppStore.getState().pages.find((p) => p.id === pageId)?.strokes.some((s) => !s.isTidied)).toBe(
+        true,
+      );
+
+      // Advance 1200ms retry backoff -> automatic retry succeeds!
+      await act(async () => {
+        vi.advanceTimersByTime(1200);
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(aiFetchMock).toHaveBeenCalledTimes(2);
+      const updated = useAppStore.getState().pages.find((p) => p.id === pageId)!;
+      expect(updated.strokes.length).toBeGreaterThan(1);
+      expect(updated.strokes.every((s) => s.isTidied === true)).toBe(true);
+    } finally {
+      vi.useRealTimers();
+      await act(async () => {
+        root.unmount();
+      });
+      container.remove();
+      ctxSpy.mockReturnValue(null);
+      toDataUrlSpy.mockRestore();
+      globalThis.Path2D = origPath2D;
+      await useAppStore.getState().closeNotebook();
     }
   });
 });

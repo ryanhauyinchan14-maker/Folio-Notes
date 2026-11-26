@@ -582,7 +582,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   return (
     <>
       <div
-        className="folio-modal-backdrop fixed inset-0 z-50 flex items-center justify-center p-4"
+        className="folio-modal-backdrop fixed inset-0 z-50 flex items-center justify-center overflow-hidden p-3 sm:p-4"
         onClick={onClose}
       >
         <div
@@ -590,7 +590,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           aria-modal="true"
           aria-labelledby="settings-modal-title"
           data-testid="settings-modal"
-          className="folio-modal-card flex max-h-[88vh] w-full max-w-[740px] flex-col overflow-hidden rounded-2xl text-[var(--navy-900)] sm:h-[580px]"
+          className="folio-modal-card flex max-h-full w-full max-w-[740px] flex-col overflow-hidden rounded-2xl text-[var(--navy-900)] sm:h-[580px] sm:max-h-full"
           onClick={(e) => e.stopPropagation()}
         >
           {/* Modal Header */}

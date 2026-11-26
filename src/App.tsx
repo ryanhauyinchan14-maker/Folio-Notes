@@ -1,9 +1,12 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { Suspense, lazy, useCallback, useEffect, useRef, useState } from 'react';
 import { UpdateToastCard } from './components/common/UpdatePill';
 import { NotebookEditor } from './components/editor/NotebookEditor';
 import { PdfImportProgressModal } from './components/modals/PdfImportProgressModal';
 import { HomeShelf } from './components/shelf/HomeShelf';
 import { useAppStore } from './store/useAppStore';
+
+const NotesEditor = lazy(() => import('./components/notes/NotesEditor'));
+const SlidesEditor = lazy(() => import('./components/slides/SlidesEditor'));
 import { useUpdaterStore } from './store/useUpdaterStore';
 import {
   isGlobalShortcutSafeInInputs,
@@ -181,9 +184,28 @@ export const App: React.FC = () => {
     };
   }, [flashZoomBadge, setUiScale]);
 
+  const renderActiveWorkspace = () => {
+    if (!activeNotebook) return <HomeShelf />;
+    if (activeNotebook.mode === 'notes') {
+      return (
+        <Suspense fallback={<div className="min-h-screen bg-[var(--surface-canvas)]" />}>
+          <NotesEditor />
+        </Suspense>
+      );
+    }
+    if (activeNotebook.mode === 'slides') {
+      return (
+        <Suspense fallback={<div className="min-h-screen bg-[var(--surface-canvas)]" />}>
+          <SlidesEditor />
+        </Suspense>
+      );
+    }
+    return <NotebookEditor />;
+  };
+
   return (
     <>
-      {activeNotebook ? <NotebookEditor /> : <HomeShelf />}
+      {renderActiveWorkspace()}
       <PdfImportProgressModal />
       <UpdateToastCard />
       {zoomBadgeVisible && (

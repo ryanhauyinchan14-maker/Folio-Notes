@@ -213,7 +213,7 @@ export const TemplatePickerModal: React.FC<TemplatePickerModalProps> = ({
         role="dialog"
         aria-modal="true"
         aria-labelledby="template-picker-title"
-        className="folio-modal-card flex max-h-[88vh] w-full max-w-3xl flex-col overflow-hidden rounded-2xl text-[var(--navy-900)]"
+        className="folio-modal-card flex max-h-full w-full max-w-3xl flex-col overflow-hidden rounded-2xl text-[var(--navy-900)]"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}

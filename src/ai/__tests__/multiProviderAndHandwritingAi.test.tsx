@@ -645,4 +645,52 @@ describe('Multi-Provider BYOK AI Client & AI Handwriting Correction', () => {
 
     await useAppStore.getState().closeNotebook();
   });
+
+  it('uses max_completion_tokens for GPT-5 reasoning models, allocates >= 1024 tokens for live OCR, and strips wrapper quotes/backticks', async () => {
+    const gpt5Req = buildOpenAiCompatibleRequest(
+      { provider: 'openai', apiKey: 'sk-123', model: 'gpt-5' },
+      { userPrompt: 'OCR', snapshots: [SAMPLE_SNAPSHOT], maxTokens: 2048 },
+    );
+    const gpt5Body = JSON.parse(gpt5Req.body!) as Record<string, unknown>;
+    expect(gpt5Body.max_completion_tokens).toBe(2048);
+    expect(gpt5Body.max_tokens).toBeUndefined();
+
+    const grokReq = buildOpenAiCompatibleRequest(
+      { provider: 'grok', apiKey: 'xai-123', model: 'grok-4.7' },
+      { userPrompt: 'OCR', snapshots: [SAMPLE_SNAPSHOT], maxTokens: 2048 },
+    );
+    const grokBody = JSON.parse(grokReq.body!) as Record<string, unknown>;
+    expect(grokBody.max_tokens).toBe(2048);
+    expect(grokBody.max_completion_tokens).toBeUndefined();
+
+    // Thin 1.5px stroke -> boosted OCR visibility internally while preserving original stroke size,
+    // and backtick/quote wrappers around short answers like `50` are stripped cleanly.
+    const thinStroke = { ...makeStroke('thin-1', '#64748B'), size: 1.5 };
+    const aiFetchMock = vi.fn().mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+      bodyText: JSON.stringify({ choices: [{ message: { content: '`50`' } }] }),
+    });
+    window.folioDesktop = {
+      isElectron: true,
+      platform: 'win32',
+      setUiZoomFactor: (f) => f,
+      getUiZoomFactor: () => 1,
+      aiFetch: aiFetchMock,
+    };
+
+    const res = await cleanHandwritingStrokesWithAi({
+      strokes: [thinStroke],
+      config: { provider: 'openai', apiKey: 'sk-123', model: 'gpt-5' },
+      mode: 'live',
+    });
+    expect(res).not.toBeNull();
+    expect(res!.text).toBe('50');
+    expect(thinStroke.size).toBe(1.5);
+    const sentPayload = JSON.parse(aiFetchMock.mock.calls[0][0].body as string) as {
+      max_completion_tokens?: number;
+    };
+    expect(sentPayload.max_completion_tokens).toBeGreaterThanOrEqual(1024);
+  });
 });

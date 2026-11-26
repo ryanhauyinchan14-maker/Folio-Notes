@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { MeshGradient, StaticMeshGradient } from '@paper-design/shaders-react';
 
 export const FOLIO_SHADER_COLORS: string[] = ['#DBF2FC', '#9AD7F7', '#072D59', '#FD6E88'];
@@ -22,6 +22,12 @@ function canUseWebGL(): boolean {
       canvas.getContext('webgl', { powerPreference: 'low-power' }) ??
       canvas.getContext('experimental-webgl');
     cachedWebGLSupport = Boolean(gl);
+    // Immediately release the probe WebGL context slot so live shaders keep full GPU budget.
+    (gl as WebGLRenderingContext | WebGL2RenderingContext | null)
+      ?.getExtension?.('WEBGL_lose_context')
+      ?.loseContext();
+    canvas.width = 0;
+    canvas.height = 0;
   } catch {
     cachedWebGLSupport = false;
   }
@@ -50,21 +56,25 @@ export interface PaperShaderBackdropProps {
   variant: 'hero' | 'static-accent';
   className?: string;
   paused?: boolean;
+  maxPixelCount?: number;
   'data-testid'?: string;
 }
 
-export const PaperShaderBackdrop: React.FC<PaperShaderBackdropProps> = ({
+const PaperShaderBackdropInner: React.FC<PaperShaderBackdropProps> = ({
   variant,
   className = '',
   paused = false,
+  maxPixelCount,
   'data-testid': explicitTestId,
 }) => {
   const testId =
     explicitTestId ?? (variant === 'hero' ? 'home-hero-shader' : 'static-shader-accent');
 
+  const containerRef = useRef<HTMLDivElement | null>(null);
   const [windowFocused, setWindowFocused] = useState(() =>
     typeof document === 'undefined' ? true : !document.hidden && document.hasFocus(),
   );
+  const [inViewport, setInViewport] = useState(true);
   const [reducedMotion, setReducedMotion] = useState(() =>
     typeof window !== 'undefined' && typeof window.matchMedia === 'function'
       ? window.matchMedia('(prefers-reduced-motion: reduce)').matches
@@ -89,11 +99,22 @@ export const PaperShaderBackdrop: React.FC<PaperShaderBackdropProps> = ({
     const handleMotionChange = () => setReducedMotion(Boolean(mq?.matches));
     mq?.addEventListener?.('change', handleMotionChange);
 
+    let observer: IntersectionObserver | null = null;
+    if (typeof IntersectionObserver !== 'undefined' && containerRef.current) {
+      observer = new IntersectionObserver((entries) => {
+        if (entries.length > 0) {
+          setInViewport(entries.some((entry) => entry.isIntersecting));
+        }
+      });
+      observer.observe(containerRef.current);
+    }
+
     return () => {
       window.removeEventListener('focus', handleFocus);
       window.removeEventListener('blur', handleBlur);
       document.removeEventListener('visibilitychange', handleVisibility);
       mq?.removeEventListener?.('change', handleMotionChange);
+      observer?.disconnect();
     };
   }, [variant]);
 
@@ -125,11 +146,13 @@ export const PaperShaderBackdrop: React.FC<PaperShaderBackdropProps> = ({
     return fallbackMesh;
   }
 
-  const activeSpeed = !paused && windowFocused && !reducedMotion ? 0.18 : 0;
+  const activeSpeed =
+    !paused && windowFocused && !reducedMotion && inViewport ? 0.18 : 0;
 
   return (
     <ShaderErrorBoundary fallback={fallbackMesh}>
       <div
+        ref={containerRef}
         data-testid={testId}
         data-shader-mode="webgl"
         aria-hidden="true"
@@ -145,7 +168,7 @@ export const PaperShaderBackdrop: React.FC<PaperShaderBackdropProps> = ({
             scale={1.15}
             speed={activeSpeed}
             fit="cover"
-            maxPixelCount={1280 * 720}
+            maxPixelCount={maxPixelCount ?? 800 * 450}
             style={{ width: '100%', height: '100%' }}
           />
         ) : (
@@ -161,7 +184,7 @@ export const PaperShaderBackdrop: React.FC<PaperShaderBackdropProps> = ({
             grainOverlay={0.1}
             rotation={240}
             fit="cover"
-            maxPixelCount={800 * 400}
+            maxPixelCount={maxPixelCount ?? 640 * 320}
             style={{ width: '100%', height: '100%' }}
           />
         )}
@@ -169,3 +192,5 @@ export const PaperShaderBackdrop: React.FC<PaperShaderBackdropProps> = ({
     </ShaderErrorBoundary>
   );
 };
+
+export const PaperShaderBackdrop = React.memo(PaperShaderBackdropInner);

@@ -369,8 +369,8 @@ export function isNewHandwritingWordStart(
   point: { x: number; y: number },
 ): boolean {
   const wordHeight = Math.max(20, activeBounds.maxY - activeBounds.minY);
-  const rightGap = Math.max(30, Math.min(160, wordHeight * 1.15));
-  const leftGap = Math.max(32, Math.min(140, wordHeight * 1.05));
+  const rightGap = Math.max(36, Math.min(180, wordHeight * 1.35));
+  const leftGap = Math.max(36, Math.min(150, wordHeight * 1.15));
   const downGap = Math.max(26, Math.min(72, wordHeight * 0.55));
   const upGap = Math.max(48, Math.min(140, wordHeight * 1.4));
 
@@ -436,4 +436,74 @@ export function isHandwritingClusterReady(cluster: Stroke[]): boolean {
   if (totalPathLen < 14) return false;
   if (cluster.length === 1 && maxPoints < 4) return false;
   return true;
+}
+
+/**
+ * Expands a flushed handwriting word/fragment by sweeping up adjacent recently-drawn
+ * untidied pen strokes on the same horizontal line (e.g. stranded leading terms like `y = 5`)
+ * that are not currently in flight, preventing partial line conversions.
+ */
+export function expandClusterWithAdjacentUntidiedStrokes(
+  seedCluster: Stroke[],
+  allStrokes: Stroke[],
+  inFlightIds: ReadonlySet<string>,
+  nowMs = Date.now(),
+  maxAgeMs = 45_000,
+): Stroke[] {
+  if (seedCluster.length === 0) return [];
+
+  const cluster = [...seedCluster];
+  const inCluster = new Set(cluster.map((s) => s.id));
+  let bounds: BoundingBox = { ...cluster[0].bounds };
+  for (let i = 1; i < cluster.length; i++) {
+    bounds = expandBoundingBox(bounds, cluster[i].bounds);
+  }
+
+  let expanded = true;
+  while (expanded) {
+    expanded = false;
+    const clusterH = Math.max(24, bounds.maxY - bounds.minY);
+    const clusterCenterY = (bounds.minY + bounds.maxY) / 2;
+    const maxHorizGap = Math.max(42, Math.min(120, clusterH * 0.85));
+    const maxVertDist = Math.max(36, Math.min(115, clusterH * 0.8));
+
+    for (const candidate of allStrokes) {
+      if (inCluster.has(candidate.id) || inFlightIds.has(candidate.id)) continue;
+      if (
+        candidate.tool !== 'pen' ||
+        candidate.shape ||
+        candidate.isTidied ||
+        candidate.locked
+      ) {
+        continue;
+      }
+      if (nowMs - (candidate.createdAt || 0) > maxAgeMs) continue;
+      if (
+        !isHandwritingCandidateStroke(candidate) &&
+        !isHandwritingAccessoryStroke(candidate, bounds)
+      ) {
+        continue;
+      }
+
+      const horizGap = Math.max(
+        0,
+        candidate.bounds.minX - bounds.maxX,
+        bounds.minX - candidate.bounds.maxX,
+      );
+      const candCenterY = (candidate.bounds.minY + candidate.bounds.maxY) / 2;
+      const vertDist = Math.abs(candCenterY - clusterCenterY);
+      const nextHeight =
+        Math.max(bounds.maxY, candidate.bounds.maxY) -
+        Math.min(bounds.minY, candidate.bounds.minY);
+
+      if (horizGap <= maxHorizGap && vertDist <= maxVertDist && nextHeight <= 260) {
+        inCluster.add(candidate.id);
+        cluster.push(candidate);
+        bounds = expandBoundingBox(bounds, candidate.bounds);
+        expanded = true;
+      }
+    }
+  }
+
+  return cluster.sort((a, b) => a.createdAt - b.createdAt);
 }

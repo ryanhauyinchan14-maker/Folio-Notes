@@ -757,7 +757,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
         aria-modal="true"
         aria-labelledby="export-modal-title"
         data-testid="export-modal"
-        className="folio-modal-card flex max-h-[92vh] w-full max-w-4xl flex-col overflow-hidden rounded-2xl text-[#072D59]"
+        className="folio-modal-card flex max-h-full w-full max-w-4xl flex-col overflow-hidden rounded-2xl text-[#072D59]"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}

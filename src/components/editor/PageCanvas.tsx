@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Trash2 } from 'lucide-react';
+import { classifyAiError } from '../../ai/aiClient';
 import { cleanHandwritingStrokesWithAi } from '../../ai/handwritingAi';
 import {
   type AlignmentGuide,
@@ -20,6 +21,7 @@ import {
 } from '../../canvas/geometry';
 import {
   expandBoundingBox,
+  expandClusterWithAdjacentUntidiedStrokes,
   isHandwritingAccessoryStroke,
   isHandwritingCandidateStroke,
   isHandwritingClusterReady,
@@ -41,7 +43,10 @@ import {
   type PageElementSelection,
 } from '../../canvas/selection';
 import { screenToWorld, type WhiteboardCamera } from '../../canvas/whiteboard';
-import { resolveActiveAiConfig } from '../../utils/settings';
+import { rgbToHex } from '../../canvas/colorMath';
+import { computeFloodFillRegion } from '../../canvas/floodFill';
+import { drawSymmetryGuides, getSymmetryBranches } from '../../canvas/symmetry';
+import { AI_PROVIDER_META, resolveActiveAiConfig } from '../../utils/settings';
 import { getCssFallbackZoomFactor } from '../../utils/uiZoom';
 import { recognizeShape } from '../../canvas/shapeRecognition';
 import {
@@ -55,7 +60,7 @@ import {
   isPointOnTextboxText,
   measureTextboxLayout,
 } from '../../canvas/textLayout';
-import { useAppStore } from '../../store/useAppStore';
+import { ensurePageLayers, useAppStore } from '../../store/useAppStore';
 import type {
   BoundingBox,
   Page,
@@ -101,7 +106,7 @@ const HOLD_MOVE_TOLERANCE = 5.5;
 const LIVE_HANDWRITING_PAUSE_MS = 900;
 const MAX_BACKING_DIMENSION = 4096;
 
-export const PageCanvas: React.FC<PageCanvasProps> = ({
+const PageCanvasInner: React.FC<PageCanvasProps> = ({
   page,
   pageNumber,
   totalPages,
@@ -118,12 +123,18 @@ export const PageCanvas: React.FC<PageCanvasProps> = ({
 }) => {
   const staticCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const activeCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const layerScratchCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const pageSurfaceRef = useRef<HTMLDivElement | null>(null);
 
   const unlockedMasterKey = useAppStore((s) => s.unlockedMasterKey);
   const effectiveMasterKey =
     masterKeyOverride !== undefined ? masterKeyOverride : unlockedMasterKey;
   const activeTool = useAppStore((s) => s.activeTool);
+  const activeBrushId = useAppStore((s) => s.activeBrushId);
+  const brushOpacity = useAppStore((s) => s.brushOpacity);
+  const brushStreamline = useAppStore((s) => s.brushStreamline);
+  const symmetryMode = useAppStore((s) => s.symmetryMode);
+  const activeLayerIdByPage = useAppStore((s) => s.activeLayerIdByPage);
   const inkColor = useAppStore((s) => s.inkColor);
   const penSize = useAppStore((s) => s.penSize);
   const highlighterSize = useAppStore((s) => s.highlighterSize);
@@ -138,6 +149,8 @@ export const PageCanvas: React.FC<PageCanvasProps> = ({
   const selectedImageIds = useAppStore((s) => s.selectedImageIds);
 
   const commitNewStroke = useAppStore((s) => s.commitNewStroke);
+  const commitNewStrokesBatch = useAppStore((s) => s.commitNewStrokesBatch);
+  const setActiveColor = useAppStore((s) => s.setActiveColor);
   const discardRecentPenStrokes = useAppStore((s) => s.discardRecentPenStrokes);
   const commitEraseStrokes = useAppStore((s) => s.commitEraseStrokes);
   const commitPrecisionErase = useAppStore((s) => s.commitPrecisionErase);
@@ -150,14 +163,13 @@ export const PageCanvas: React.FC<PageCanvasProps> = ({
   const commitMultiElementMove = useAppStore((s) => s.commitMultiElementMove);
   const altCloneMultiSelection = useAppStore((s) => s.altCloneMultiSelection);
   const commitAltMultiMove = useAppStore((s) => s.commitAltMultiMove);
-  const spawnTextbox = useAppStore((s) => s.spawnTextbox);
   const beginEditTextbox = useAppStore((s) => s.beginEditTextbox);
   const selectTextbox = useAppStore((s) => s.selectTextbox);
   const setActiveTool = useAppStore((s) => s.setActiveTool);
   const addPageImages = useAppStore((s) => s.addPageImages);
 
   const [dpr, setDpr] = useState<number>(() =>
-    typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1,
+    typeof window !== 'undefined' ? Math.min(window.devicePixelRatio || 1, 2) : 1,
   );
   const [snapToast, setSnapToast] = useState<string | null>(null);
   const [liveErasedIds, setLiveErasedIds] = useState<string[]>([]);
@@ -198,7 +210,7 @@ export const PageCanvas: React.FC<PageCanvasProps> = ({
   }, []);
 
   useEffect(() => {
-    const updateDpr = () => setDpr(window.devicePixelRatio || 1);
+    const updateDpr = () => setDpr(Math.min(window.devicePixelRatio || 1, 2));
     window.addEventListener('resize', updateDpr);
     return () => window.removeEventListener('resize', updateDpr);
   }, []);
@@ -470,7 +482,10 @@ export const PageCanvas: React.FC<PageCanvasProps> = ({
   const [debouncedPdfScale, setDebouncedPdfScale] = useState<number>(renderScale);
 
   useEffect(() => {
-    if (!page.pdfBackground) return;
+    if (isWhiteboard) {
+      setIsNearViewport(true);
+      return;
+    }
     const el = pageSurfaceRef.current;
     if (!el || typeof IntersectionObserver === 'undefined') {
       setIsNearViewport(true);
@@ -482,11 +497,11 @@ export const PageCanvas: React.FC<PageCanvasProps> = ({
           setIsNearViewport(entries.some((e) => e.isIntersecting));
         }
       },
-      { rootMargin: '800px 0px' },
+      { rootMargin: '1000px 0px' },
     );
     observer.observe(el);
     return () => observer.disconnect();
-  }, [page.pdfBackground]);
+  }, [isWhiteboard, page.id]);
 
   useEffect(() => {
     if (!page.pdfBackground) return;
@@ -564,6 +579,7 @@ export const PageCanvas: React.FC<PageCanvasProps> = ({
 
   const isPointerActiveRef = useRef(false);
   const activePointerIdRef = useRef<number | null>(null);
+  const activeTouchPointerIdsRef = useRef<Set<number>>(new Set());
   const activePointsRef = useRef<StrokePoint[]>([]);
   const activeSimulatePressureRef = useRef<boolean>(true);
   const snappedShapeRef = useRef<ShapeGeometry | null>(null);
@@ -585,6 +601,9 @@ export const PageCanvas: React.FC<PageCanvasProps> = ({
   const activeWordStrokeIdsRef = useRef<Set<string>>(new Set());
   const activeWordBoundsRef = useRef<BoundingBox | null>(null);
   const inFlightStrokeIdsRef = useRef<Set<string>>(new Set());
+  const handwritingQueueRef = useRef<Array<{ strokeIds: string[]; attempt: number }>>([]);
+  const handwritingProcessingRef = useRef(false);
+  const handwritingRetryTimersRef = useRef<Set<number>>(new Set());
   const lastHandwritingErrorToastAtRef = useRef<number>(0);
   const multiDragCleanupRef = useRef<(() => void) | null>(null);
   const marqueeCleanupRef = useRef<(() => void) | null>(null);
@@ -616,7 +635,131 @@ export const PageCanvas: React.FC<PageCanvasProps> = ({
     activeWordStrokeIdsRef.current.clear();
     activeWordBoundsRef.current = null;
     inFlightStrokeIdsRef.current.clear();
+    handwritingQueueRef.current = [];
+    handwritingProcessingRef.current = false;
+    for (const timerId of handwritingRetryTimersRef.current) {
+      window.clearTimeout(timerId);
+    }
+    handwritingRetryTimersRef.current.clear();
   }, [clearPendingHandwritingTimer]);
+
+  const drainHandwritingQueue = useCallback(() => {
+    if (handwritingProcessingRef.current) return;
+
+    while (handwritingQueueRef.current.length > 0) {
+      const job = handwritingQueueRef.current.shift()!;
+      const curState = useAppStore.getState();
+      const inPrimary = curState.pages.some((p) => p.id === page.id);
+      const latestPage = inPrimary
+        ? curState.pages.find((p) => p.id === page.id)
+        : curState.splitPane?.pages.find((p) => p.id === page.id);
+      const targetNotebook = inPrimary
+        ? curState.activeNotebook
+        : curState.splitPane?.notebook ?? null;
+      const aiCfg = resolveActiveAiConfig(curState);
+      const vaultBlocked = Boolean(
+        targetNotebook?.isLocked && curState.blockAiOnVaultLocked,
+      );
+      if (
+        !curState.handwritingCorrectionEnabled ||
+        !latestPage ||
+        !aiCfg.configured ||
+        vaultBlocked
+      ) {
+        return;
+      }
+
+      const pendingSet = new Set(job.strokeIds);
+      const seedCluster = latestPage.strokes.filter(
+        (s) =>
+          pendingSet.has(s.id) &&
+          !s.locked &&
+          !s.isTidied &&
+          !inFlightStrokeIdsRef.current.has(s.id),
+      );
+      if (seedCluster.length === 0) continue;
+
+      const cluster = expandClusterWithAdjacentUntidiedStrokes(
+        seedCluster,
+        latestPage.strokes,
+        inFlightStrokeIdsRef.current,
+      );
+      if (!isHandwritingClusterReady(cluster)) continue;
+
+      const clusterIds = cluster.map((s) => s.id);
+      for (const id of clusterIds) {
+        inFlightStrokeIdsRef.current.add(id);
+      }
+      handwritingProcessingRef.current = true;
+      const epoch = handwritingSessionEpochRef.current;
+      const providerLabel = AI_PROVIDER_META[aiCfg.provider]?.label ?? 'AI provider';
+
+      void cleanHandwritingStrokesWithAi({
+        strokes: cluster,
+        config: aiCfg,
+        guard: {
+          isVaultLocked: Boolean(targetNotebook?.isLocked),
+          blockAiOnVaultLocked: curState.blockAiOnVaultLocked,
+        },
+        mode: 'live',
+      })
+        .then((result) => {
+          if (!result || epoch !== handwritingSessionEpochRef.current) return;
+          commitAiHandwritingReplacement(page.id, clusterIds, result.strokes, {
+            selectResult: false,
+            requireAllPresent: true,
+            toastMessage: null,
+            alignWithAdjacentLine: true,
+            sourceBounds: result.bounds,
+          });
+        })
+        .catch((err) => {
+          const isAbort =
+            err instanceof Error &&
+            (err.name === 'AbortError' || /aborted/i.test(err.message));
+          if (isAbort || epoch !== handwritingSessionEpochRef.current) return;
+
+          const classified = classifyAiError(err, providerLabel);
+          const isPermanent =
+            classified.kind === 'invalid-key' ||
+            classified.kind === 'vault-blocked' ||
+            classified.kind === 'tier-unsupported';
+
+          if (job.attempt === 0 && !isPermanent) {
+            const retryTimer = window.setTimeout(() => {
+              handwritingRetryTimersRef.current.delete(retryTimer);
+              if (epoch !== handwritingSessionEpochRef.current) return;
+              handwritingQueueRef.current.push({ strokeIds: clusterIds, attempt: 1 });
+              drainHandwritingQueue();
+            }, 1200);
+            handwritingRetryTimersRef.current.add(retryTimer);
+            return;
+          }
+
+          const nowTs = Date.now();
+          if (nowTs - lastHandwritingErrorToastAtRef.current > 15000) {
+            lastHandwritingErrorToastAtRef.current = nowTs;
+            const badge =
+              classified.kind === 'invalid-key'
+                ? 'Invalid AI key, check AI settings'
+                : classified.kind === 'rate-limit'
+                  ? 'AI rate limit reached, try again soon'
+                  : 'AI handwriting paused, check AI settings';
+            showSnapBadge(badge);
+          }
+        })
+        .finally(() => {
+          for (const id of clusterIds) {
+            inFlightStrokeIdsRef.current.delete(id);
+          }
+          handwritingProcessingRef.current = false;
+          if (epoch === handwritingSessionEpochRef.current) {
+            drainHandwritingQueue();
+          }
+        });
+      return;
+    }
+  }, [commitAiHandwritingReplacement, page.id, showSnapBadge]);
 
   const flushActiveHandwritingWord = useCallback(() => {
     clearPendingHandwritingTimer();
@@ -625,74 +768,9 @@ export const PageCanvas: React.FC<PageCanvasProps> = ({
     activeWordBoundsRef.current = null;
     if (pendingIds.length === 0) return;
 
-    const curState = useAppStore.getState();
-    const inPrimary = curState.pages.some((p) => p.id === page.id);
-    const latestPage = inPrimary
-      ? curState.pages.find((p) => p.id === page.id)
-      : curState.splitPane?.pages.find((p) => p.id === page.id);
-    const targetNotebook = inPrimary
-      ? curState.activeNotebook
-      : curState.splitPane?.notebook ?? null;
-    const aiCfg = resolveActiveAiConfig(curState);
-    const vaultBlocked = Boolean(
-      targetNotebook?.isLocked && curState.blockAiOnVaultLocked,
-    );
-    if (!curState.handwritingCorrectionEnabled || !latestPage || !aiCfg.configured || vaultBlocked) {
-      return;
-    }
-
-    const pendingSet = new Set(pendingIds);
-    const cluster = latestPage.strokes.filter(
-      (s) =>
-        pendingSet.has(s.id) &&
-        !s.locked &&
-        !s.isTidied &&
-        !inFlightStrokeIdsRef.current.has(s.id),
-    );
-    if (!isHandwritingClusterReady(cluster)) return;
-
-    const clusterIds = cluster.map((s) => s.id);
-    for (const id of clusterIds) {
-      inFlightStrokeIdsRef.current.add(id);
-    }
-    const epoch = handwritingSessionEpochRef.current;
-
-    void cleanHandwritingStrokesWithAi({
-      strokes: cluster,
-      config: aiCfg,
-      guard: {
-        isVaultLocked: Boolean(targetNotebook?.isLocked),
-        blockAiOnVaultLocked: curState.blockAiOnVaultLocked,
-      },
-      mode: 'live',
-    })
-      .then((result) => {
-        if (!result || epoch !== handwritingSessionEpochRef.current) return;
-        commitAiHandwritingReplacement(page.id, clusterIds, result.strokes, {
-          selectResult: false,
-          requireAllPresent: true,
-          toastMessage: null,
-          alignWithAdjacentLine: true,
-          sourceBounds: result.bounds,
-        });
-      })
-      .catch((err) => {
-        // Leave raw strokes untouched if AI provider call fails or is aborted
-        const isAbort =
-          err instanceof Error &&
-          (err.name === 'AbortError' || /aborted/i.test(err.message));
-        const nowTs = Date.now();
-        if (!isAbort && nowTs - lastHandwritingErrorToastAtRef.current > 15000) {
-          lastHandwritingErrorToastAtRef.current = nowTs;
-          showSnapBadge('AI handwriting paused, check AI settings');
-        }
-      })
-      .finally(() => {
-        for (const id of clusterIds) {
-          inFlightStrokeIdsRef.current.delete(id);
-        }
-      });
-  }, [clearPendingHandwritingTimer, commitAiHandwritingReplacement, page.id, showSnapBadge]);
+    handwritingQueueRef.current.push({ strokeIds: pendingIds, attempt: 0 });
+    drainHandwritingQueue();
+  }, [clearPendingHandwritingTimer, drainHandwritingQueue]);
 
   useEffect(() => {
     if (!handwritingCorrectionEnabled) {
@@ -745,10 +823,47 @@ export const PageCanvas: React.FC<PageCanvasProps> = ({
     return s;
   }, [liveMultiDrag]);
 
+  // Release GPU backing stores on unmount so closing a notebook returns VRAM immediately.
+  useEffect(() => {
+    return () => {
+      const s = staticCanvasRef.current;
+      if (s) {
+        s.width = 0;
+        s.height = 0;
+      }
+      const a = activeCanvasRef.current;
+      if (a) {
+        a.width = 0;
+        a.height = 0;
+      }
+      const scratch = layerScratchCanvasRef.current;
+      if (scratch) {
+        scratch.width = 0;
+        scratch.height = 0;
+        layerScratchCanvasRef.current = null;
+      }
+      if (pdfBitmapRef.current) {
+        pdfBitmapRef.current.width = 0;
+        pdfBitmapRef.current.height = 0;
+        pdfBitmapRef.current = null;
+      }
+    };
+  }, []);
+
   // Redraw bottom static canvas ONLY when committed strokes/textboxes, paper, camera/scale, dark view, or drag preview change
   useEffect(() => {
     const canvas = staticCanvasRef.current;
     if (!canvas) return;
+    if (!isWhiteboard && !isNearViewport) {
+      if (canvas.width !== 0) canvas.width = 0;
+      if (canvas.height !== 0) canvas.height = 0;
+      const activeCanvas = activeCanvasRef.current;
+      if (activeCanvas && !isPointerActiveRef.current && !rightClickLassoActiveRef.current) {
+        if (activeCanvas.width !== 0) activeCanvas.width = 0;
+        if (activeCanvas.height !== 0) activeCanvas.height = 0;
+      }
+      return;
+    }
     syncCanvasSizes(canvas);
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
@@ -807,28 +922,121 @@ export const PageCanvas: React.FC<PageCanvasProps> = ({
           }
         : null;
 
-    const sortedImages = [...(page.images ?? [])].sort(
-      (a, b) => a.zIndex - b.zIndex,
-    );
-    for (const img of sortedImages) {
-      if (img.id === activeOverlayImageId || hiddenDragImageIds.has(img.id)) continue;
-      if (cullRect && !boundsOverlap(getImageBounds(img), cullRect)) continue;
-      drawCommittedImage(ctx, img, handleImageDecoded);
+    const pageImages = page.images;
+    if (pageImages && pageImages.length > 0) {
+      const sortedImages =
+        pageImages.length > 1
+          ? [...pageImages].sort((a, b) => a.zIndex - b.zIndex)
+          : pageImages;
+      for (const img of sortedImages) {
+        if (img.id === activeOverlayImageId || hiddenDragImageIds.has(img.id)) continue;
+        if (cullRect && !boundsOverlap(getImageBounds(img), cullRect)) continue;
+        drawCommittedImage(ctx, img, handleImageDecoded);
+      }
     }
 
-    const hiddenStrokeIds = new Set<string>(liveErasedIds);
-    if (liveMultiDrag) {
-      for (const id of liveMultiDrag.selection.strokeIds) hiddenStrokeIds.add(id);
-    }
-    if (liveStrokeScale) {
-      for (const id of liveStrokeScale.strokeIds) hiddenStrokeIds.add(id);
+    let hiddenStrokeIds: Set<string> | null = null;
+    if (liveErasedIds.length > 0 || liveMultiDrag || liveStrokeScale) {
+      hiddenStrokeIds = new Set<string>(liveErasedIds);
+      if (liveMultiDrag) {
+        for (const id of liveMultiDrag.selection.strokeIds) hiddenStrokeIds.add(id);
+      }
+      if (liveStrokeScale) {
+        for (const id of liveStrokeScale.strokeIds) hiddenStrokeIds.add(id);
+      }
     }
 
     const strokesToRender = livePrecisionStrokes ?? page.strokes;
-    for (const stroke of strokesToRender) {
-      if (hiddenStrokeIds.has(stroke.id)) continue;
-      if (cullRect && !boundsOverlap(stroke.bounds, cullRect)) continue;
-      drawCommittedStroke(ctx, stroke, true, smartDarkActive);
+    const pageLayers = page.layers;
+    const useSingleDirectLayer =
+      !pageLayers ||
+      pageLayers.length === 0 ||
+      (pageLayers.length === 1 &&
+        pageLayers[0].visible &&
+        pageLayers[0].opacity >= 0.999 &&
+        pageLayers[0].blendMode === 'source-over');
+
+    if (useSingleDirectLayer) {
+      for (const stroke of strokesToRender) {
+        if (hiddenStrokeIds?.has(stroke.id)) continue;
+        if (cullRect && !boundsOverlap(stroke.bounds, cullRect)) continue;
+        drawCommittedStroke(ctx, stroke, true, smartDarkActive);
+      }
+    } else {
+      const validLayerIds = new Set(pageLayers.map((l) => l.id));
+      const fallbackLayerId = pageLayers[0].id;
+      const strokesByLayer = new Map<string, Stroke[]>();
+      for (const layer of pageLayers) {
+        strokesByLayer.set(layer.id, []);
+      }
+      for (const stroke of strokesToRender) {
+        if (hiddenStrokeIds?.has(stroke.id)) continue;
+        if (cullRect && !boundsOverlap(stroke.bounds, cullRect)) continue;
+        const targetId =
+          stroke.layerId && validLayerIds.has(stroke.layerId)
+            ? stroke.layerId
+            : fallbackLayerId;
+        strokesByLayer.get(targetId)?.push(stroke);
+      }
+
+      for (const layer of pageLayers) {
+        if (!layer.visible) continue;
+        const layerStrokes = strokesByLayer.get(layer.id) ?? [];
+        if (layerStrokes.length === 0) continue;
+
+        if (layer.opacity >= 0.999 && layer.blendMode === 'source-over') {
+          for (const stroke of layerStrokes) {
+            drawCommittedStroke(ctx, stroke, true, smartDarkActive);
+          }
+        } else {
+          let scratch = layerScratchCanvasRef.current;
+          if (!scratch) {
+            scratch = document.createElement('canvas');
+            layerScratchCanvasRef.current = scratch;
+          }
+          if (scratch.width !== canvas.width) scratch.width = canvas.width;
+          if (scratch.height !== canvas.height) scratch.height = canvas.height;
+          const sCtx = scratch.getContext('2d');
+          if (!sCtx) {
+            for (const stroke of layerStrokes) {
+              drawCommittedStroke(ctx, stroke, true, smartDarkActive);
+            }
+            continue;
+          }
+          sCtx.setTransform(1, 0, 0, 1, 0, 0);
+          sCtx.clearRect(0, 0, scratch.width, scratch.height);
+          applyCanvasTransform(sCtx);
+          for (const stroke of layerStrokes) {
+            drawCommittedStroke(sCtx, stroke, true, smartDarkActive);
+          }
+          ctx.save();
+          ctx.setTransform(1, 0, 0, 1, 0, 0);
+          ctx.globalAlpha = Math.max(0, Math.min(1, layer.opacity));
+          ctx.globalCompositeOperation = layer.blendMode;
+          ctx.drawImage(scratch, 0, 0);
+          ctx.restore();
+        }
+      }
+    }
+
+    if (symmetryMode !== 'off') {
+      const symCx = isWhiteboard ? 0 : effectivePaper.width / 2;
+      const symCy = isWhiteboard ? 0 : effectivePaper.height / 2;
+      const minX = isWhiteboard ? visibleWorldBounds.minX : 0;
+      const minY = isWhiteboard ? visibleWorldBounds.minY : 0;
+      const maxX = isWhiteboard ? visibleWorldBounds.maxX : effectivePaper.width;
+      const maxY = isWhiteboard ? visibleWorldBounds.maxY : effectivePaper.height;
+      drawSymmetryGuides(
+        ctx,
+        symmetryMode,
+        symCx,
+        symCy,
+        minX,
+        minY,
+        maxX,
+        maxY,
+        1 / Math.max(0.05, effectiveZoom),
+      );
     }
 
     for (const tb of page.textboxes ?? []) {
@@ -846,12 +1054,16 @@ export const PageCanvas: React.FC<PageCanvasProps> = ({
     page.id,
     page.paper,
     page.pdfBackground,
+    isNearViewport,
     pdfRenderTick,
     effectivePaper,
     smartDarkActive,
     page.images,
+    page.layers,
     page.strokes,
     page.textboxes,
+    symmetryMode,
+    effectiveZoom,
     renderScale,
     backingWidth,
     backingHeight,
@@ -874,17 +1086,19 @@ export const PageCanvas: React.FC<PageCanvasProps> = ({
     syncCanvasSizes,
   ]);
 
-  useEffect(() => {
-    syncCanvasSizes(activeCanvasRef.current);
-  }, [syncCanvasSizes]);
-
   const clearActiveCanvas = useCallback(() => {
     const canvas = activeCanvasRef.current;
     if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    if (canvas.width > 0 || canvas.height > 0) {
+      const ctx = canvas.getContext('2d');
+      if (ctx) {
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+      }
+      // Release idle overlay backing store so inactive pages use near-zero GPU VRAM.
+      canvas.width = 0;
+      canvas.height = 0;
+    }
   }, []);
 
   const renderTransformFrame = useCallback(
@@ -1077,7 +1291,8 @@ export const PageCanvas: React.FC<PageCanvasProps> = ({
       const isHighlighter = activeTool === 'highlighter';
       const color = inkColor;
       const size = isHighlighter ? highlighterSize : penSize;
-      const opacity = isHighlighter ? 0.45 : 1;
+      const opacity = isHighlighter ? 0.45 * brushOpacity : brushOpacity;
+      const effectiveBrushId = isHighlighter ? 'highlighter' : activeBrushId;
 
       if (snappedShapeRef.current) {
         drawShapeGeometry(
@@ -1091,30 +1306,49 @@ export const PageCanvas: React.FC<PageCanvasProps> = ({
           isHighlighter,
         );
       } else {
-        drawActiveFreehandStroke(
-          ctx,
+        const symCx = isWhiteboard ? 0 : page.paper.width / 2;
+        const symCy = isWhiteboard ? 0 : page.paper.height / 2;
+        const branches = getSymmetryBranches(
           activePointsRef.current,
-          activeTool,
-          color,
-          size,
-          opacity,
-          activeSimulatePressureRef.current,
-          smartDarkActive,
+          symmetryMode,
+          symCx,
+          symCy,
         );
+        for (const branchPts of branches) {
+          drawActiveFreehandStroke(
+            ctx,
+            branchPts,
+            activeTool,
+            color,
+            size,
+            opacity,
+            activeSimulatePressureRef.current,
+            smartDarkActive,
+            effectiveBrushId,
+            brushStreamline,
+          );
+        }
       }
     }
   }, [
+    activeBrushId,
     activeTool,
     applyCanvasTransform,
+    brushOpacity,
+    brushStreamline,
     effectiveZoom,
     eraserMode,
     eraserSize,
     highlighterSize,
     inkColor,
     isPanning,
+    isWhiteboard,
+    page.paper.height,
+    page.paper.width,
     penSize,
     smartDarkActive,
     spacePressed,
+    symmetryMode,
     syncCanvasSizes,
   ]);
 
@@ -1221,6 +1455,26 @@ export const PageCanvas: React.FC<PageCanvasProps> = ({
 
   const triggerHoldToSnap = useCallback(() => {
     if (!isPointerActiveRef.current || snappedShapeRef.current) return;
+    if (
+      handwritingCorrectionEnabled &&
+      activeTool === 'pen' &&
+      activeWordStrokeIdsRef.current.size > 0 &&
+      activePointsRef.current.length > 0
+    ) {
+      let minX = Infinity;
+      let maxX = -Infinity;
+      let minY = Infinity;
+      let maxY = -Infinity;
+      for (const pt of activePointsRef.current) {
+        if (pt.x < minX) minX = pt.x;
+        if (pt.x > maxX) maxX = pt.x;
+        if (pt.y < minY) minY = pt.y;
+        if (pt.y > maxY) maxY = pt.y;
+      }
+      if (Math.max(maxX - minX, maxY - minY) < 95) {
+        return;
+      }
+    }
     const recognized = recognizeShape(activePointsRef.current);
     if (!recognized) return;
 
@@ -1232,7 +1486,7 @@ export const PageCanvas: React.FC<PageCanvasProps> = ({
     };
     showSnapBadge(labelMap[recognized.kind]);
     renderActiveFrame();
-  }, [renderActiveFrame, showSnapBadge]);
+  }, [activeTool, handwritingCorrectionEnabled, renderActiveFrame, showSnapBadge]);
 
   const resetHoldTimer = useCallback(
     (x: number, y: number) => {
@@ -1756,23 +2010,29 @@ export const PageCanvas: React.FC<PageCanvasProps> = ({
   };
 
   const handlePointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (e.pointerType === 'touch') {
+      activeTouchPointerIdsRef.current.add(e.pointerId);
+      if (activeTouchPointerIdsRef.current.size >= 2) {
+        // Two-finger pinch/scroll gesture: abort any accidental single-finger stroke immediately
+        clearHoldTimer();
+        if (rafPendingRef.current !== null) {
+          window.cancelAnimationFrame(rafPendingRef.current);
+          rafPendingRef.current = null;
+        }
+        isPointerActiveRef.current = false;
+        activePointerIdRef.current = null;
+        activePointsRef.current = [];
+        snappedShapeRef.current = null;
+        lastDrawPointRef.current = null;
+        clearActiveCanvas();
+        return;
+      }
+    }
     if (e.button === 1 || rightClickLassoActiveRef.current) return;
     onFocusPage(page.id);
 
     const { x, y } = toPagePoint(e.clientX, e.clientY);
     onRecordCursorPoint(page.id, x, y);
-
-    if (activeTool === 'text' && e.button === 0 && !spacePressed) {
-      e.preventDefault();
-      e.stopPropagation();
-      const hit = hitTestTextbox(x, y, page.textboxes ?? []);
-      if (hit) {
-        beginEditTextbox(page.id, hit.id);
-      } else {
-        spawnTextbox({ pageId: page.id, x, y });
-      }
-      return;
-    }
 
     // Universal Select (`V`) -> direct scribble selection/drag, Shift+Click toggle, or empty-paper Marquee drag-box
     if (activeTool === 'pan' && e.button === 0 && !spacePressed) {
@@ -1843,11 +2103,108 @@ export const PageCanvas: React.FC<PageCanvasProps> = ({
       return;
     }
 
+    // Eyedropper tool: sample pixel color directly from the rendered page canvas
+    if (activeTool === 'eyedropper') {
+      e.preventDefault();
+      e.stopPropagation();
+      const sCanvas = staticCanvasRef.current;
+      if (sCanvas && sCanvas.width > 0 && sCanvas.height > 0) {
+        const sRect = sCanvas.getBoundingClientRect();
+        const px = Math.max(
+          0,
+          Math.min(
+            sCanvas.width - 1,
+            Math.floor(((e.clientX - sRect.left) / Math.max(1, sRect.width)) * sCanvas.width),
+          ),
+        );
+        const py = Math.max(
+          0,
+          Math.min(
+            sCanvas.height - 1,
+            Math.floor(((e.clientY - sRect.top) / Math.max(1, sRect.height)) * sCanvas.height),
+          ),
+        );
+        const sCtx = sCanvas.getContext('2d');
+        if (sCtx) {
+          const data = sCtx.getImageData(px, py, 1, 1).data;
+          const sampled = rgbToHex(data[0], data[1], data[2]);
+          setActiveColor(sampled);
+          showSnapBadge(`Sampled ${sampled}`);
+        }
+      }
+      setActiveTool('pen');
+      return;
+    }
+
+    // ColorDrop / Flood Fill tool
+    if (activeTool === 'fill') {
+      e.preventDefault();
+      e.stopPropagation();
+      const sCanvas = staticCanvasRef.current;
+      if (sCanvas && sCanvas.width > 0 && sCanvas.height > 0 && !isWhiteboard) {
+        const sRect = sCanvas.getBoundingClientRect();
+        const normX = (e.clientX - sRect.left) / Math.max(1, sRect.width);
+        const normY = (e.clientY - sRect.top) / Math.max(1, sRect.height);
+        const filled = computeFloodFillRegion(
+          sCanvas,
+          normX,
+          normY,
+          inkColor,
+          page.paper.width,
+          page.paper.height,
+        );
+        if (filled) {
+          const now = Date.now();
+          const minZ = (page.images ?? []).reduce((m, im) => Math.min(m, im.zIndex), 1);
+          const fillImg: PageImage = {
+            id: createId(),
+            dataUrl: filled.dataUrl,
+            x: filled.x,
+            y: filled.y,
+            width: filled.width,
+            height: filled.height,
+            naturalWidth: filled.naturalWidth,
+            naturalHeight: filled.naturalHeight,
+            crop: { x: 0, y: 0, width: 1, height: 1 },
+            borderRadius: 0,
+            opacity: 1,
+            flipX: false,
+            flipY: false,
+            zIndex: Math.max(0, minZ - 1),
+            createdAt: now,
+            updatedAt: now,
+          };
+          addPageImages(page.id, [fillImg]);
+          showSnapBadge('ColorDrop filled');
+        } else {
+          showSnapBadge('Nothing to fill here');
+        }
+      } else if (isWhiteboard) {
+        showSnapBadge('Fill works on bounded Drawing Board pages');
+      }
+      return;
+    }
+
+    if (activeTool === 'pen' || activeTool === 'highlighter') {
+      const pageLayers = ensurePageLayers(page);
+      const targetLayerId =
+        activeLayerIdByPage[page.id] ?? pageLayers[pageLayers.length - 1]?.id;
+      const targetLayer = pageLayers.find((l) => l.id === targetLayerId) ?? pageLayers[0];
+      if (targetLayer?.locked) {
+        showSnapBadge('Active layer is locked');
+        return;
+      }
+      if (targetLayer && !targetLayer.visible) {
+        showSnapBadge('Active layer is hidden');
+        return;
+      }
+    }
+
     clearSelection();
 
     e.preventDefault();
     e.stopPropagation();
-    e.currentTarget.setPointerCapture(e.pointerId);
+    e.currentTarget.setPointerCapture?.(e.pointerId);
 
     isPointerActiveRef.current = true;
     activePointerIdRef.current = e.pointerId;
@@ -2053,6 +2410,9 @@ export const PageCanvas: React.FC<PageCanvasProps> = ({
   );
 
   const finishPointerInteraction = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (e.pointerType === 'touch') {
+      activeTouchPointerIdsRef.current.delete(e.pointerId);
+    }
     if (!isPointerActiveRef.current || activePointerIdRef.current !== e.pointerId) {
       return;
     }
@@ -2070,7 +2430,12 @@ export const PageCanvas: React.FC<PageCanvasProps> = ({
       const isHighlighter = activeTool === 'highlighter';
       const color = inkColor;
       const size = isHighlighter ? highlighterSize : penSize;
-      const opacity = isHighlighter ? 0.45 : 1;
+      const opacity = isHighlighter ? Number((0.45 * brushOpacity).toFixed(2)) : brushOpacity;
+      const effectiveBrushId = isHighlighter ? 'highlighter' : activeBrushId;
+      const pageLayers = ensurePageLayers(page);
+      const selectedLayerId =
+        activeLayerIdByPage[page.id] ?? pageLayers[pageLayers.length - 1]?.id;
+      const assignedLayerId = page.layers?.length ? selectedLayerId : undefined;
       const snapped = snappedShapeRef.current;
 
       if (snapped) {
@@ -2091,6 +2456,8 @@ export const PageCanvas: React.FC<PageCanvasProps> = ({
           points: pts,
           shape: finalSnapped,
           bounds: computeBoundsFromPoints(pts, size * 0.6, finalSnapped),
+          ...(assignedLayerId ? { layerId: assignedLayerId } : {}),
+          ...(effectiveBrushId !== 'technical' ? { brushId: effectiveBrushId } : {}),
           createdAt: Date.now(),
         };
         commitNewStroke(page.id, stroke);
@@ -2155,18 +2522,28 @@ export const PageCanvas: React.FC<PageCanvasProps> = ({
           const p0 = rawPoints[0];
           rawPoints.push({ ...p0, x: p0.x + 0.25, y: p0.y + 0.25 });
         }
-        const stroke: Stroke = {
+        const symCx = isWhiteboard ? 0 : page.paper.width / 2;
+        const symCy = isWhiteboard ? 0 : page.paper.height / 2;
+        const branches = getSymmetryBranches(rawPoints, symmetryMode, symCx, symCy);
+        const branchStrokes: Stroke[] = branches.map((branchPts) => ({
           id: createId(),
           tool: activeTool,
           color,
           size,
           opacity,
           simulatePressure: activeSimulatePressureRef.current,
-          points: rawPoints,
-          bounds: computeBoundsFromPoints(rawPoints, size * 0.6),
+          points: branchPts,
+          bounds: computeBoundsFromPoints(branchPts, size * 0.6),
+          ...(assignedLayerId ? { layerId: assignedLayerId } : {}),
+          ...(effectiveBrushId !== 'technical' ? { brushId: effectiveBrushId } : {}),
           createdAt: now,
-        };
-        commitNewStroke(page.id, stroke);
+        }));
+        const stroke = branchStrokes[0];
+        if (branchStrokes.length > 1) {
+          commitNewStrokesBatch(page.id, branchStrokes);
+        } else {
+          commitNewStroke(page.id, stroke);
+        }
 
         if (activeTool === 'pen' && isPenTap && hitTextboxOnTap) {
           recentPenTextboxTapsRef.current = [
@@ -2321,8 +2698,6 @@ export const PageCanvas: React.FC<PageCanvasProps> = ({
     }
     if (hit) {
       if (!hit.locked) beginEditTextbox(page.id, hit.id);
-    } else {
-      spawnTextbox({ pageId: page.id, x, y });
     }
   };
 
@@ -2766,3 +3141,5 @@ export const PageCanvas: React.FC<PageCanvasProps> = ({
     </div>
   );
 };
+
+export const PageCanvas = React.memo(PageCanvasInner);

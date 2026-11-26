@@ -1,0 +1,25 @@
+{
+  "name": "Folio Notes",
+  "short_name": "Folio Notes",
+  "description": "Local first digital notebook and infinite whiteboard",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#F2F7FB",
+  "theme_color": "#072D59",
+  "icons": [
+    {
+      "src": "icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

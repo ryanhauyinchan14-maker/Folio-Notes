@@ -89,6 +89,8 @@ export const WhiteboardCanvas = forwardRef<WhiteboardCanvasHandle, WhiteboardCan
 
     const [isPanning, setIsPanning] = useState(false);
     const panCleanupRef = useRef<(() => void) | null>(null);
+    const touchPointersRef = useRef<Map<number, { x: number; y: number }>>(new Map());
+    const pinchGestureRef = useRef<{ dist: number; midX: number; midY: number } | null>(null);
 
     const applyCamera = useCallback(
       (nextCamera: WhiteboardCamera, syncStore = true) => {
@@ -323,6 +325,22 @@ export const WhiteboardCanvas = forwardRef<WhiteboardCanvasHandle, WhiteboardCan
     };
 
     const handlePointerDownCapture = (e: React.PointerEvent<HTMLDivElement>) => {
+      if (e.pointerType === 'touch') {
+        touchPointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+        if (touchPointersRef.current.size === 2) {
+          const pts = Array.from(touchPointersRef.current.values());
+          const rect = viewportRef.current?.getBoundingClientRect();
+          const left = rect?.left ?? 0;
+          const top = rect?.top ?? 0;
+          const dist = Math.hypot(pts[1].x - pts[0].x, pts[1].y - pts[0].y);
+          const midX = (pts[0].x + pts[1].x) / 2 - left;
+          const midY = (pts[0].y + pts[1].y) / 2 - top;
+          pinchGestureRef.current = { dist: Math.max(1, dist), midX, midY };
+          setIsPanning(true);
+        }
+        return;
+      }
+
       const shouldPan = e.button === 1 || (spacePressed && e.button === 0);
       if (!shouldPan) return;
 
@@ -332,6 +350,48 @@ export const WhiteboardCanvas = forwardRef<WhiteboardCanvasHandle, WhiteboardCan
         document.activeElement.blur();
       }
       startPanSession(e.pointerId, e.clientX, e.clientY);
+    };
+
+    const handlePointerMoveCapture = (e: React.PointerEvent<HTMLDivElement>) => {
+      if (e.pointerType !== 'touch' || !touchPointersRef.current.has(e.pointerId)) return;
+      touchPointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (touchPointersRef.current.size < 2 || !pinchGestureRef.current) return;
+
+      e.preventDefault();
+      e.stopPropagation();
+      const pts = Array.from(touchPointersRef.current.values());
+      const rect = viewportRef.current?.getBoundingClientRect();
+      const left = rect?.left ?? 0;
+      const top = rect?.top ?? 0;
+      const dist = Math.max(1, Math.hypot(pts[1].x - pts[0].x, pts[1].y - pts[0].y));
+      const midX = (pts[0].x + pts[1].x) / 2 - left;
+      const midY = (pts[0].y + pts[1].y) / 2 - top;
+
+      const prev = pinchGestureRef.current;
+      const dx = midX - prev.midX;
+      const dy = midY - prev.midY;
+      const ratio = dist / Math.max(1, prev.dist);
+      pinchGestureRef.current = { dist, midX, midY };
+
+      const pannedCamera: WhiteboardCamera = {
+        ...cameraRef.current,
+        offsetX: cameraRef.current.offsetX + dx,
+        offsetY: cameraRef.current.offsetY + dy,
+      };
+      const nextZoom = clampWhiteboardZoom(pannedCamera.zoom * ratio);
+      const zoomedCamera = zoomCameraAtPoint(pannedCamera, nextZoom, midX, midY);
+      applyCamera(zoomedCamera, true);
+    };
+
+    const handleTouchPointerEndCapture = (e: React.PointerEvent<HTMLDivElement>) => {
+      if (e.pointerType !== 'touch') return;
+      touchPointersRef.current.delete(e.pointerId);
+      if (touchPointersRef.current.size < 2) {
+        pinchGestureRef.current = null;
+        if (!panCleanupRef.current) {
+          setIsPanning(false);
+        }
+      }
     };
 
     return (
@@ -344,6 +404,9 @@ export const WhiteboardCanvas = forwardRef<WhiteboardCanvasHandle, WhiteboardCan
         onAuxClickCapture={handleAuxClickCapture}
         onAuxClick={handleAuxClickCapture}
         onPointerDownCapture={handlePointerDownCapture}
+        onPointerMoveCapture={handlePointerMoveCapture}
+        onPointerUpCapture={handleTouchPointerEndCapture}
+        onPointerCancelCapture={handleTouchPointerEndCapture}
         className={`relative flex-1 overflow-hidden select-none ${
           isPanning ? 'cursor-grabbing' : spacePressed ? 'cursor-grab' : ''
         }`}

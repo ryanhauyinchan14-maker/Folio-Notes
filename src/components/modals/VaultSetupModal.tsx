@@ -141,7 +141,7 @@ export const VaultSetupModal: React.FC<VaultSetupModalProps> = ({
         role="dialog"
         aria-modal="true"
         aria-labelledby="vault-setup-title"
-        className="folio-modal-card flex max-h-[92vh] w-full max-w-lg flex-col overflow-hidden rounded-2xl text-[var(--navy-900)]"
+        className="folio-modal-card flex max-h-full w-full max-w-lg flex-col overflow-hidden rounded-2xl text-[var(--navy-900)]"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="folio-modal-header flex items-center justify-between px-5 py-4">

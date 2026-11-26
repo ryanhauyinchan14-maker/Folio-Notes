@@ -1,5 +1,5 @@
 import React from 'react';
-import { BookOpen, Lock, Presentation } from 'lucide-react';
+import { FileText, Lock, Palette, Presentation } from 'lucide-react';
 import { isDarkColor } from '../../canvas/paperRenderer';
 import type { CoverConfig, NotebookMode } from '../../types/notes';
 
@@ -24,6 +24,8 @@ export const CoverPreview: React.FC<CoverPreviewProps> = ({
   className = '',
 }) => {
   const isWhiteboard = mode === 'whiteboard';
+  const isNotes = mode === 'notes';
+  const isSlides = mode === 'slides';
   const hasImage = cover.styleId === 'custom-image' && Boolean(cover.customImageDataUrl);
   const darkSurface = hasImage || isDarkColor(cover.primaryColor);
 
@@ -178,17 +180,44 @@ export const CoverPreview: React.FC<CoverPreviewProps> = ({
                   }`}
                 >
                   <Presentation className="h-3 w-3 text-[#FD6E88]" />
-                  <span>Whiteboard</span>
+                  <span>Infinite Board</span>
+                </span>
+              ) : isNotes ? (
+                <span
+                  data-testid="notes-cover-badge"
+                  className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-bold tracking-wide backdrop-blur-xs ${
+                    darkSurface
+                      ? 'bg-white/18 text-white ring-1 ring-white/25'
+                      : 'bg-[#072D59]/10 text-[#072D59] ring-1 ring-[#072D59]/18'
+                  }`}
+                >
+                  <FileText className="h-3 w-3 text-[#FD6E88]" />
+                  <span>Notes</span>
+                </span>
+              ) : isSlides ? (
+                <span
+                  data-testid="slides-cover-badge"
+                  className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-bold tracking-wide backdrop-blur-xs ${
+                    darkSurface
+                      ? 'bg-white/18 text-white ring-1 ring-white/25'
+                      : 'bg-[#072D59]/10 text-[#072D59] ring-1 ring-[#072D59]/18'
+                  }`}
+                >
+                  <Presentation className="h-3 w-3 text-[#FD6E88]" />
+                  <span>Slides</span>
                 </span>
               ) : (
                 <>
-                  <span />
                   <span
-                    className={`flex h-5 w-5 items-center justify-center rounded-full ${
-                      darkSurface ? 'bg-white/12 text-white/75' : 'bg-[#072D59]/10 text-[#072D59]/70'
+                    data-testid="drawing-cover-badge"
+                    className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-bold tracking-wide backdrop-blur-xs ${
+                      darkSurface
+                        ? 'bg-white/18 text-white ring-1 ring-white/25'
+                        : 'bg-[#072D59]/10 text-[#072D59] ring-1 ring-[#072D59]/18'
                     }`}
                   >
-                    <BookOpen className="h-2.5 w-2.5" />
+                    <Palette className="h-3 w-3 text-[#FD6E88]" />
+                    <span>Drawing</span>
                   </span>
                 </>
               )}

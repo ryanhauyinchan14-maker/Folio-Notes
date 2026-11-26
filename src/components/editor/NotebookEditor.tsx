@@ -42,16 +42,29 @@ import {
   parseShortcutCombo,
   type ShortcutActionId,
 } from '../../utils/shortcuts';
-import { AiSidebar, type PendingLassoAiAction } from './AiSidebar';
+import { SYMMETRY_MODES } from '../../canvas/symmetry';
+import {
+  AiSidebar,
+  AI_SIDEBAR_DEFAULT_WIDTH,
+  AI_SIDEBAR_MIN_WIDTH,
+  AI_SIDEBAR_WIDTH_STORAGE_KEY,
+  computeAiSidebarMaxWidth,
+  type PendingLassoAiAction,
+} from './AiSidebar';
+import { getCssFallbackZoomFactor } from '../../utils/uiZoom';
 import { BottomDocks } from './BottomDocks';
+import { BrushStudioPopover } from './BrushStudioPopover';
 import {
   CanvasContextMenu,
   type CanvasContextMenuState,
 } from './CanvasContextMenu';
+import { ColorStudioPopover } from './ColorStudioPopover';
 import { ContextualSubBar } from './ContextualSubBar';
+import { LayersPopover } from './LayersPopover';
 import { PageCanvas } from './PageCanvas';
 import { PagesDrawer } from './PagesDrawer';
-import { TopHeaderBar } from './TopHeaderBar';
+import { ProcreateSideSliders } from './ProcreateSideSliders';
+import { TopHeaderBar, type StudioPopoverId } from './TopHeaderBar';
 import { WhiteboardCanvas, type WhiteboardCanvasHandle } from './WhiteboardCanvas';
 
 export const NotebookEditor: React.FC = () => {
@@ -72,6 +85,8 @@ export const NotebookEditor: React.FC = () => {
   const selectedImageIds = useAppStore((s) => s.selectedImageIds);
   const croppingImageId = useAppStore((s) => s.croppingImageId);
   const lassoSelection = useAppStore((s) => s.lassoSelection);
+  const symmetryMode = useAppStore((s) => s.symmetryMode);
+  const setSymmetryMode = useAppStore((s) => s.setSymmetryMode);
 
   const setActivePageId = useAppStore((s) => s.setActivePageId);
   const focusSplitPane = useAppStore((s) => s.focusSplitPane);
@@ -114,7 +129,26 @@ export const NotebookEditor: React.FC = () => {
   const deskCustomColor = useAppStore((s) => s.deskCustomColor);
   const dockPosition = useAppStore((s) => s.dockPosition);
   const defaultZoomMode = useAppStore((s) => s.defaultZoomMode);
+  const uiScale = useAppStore((s) => s.uiScale);
   const activatePenSlot = useAppStore((s) => s.activatePenSlot);
+
+  const [aiSidebarWidth, setAiSidebarWidth] = useState<number>(() => {
+    if (typeof window === 'undefined') return AI_SIDEBAR_DEFAULT_WIDTH;
+    try {
+      const saved = Number(window.localStorage.getItem(AI_SIDEBAR_WIDTH_STORAGE_KEY));
+      if (Number.isFinite(saved) && saved >= AI_SIDEBAR_MIN_WIDTH) {
+        return Math.round(saved);
+      }
+    } catch {
+      // Ignore storage access errors
+    }
+    return AI_SIDEBAR_DEFAULT_WIDTH;
+  });
+  const [viewportWindowWidth, setViewportWindowWidth] = useState<number>(() =>
+    typeof window !== 'undefined'
+      ? Math.round((window.innerWidth || 1280) / getCssFallbackZoomFactor())
+      : 1280,
+  );
 
   const [zenMode, setZenMode] = useState(false);
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -136,6 +170,28 @@ export const NotebookEditor: React.FC = () => {
   const [isMiddlePanning, setIsMiddlePanning] = useState(false);
   const [pendingLassoAiAction, setPendingLassoAiAction] =
     useState<PendingLassoAiAction | null>(null);
+  const [activeStudioPopover, setActiveStudioPopover] = useState<StudioPopoverId>(null);
+  const studioPopoverWrapRef = useRef<HTMLDivElement | null>(null);
+
+  const toggleStudioPopover = useCallback((id: Exclude<StudioPopoverId, null>) => {
+    setActiveStudioPopover((prev) => (prev === id ? null : id));
+  }, []);
+
+  useEffect(() => {
+    if (!activeStudioPopover) return;
+    const onDocDown = (e: MouseEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (studioPopoverWrapRef.current?.contains(target)) return;
+      if (target?.closest('[data-testid^="studio-"]')) return;
+      setActiveStudioPopover(null);
+    };
+    document.addEventListener('mousedown', onDocDown);
+    return () => document.removeEventListener('mousedown', onDocDown);
+  }, [activeStudioPopover]);
+
+  useEffect(() => {
+    setActiveStudioPopover(null);
+  }, [activeNotebook?.id]);
 
   const isWhiteboard = activeNotebook?.mode === 'whiteboard';
   const viewportRef = useRef<HTMLDivElement | null>(null);
@@ -152,6 +208,9 @@ export const NotebookEditor: React.FC = () => {
   const imageFileInputRef = useRef<HTMLInputElement | null>(null);
   const pdfFileInputRef = useRef<HTMLInputElement | null>(null);
   const lastCursorPointRef = useRef<{ pageId: string; x: number; y: number } | null>(null);
+  const recordCursorPoint = useCallback((pageId: string, x: number, y: number) => {
+    lastCursorPointRef.current = { pageId, x, y };
+  }, []);
   const internalClipboardFreshRef = useRef(false);
   const lastHandledPasteAtRef = useRef(0);
   const pasteFallbackTimerRef = useRef<number | null>(null);
@@ -165,6 +224,8 @@ export const NotebookEditor: React.FC = () => {
     clientY: number;
   } | null>(null);
   const middlePanCleanupRef = useRef<(() => void) | null>(null);
+  const touchPinchPointersRef = useRef<Map<number, { x: number; y: number }>>(new Map());
+  const touchPinchStartRef = useRef<{ dist: number; zoom: number } | null>(null);
   const panDragRef = useRef<{
     pointerId: number;
     startX: number;
@@ -179,6 +240,66 @@ export const NotebookEditor: React.FC = () => {
   }, [pages, activePageId]);
 
   const activePage = pages[activePageIndex] ?? pages[0] ?? null;
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const updateWindowWidth = () => {
+      setViewportWindowWidth(
+        Math.round((window.innerWidth || 1280) / getCssFallbackZoomFactor()),
+      );
+    };
+    updateWindowWidth();
+    window.addEventListener('resize', updateWindowWidth);
+    return () => window.removeEventListener('resize', updateWindowWidth);
+  }, [uiScale]);
+
+  const aiSidebarMaxWidth = useMemo(
+    () =>
+      computeAiSidebarMaxWidth({
+        containerWidth: viewportWindowWidth,
+        drawerOpen,
+        isWhiteboard: isWhiteboard || Boolean(splitPane),
+        pageCssWidth: activePage ? activePage.paper.width * zoom : 0,
+      }),
+    [activePage, drawerOpen, isWhiteboard, splitPane, viewportWindowWidth, zoom],
+  );
+
+  const effectiveAiSidebarWidth = Math.max(
+    AI_SIDEBAR_MIN_WIDTH,
+    Math.min(aiSidebarWidth, aiSidebarMaxWidth),
+  );
+
+  const handleAiSidebarWidthChange = useCallback(
+    (nextWidth: number) => {
+      const clamped = Math.max(
+        AI_SIDEBAR_MIN_WIDTH,
+        Math.min(Math.round(nextWidth), aiSidebarMaxWidth),
+      );
+      setAiSidebarWidth(clamped);
+      if (typeof window !== 'undefined') {
+        try {
+          window.localStorage.setItem(AI_SIDEBAR_WIDTH_STORAGE_KEY, String(clamped));
+        } catch {
+          // Ignore storage quota errors
+        }
+      }
+    },
+    [aiSidebarMaxWidth],
+  );
+
+  const handleAiSidebarWidthReset = useCallback(() => {
+    setAiSidebarWidth(AI_SIDEBAR_DEFAULT_WIDTH);
+    if (typeof window !== 'undefined') {
+      try {
+        window.localStorage.setItem(
+          AI_SIDEBAR_WIDTH_STORAGE_KEY,
+          String(AI_SIDEBAR_DEFAULT_WIDTH),
+        );
+      } catch {
+        // Ignore storage quota errors
+      }
+    }
+  }, []);
 
   const scrollToPage = useCallback(
     (pageId: string) => {
@@ -703,11 +824,16 @@ export const NotebookEditor: React.FC = () => {
         return true;
       };
 
-      // Progressive Escape: Context Menu -> Exit Text Edit -> Exit Image Crop -> Deselect -> Exit Zen -> Back to Home Shelf
+      // Progressive Escape: Context Menu -> Studio Popover -> Exit Text Edit -> Exit Image Crop -> Deselect -> Exit Zen -> Back to Home Shelf
       if (e.key === 'Escape') {
         if (contextMenu) {
           e.preventDefault();
           setContextMenu(null);
+          return;
+        }
+        if (activeStudioPopover) {
+          e.preventDefault();
+          setActiveStudioPopover(null);
           return;
         }
         if (activeTextboxId && activePage) {
@@ -1078,15 +1204,29 @@ export const NotebookEditor: React.FC = () => {
         setActiveTool('lasso');
         return;
       }
-      if (canMatchKey(sc.toolText)) {
-        e.preventDefault();
-        setActiveTool('text');
-        return;
-      }
       if (canMatchKey(sc.insertImage)) {
         e.preventDefault();
         openImagePicker();
         return;
+      }
+      if (
+        !mod &&
+        !e.altKey &&
+        !e.shiftKey &&
+        !activeTextboxId &&
+        !Object.values(sc).some((combo) => matchesShortcutEvent(e, combo))
+      ) {
+        const lower = e.key.toLowerCase();
+        if (lower === 'i') {
+          e.preventDefault();
+          setActiveTool('eyedropper');
+          return;
+        }
+        if (lower === 'g') {
+          e.preventDefault();
+          setActiveTool('fill');
+          return;
+        }
       }
 
       // Hold Spacebar -> temporary Pan
@@ -1094,74 +1234,6 @@ export const NotebookEditor: React.FC = () => {
         e.preventDefault();
         setSpacePressed(true);
         return;
-      }
-
-      // Instant Auto-Textbox creation on any other printable character key
-      if (!mod && !e.altKey && e.key.length === 1 && e.key !== ' ') {
-        if (activeTextboxId) {
-          const editingPage = pages.find((p) =>
-            (p.textboxes ?? []).some((tb) => tb.id === activeTextboxId),
-          );
-          const activeTb = editingPage?.textboxes?.find((tb) => tb.id === activeTextboxId);
-          if (editingPage && activeTb) {
-            e.preventDefault();
-            updateTextboxLive(editingPage.id, activeTb.id, {
-              text: activeTb.text + e.key,
-            });
-            return;
-          }
-        }
-
-        const cursor = lastCursorPointRef.current;
-        const targetPage =
-          (cursor && pages.find((p) => p.id === cursor.pageId)) ?? activePage;
-        if (!targetPage) return;
-
-        e.preventDefault();
-        let spawnX = Math.round(targetPage.paper.width * 0.25);
-        let spawnY = Math.round(targetPage.paper.height * 0.28);
-
-        if (cursor && cursor.pageId === targetPage.id) {
-          spawnX = cursor.x;
-          spawnY = cursor.y;
-        } else if (isWhiteboard && whiteboardRef.current) {
-          const c = whiteboardRef.current.getVisibleWorldCenter();
-          spawnX = Math.round(c.x);
-          spawnY = Math.round(c.y);
-        } else if (viewportRef.current) {
-          const vpRect = viewportRef.current.getBoundingClientRect();
-          const pageEl = viewportRef.current.querySelector<HTMLElement>(
-            `[data-page-id="${targetPage.id}"]`,
-          );
-          if (pageEl) {
-            const pRect = pageEl.getBoundingClientRect();
-            const visibleCenterX = vpRect.left + vpRect.width / 2;
-            const visibleCenterY = vpRect.top + vpRect.height / 2;
-            spawnX = Math.max(
-              24,
-              Math.min(
-                targetPage.paper.width - 120,
-                ((visibleCenterX - pRect.left) / Math.max(1, pRect.width)) *
-                  targetPage.paper.width,
-              ),
-            );
-            spawnY = Math.max(
-              24,
-              Math.min(
-                targetPage.paper.height - 60,
-                ((visibleCenterY - pRect.top) / Math.max(1, pRect.height)) *
-                  targetPage.paper.height,
-              ),
-            );
-          }
-        }
-
-        spawnTextbox({
-          pageId: targetPage.id,
-          x: spawnX,
-          y: spawnY,
-          initialText: e.key,
-        });
       }
     };
 
@@ -1471,6 +1543,18 @@ export const NotebookEditor: React.FC = () => {
   };
 
   const handleViewportPointerDownCapture = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.pointerType === 'touch') {
+      touchPinchPointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (touchPinchPointersRef.current.size === 2) {
+        const pts = Array.from(touchPinchPointersRef.current.values());
+        const dist = Math.hypot(pts[1].x - pts[0].x, pts[1].y - pts[0].y);
+        touchPinchStartRef.current = {
+          dist: Math.max(1, dist),
+          zoom: useAppStore.getState().zoom,
+        };
+      }
+      return;
+    }
     if (e.button !== 1) return;
     if (document.activeElement instanceof HTMLButtonElement) {
       document.activeElement.blur();
@@ -1478,6 +1562,27 @@ export const NotebookEditor: React.FC = () => {
     e.preventDefault();
     e.stopPropagation();
     startMiddleButtonScrollPan(e.currentTarget, e.pointerId, e.clientX, e.clientY);
+  };
+
+  const handleViewportPointerMoveCapture = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.pointerType !== 'touch' || !touchPinchPointersRef.current.has(e.pointerId)) return;
+    touchPinchPointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (touchPinchPointersRef.current.size < 2 || !touchPinchStartRef.current) return;
+
+    const pts = Array.from(touchPinchPointersRef.current.values());
+    const dist = Math.max(1, Math.hypot(pts[1].x - pts[0].x, pts[1].y - pts[0].y));
+    const ratio = dist / Math.max(1, touchPinchStartRef.current.dist);
+    const minZoom = getNotebookMinZoom(useAppStore.getState().pages);
+    const nextZoom = clampNotebookZoom(touchPinchStartRef.current.zoom * ratio, minZoom);
+    setZoom(nextZoom);
+  };
+
+  const handleViewportTouchEndCapture = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.pointerType !== 'touch') return;
+    touchPinchPointersRef.current.delete(e.pointerId);
+    if (touchPinchPointersRef.current.size < 2) {
+      touchPinchStartRef.current = null;
+    }
   };
 
   const handleViewportPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -1677,9 +1782,7 @@ export const NotebookEditor: React.FC = () => {
             onFocusPage={(pageId) =>
               pane.isFocused ? setActivePageId(pageId) : setSplitPaneActivePageId(pageId)
             }
-            onRecordCursorPoint={(pageId, x, y) => {
-              lastCursorPointRef.current = { pageId, x, y };
-            }}
+            onRecordCursorPoint={recordCursorPoint}
             onContextMenuRequest={setContextMenu}
             onRightClickLassoChange={setRightClickLassoActive}
           />
@@ -1702,6 +1805,9 @@ export const NotebookEditor: React.FC = () => {
             onAuxClickCapture={handleViewportAuxClickCapture}
             onAuxClick={handleViewportAuxClickCapture}
             onPointerDownCapture={handleViewportPointerDownCapture}
+            onPointerMoveCapture={handleViewportPointerMoveCapture}
+            onPointerUpCapture={handleViewportTouchEndCapture}
+            onPointerCancelCapture={handleViewportTouchEndCapture}
             onPointerDown={handleViewportPointerDown}
             onPointerMove={handleViewportPointerMove}
             onPointerUp={handleViewportPointerUp}
@@ -1751,9 +1857,7 @@ export const NotebookEditor: React.FC = () => {
                   onFocusPage={(pageId) =>
                     pane.isFocused ? setActivePageId(pageId) : setSplitPaneActivePageId(pageId)
                   }
-                  onRecordCursorPoint={(pageId, x, y) => {
-                    lastCursorPointRef.current = { pageId, x, y };
-                  }}
+                  onRecordCursorPoint={recordCursorPoint}
                   onContextMenuRequest={setContextMenu}
                   onRightClickLassoChange={setRightClickLassoActive}
                 />
@@ -1808,7 +1912,7 @@ export const NotebookEditor: React.FC = () => {
           {!zenMode && (
             <div
               data-testid="editor-floating-chrome"
-              className="pointer-events-none absolute inset-x-2.5 top-3 z-30 flex flex-col items-center gap-2 sm:inset-x-4"
+              className="pointer-events-none absolute inset-x-2.5 top-[calc(0.75rem+env(safe-area-inset-top,0px))] z-30 flex flex-col items-center gap-2 sm:inset-x-4"
             >
               <TopHeaderBar
                 isWhiteboard={isWhiteboard}
@@ -1816,6 +1920,9 @@ export const NotebookEditor: React.FC = () => {
                 onToggleDrawer={() => setDrawerOpen((o) => !o)}
                 aiSidebarOpen={aiSidebarOpen}
                 onToggleAiSidebar={() => setAiSidebarOpen((o) => !o)}
+                activeStudioPopover={activeStudioPopover}
+                onToggleStudioPopover={toggleStudioPopover}
+                layerCount={activePage?.layers?.length ?? 1}
                 onQuickAddPage={() => void handleQuickAddPage()}
                 onOpenTemplatePicker={() => setTemplatePickerOpen(true)}
                 onImportPdfPages={() => pdfFileInputRef.current?.click()}
@@ -1836,6 +1943,82 @@ export const NotebookEditor: React.FC = () => {
                 onTidyHandwritingAi={() => void handleTidySelectedHandwriting()}
                 tidyingHandwriting={tidyingHandwriting}
               />
+
+              {activeStudioPopover && (
+                <div
+                  ref={studioPopoverWrapRef}
+                  className="pointer-events-auto absolute right-0 top-12 z-40"
+                >
+                  {activeStudioPopover === 'brush' && (
+                    <BrushStudioPopover onClose={() => setActiveStudioPopover(null)} />
+                  )}
+                  {activeStudioPopover === 'layers' && activePage && (
+                    <LayersPopover
+                      activePage={activePage}
+                      onClose={() => setActiveStudioPopover(null)}
+                    />
+                  )}
+                  {activeStudioPopover === 'color' && (
+                    <ColorStudioPopover onClose={() => setActiveStudioPopover(null)} />
+                  )}
+                  {activeStudioPopover === 'symmetry' && (
+                    <div
+                      data-testid="symmetry-popover"
+                      onMouseDown={(e) => e.stopPropagation()}
+                      onPointerDown={(e) => e.stopPropagation()}
+                      className="folio-popover w-64 rounded-2xl p-3 text-[var(--navy-900)]"
+                    >
+                      <div className="mb-2 flex items-center justify-between">
+                        <span className="text-xs font-extrabold tracking-tight">
+                          Symmetry Guides
+                        </span>
+                        <button
+                          type="button"
+                          aria-label="Close Symmetry"
+                          onClick={() => setActiveStudioPopover(null)}
+                          className="folio-press rounded-lg p-1 text-[var(--navy-600)] hover:bg-[var(--surface-tint)]"
+                        >
+                          <X className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+                      <div className="space-y-1">
+                        {SYMMETRY_MODES.map((m) => {
+                          const selected = symmetryMode === m.id;
+                          return (
+                            <button
+                              key={m.id}
+                              type="button"
+                              data-testid={`symmetry-mode-${m.id}`}
+                              aria-pressed={selected}
+                              onClick={() => setSymmetryMode(m.id)}
+                              className={`folio-press flex w-full flex-col rounded-xl border px-2.5 py-1.5 text-left transition ${
+                                selected
+                                  ? 'folio-glass-active border-transparent'
+                                  : 'border-[var(--border-subtle)] bg-[var(--surface-elevated)] hover:bg-[var(--surface-tint)]'
+                              }`}
+                            >
+                              <span className="text-xs font-bold">{m.label}</span>
+                              <span
+                                className={`text-[10px] ${
+                                  selected ? 'text-white/80' : 'text-[var(--navy-600)]'
+                                }`}
+                              >
+                                {m.description}
+                              </span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+
+          {!zenMode && dockPosition !== 'left' && (
+            <div className="pointer-events-none absolute left-3 top-1/2 z-20 -translate-y-1/2">
+              <ProcreateSideSliders />
             </div>
           )}
 
@@ -1853,9 +2036,7 @@ export const NotebookEditor: React.FC = () => {
               page={activePage}
               spacePressed={spacePressed}
               onFocusPage={setActivePageId}
-              onRecordCursorPoint={(pageId, x, y) => {
-                lastCursorPointRef.current = { pageId, x, y };
-              }}
+              onRecordCursorPoint={recordCursorPoint}
               onContextMenuRequest={setContextMenu}
               onRightClickLassoChange={setRightClickLassoActive}
             />
@@ -1876,6 +2057,9 @@ export const NotebookEditor: React.FC = () => {
               onAuxClickCapture={handleViewportAuxClickCapture}
               onAuxClick={handleViewportAuxClickCapture}
               onPointerDownCapture={handleViewportPointerDownCapture}
+              onPointerMoveCapture={handleViewportPointerMoveCapture}
+              onPointerUpCapture={handleViewportTouchEndCapture}
+              onPointerCancelCapture={handleViewportTouchEndCapture}
               onPointerDown={handleViewportPointerDown}
               onPointerMove={handleViewportPointerMove}
               onPointerUp={handleViewportPointerUp}
@@ -1898,8 +2082,8 @@ export const NotebookEditor: React.FC = () => {
                 zenMode
                   ? 'pt-6 sm:pt-10'
                   : dockPosition === 'top'
-                    ? 'pt-[176px] sm:pt-[180px]'
-                    : 'pt-[118px] sm:pt-[124px]'
+                    ? 'pt-[212px] min-[540px]:pt-[176px] sm:pt-[180px]'
+                    : 'pt-[162px] min-[540px]:pt-[118px] sm:pt-[124px]'
               } ${
                 isMiddlePanning
                   ? 'cursor-grabbing'
@@ -1919,9 +2103,7 @@ export const NotebookEditor: React.FC = () => {
                     spacePressed={spacePressed}
                     isPanning={isMiddlePanning}
                     onFocusPage={setActivePageId}
-                    onRecordCursorPoint={(pageId, x, y) => {
-                      lastCursorPointRef.current = { pageId, x, y };
-                    }}
+                    onRecordCursorPoint={recordCursorPoint}
                     onContextMenuRequest={setContextMenu}
                     onRightClickLassoChange={setRightClickLassoActive}
                   />
@@ -1949,6 +2131,10 @@ export const NotebookEditor: React.FC = () => {
               setSettingsOpen(true);
             }}
             onClose={() => setAiSidebarOpen(false)}
+            width={effectiveAiSidebarWidth}
+            maxWidth={aiSidebarMaxWidth}
+            onWidthChange={handleAiSidebarWidthChange}
+            onResetWidth={handleAiSidebarWidthReset}
           />
         )}
       </div>
@@ -1963,6 +2149,7 @@ export const NotebookEditor: React.FC = () => {
           rightClickLassoActive={rightClickLassoActive}
           drawerOpen={drawerOpen}
           aiSidebarOpen={aiSidebarOpen}
+          aiSidebarWidth={effectiveAiSidebarWidth}
           onPrevPage={() => {
             const prev = pages[activePageIndex - 1];
             if (prev) scrollToPage(prev.id);

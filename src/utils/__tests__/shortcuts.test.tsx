@@ -267,17 +267,15 @@ describe('Customizable Keyboard Shortcuts, Persistence, Return to Defaults & Edi
     });
     expect(useAppStore.getState().activeTool).toBe('pen');
 
-    // Old 'p' key is now free and spawns an airtight auto-textbox instead of hijacking tool selection
+    // Old 'p' key no longer activates Pen and never spawns a textbox in Drawing Board Mode
     const beforeTbCount = useAppStore.getState().pages[0].textboxes?.length ?? 0;
     await act(async () => {
       window.dispatchEvent(new KeyboardEvent('keydown', { key: 'p', bubbles: true }));
     });
-    expect(useAppStore.getState().pages[0].textboxes).toHaveLength(beforeTbCount + 1);
-    expect(useAppStore.getState().pages[0].textboxes?.[beforeTbCount].text).toBe('p');
+    expect(useAppStore.getState().pages[0].textboxes ?? []).toHaveLength(beforeTbCount);
 
-    // Exit active textbox editing and restore defaults
+    // Restore defaults
     await act(async () => {
-      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
       useAppStore.getState().setActiveTool('pan');
       useAppStore.getState().resetAllKeyboardShortcuts();
     });

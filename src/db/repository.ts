@@ -3,22 +3,45 @@ import { remapGroupIdsForClones } from '../canvas/selection';
 import { generatePageThumbnail } from '../canvas/thumbnail';
 import { DEFAULT_WHITEBOARD_PAPER } from '../canvas/whiteboard';
 import { DEFAULT_PAPER_CONFIG } from '../constants/papers';
+import {
+  DEFAULT_SLIDE_SIZE_PRESET,
+  createStarterSlideData,
+  resolveSlidePaperConfig,
+} from '../slides/slidePresets';
 import type {
   CoverConfig,
+  DrawingLayer,
   EncryptedPayload,
   Folder,
   Notebook,
   NotebookMode,
+  NoteDocumentData,
   Page,
   PageImage,
   PaperConfig,
   PaperTemplate,
   PdfAsset,
   PdfPageBackground,
+  SlideData,
+  SlideSizePresetId,
   Stroke,
   Textbox,
   TrashedNotebookRecord,
 } from '../types/notes';
+
+export function createDefaultNoteDocumentData(): NoteDocumentData {
+  return {
+    contentJson: { type: 'doc', content: [{ type: 'paragraph' }] },
+    contentHtml: '<p></p>',
+    plainText: '',
+    pageStyle: 'paginated',
+    pageMargins: 'normal',
+    defaultFont: 'Inter, system-ui, sans-serif',
+    headerText: '',
+    footerText: '',
+    showPageNumbers: false,
+  };
+}
 import {
   ensurePageImagesDecoded,
   type FolioNotebookExport,
@@ -121,8 +144,11 @@ export interface LocalStorageSummary {
 
 interface EncryptedPagePayloadShape {
   strokes: Stroke[];
+  layers?: DrawingLayer[];
   textboxes?: Textbox[];
   images?: PageImage[];
+  noteData?: NoteDocumentData | null;
+  slideData?: SlideData | null;
   pdfBackground?: PdfPageBackground | null;
 }
 
@@ -131,8 +157,11 @@ async function decryptPageContent(
   masterKey: CryptoKey,
 ): Promise<{
   strokes: Stroke[];
+  layers?: DrawingLayer[];
   textboxes: Textbox[];
   images: PageImage[];
+  noteData?: NoteDocumentData | null;
+  slideData?: SlideData | null;
   pdfBackground: PdfPageBackground | null;
 }> {
   const decoded = await decryptJsonPayload<Stroke[] | EncryptedPagePayloadShape>(
@@ -144,8 +173,11 @@ async function decryptPageContent(
   }
   return {
     strokes: decoded.strokes ?? [],
+    layers: decoded.layers,
     textboxes: decoded.textboxes ?? [],
     images: decoded.images ?? [],
+    noteData: decoded.noteData ?? null,
+    slideData: decoded.slideData ?? null,
     pdfBackground: decoded.pdfBackground ?? null,
   };
 }
@@ -370,6 +402,7 @@ export class NotesRepository {
   async createNotebook(params: {
     title: string;
     mode?: NotebookMode;
+    slideSizePreset?: SlideSizePresetId;
     folderId: string | null;
     cover: CoverConfig;
     paper?: PaperConfig;
@@ -380,16 +413,42 @@ export class NotesRepository {
     const now = Date.now();
     const notebookId = createId();
     const pageId = createId();
-    const mode: NotebookMode = params.mode === 'whiteboard' ? 'whiteboard' : 'notebook';
+    const mode: NotebookMode =
+      params.mode === 'whiteboard' || params.mode === 'notes' || params.mode === 'slides'
+        ? params.mode
+        : 'notebook';
     const isWhiteboard = mode === 'whiteboard';
+    const isNotes = mode === 'notes';
+    const isSlides = mode === 'slides';
+    const slideSizePreset: SlideSizePresetId | undefined = isSlides
+      ? params.slideSizePreset ?? DEFAULT_SLIDE_SIZE_PRESET
+      : undefined;
     const paper = clonePaper(
-      params.paper ?? (isWhiteboard ? DEFAULT_WHITEBOARD_PAPER : DEFAULT_PAPER_CONFIG),
+      params.paper ??
+        (isSlides
+          ? resolveSlidePaperConfig(slideSizePreset)
+          : isWhiteboard
+            ? DEFAULT_WHITEBOARD_PAPER
+            : DEFAULT_PAPER_CONFIG),
     );
     const { strokes, textboxes, images } = clonePageAnnotations(
       params.initialStrokes,
       params.initialTextboxes,
       params.initialImages,
     );
+    const defaultUntitled = isSlides
+      ? 'Untitled Presentation'
+      : isNotes
+        ? 'Untitled Document'
+        : isWhiteboard
+          ? 'Untitled Whiteboard'
+          : 'Untitled Board';
+    const resolvedTitle = params.title.trim() || defaultUntitled;
+    const noteData = isNotes ? createDefaultNoteDocumentData() : null;
+    const slideData = isSlides
+      ? createStarterSlideData(paper.width, paper.height, resolvedTitle)
+      : null;
+
     const thumbnailDataUrl = generatePageThumbnail(
       paper,
       strokes,
@@ -407,6 +466,8 @@ export class NotesRepository {
       strokes,
       textboxes,
       images,
+      ...(noteData ? { noteData } : {}),
+      ...(slideData ? { slideData } : {}),
       thumbnailDataUrl,
       createdAt: now,
       updatedAt: now,
@@ -414,8 +475,9 @@ export class NotesRepository {
 
     const notebook: Notebook = {
       id: notebookId,
-      title: params.title.trim() || (isWhiteboard ? 'Untitled Whiteboard' : 'Untitled Notebook'),
+      title: resolvedTitle,
       mode,
+      ...(slideSizePreset ? { slideSizePreset } : {}),
       folderId: params.folderId,
       cover: { ...params.cover },
       defaultPaper: clonePaper(paper),
@@ -435,7 +497,12 @@ export class NotesRepository {
 
   async updateNotebook(
     id: string,
-    patch: Partial<Pick<Notebook, 'title' | 'folderId' | 'cover' | 'defaultPaper' | 'lastOpenedPageId'>>,
+    patch: Partial<
+      Pick<
+        Notebook,
+        'title' | 'folderId' | 'cover' | 'defaultPaper' | 'lastOpenedPageId' | 'slideSizePreset'
+      >
+    >,
   ): Promise<void> {
     await this.database.notebooks.update(id, {
       ...patch,
@@ -494,8 +561,11 @@ export class NotesRepository {
         notebookId: newNotebookId,
         paper: clonePaper(src.paper),
         strokes: clonedContent.strokes,
+        ...(src.layers ? { layers: src.layers.map((l) => ({ ...l })) } : {}),
         textboxes: clonedContent.textboxes,
         images: clonedContent.images,
+        ...(src.noteData ? { noteData: structuredClone(src.noteData) } : {}),
+        ...(src.slideData ? { slideData: structuredClone(src.slideData) } : {}),
         pdfBackground: mappedPdfBackground,
         thumbnailDataUrl: src.thumbnailDataUrl,
         createdAt: now,
@@ -682,8 +752,11 @@ export class NotesRepository {
       const encryptedStrokes = await encryptJsonPayload(
         {
           strokes: page.strokes,
+          ...(page.layers ? { layers: page.layers } : {}),
           textboxes: page.textboxes ?? [],
           images: page.images ?? [],
+          ...(page.noteData ? { noteData: page.noteData } : {}),
+          ...(page.slideData ? { slideData: page.slideData } : {}),
           pdfBackground: clonePdfBackground(page.pdfBackground),
         },
         masterKey,
@@ -712,8 +785,11 @@ export class NotesRepository {
         for (const item of encryptedUpdates) {
           await this.database.pages.update(item.pageId, {
             strokes: [],
+            layers: undefined,
             textboxes: [],
             images: [],
+            noteData: null,
+            slideData: null,
             pdfBackground: null,
             encryptedStrokes: item.encryptedStrokes,
             thumbnailDataUrl: undefined,
@@ -747,8 +823,11 @@ export class NotesRepository {
     const decryptedUpdates: {
       pageId: string;
       strokes: Stroke[];
+      layers?: DrawingLayer[];
       textboxes: Textbox[];
       images: PageImage[];
+      noteData?: NoteDocumentData | null;
+      slideData?: SlideData | null;
       pdfBackground: PdfPageBackground | null;
       thumbnailDataUrl?: string;
     }[] = [];
@@ -758,8 +837,11 @@ export class NotesRepository {
         ? await decryptPageContent(page.encryptedStrokes, masterKey)
         : {
             strokes: page.strokes,
+            layers: page.layers,
             textboxes: page.textboxes ?? [],
             images: page.images ?? [],
+            noteData: page.noteData,
+            slideData: page.slideData,
             pdfBackground: clonePdfBackground(page.pdfBackground),
           };
       const thumbnailDataUrl = content.pdfBackground
@@ -774,8 +856,11 @@ export class NotesRepository {
       decryptedUpdates.push({
         pageId: page.id,
         strokes: content.strokes,
+        layers: content.layers,
         textboxes: content.textboxes,
         images: content.images,
+        noteData: content.noteData,
+        slideData: content.slideData,
         pdfBackground: content.pdfBackground,
         thumbnailDataUrl,
       });
@@ -799,8 +884,11 @@ export class NotesRepository {
         for (const item of decryptedUpdates) {
           await this.database.pages.update(item.pageId, {
             strokes: item.strokes,
+            ...(item.layers ? { layers: item.layers } : {}),
             textboxes: item.textboxes,
             images: item.images,
+            ...(item.noteData !== undefined ? { noteData: item.noteData } : {}),
+            ...(item.slideData !== undefined ? { slideData: item.slideData } : {}),
             pdfBackground: item.pdfBackground,
             encryptedStrokes: null,
             thumbnailDataUrl: item.thumbnailDataUrl,
@@ -864,8 +952,11 @@ export class NotesRepository {
         decryptedPages.push({
           ...p,
           strokes: content.strokes,
+          ...(content.layers ? { layers: content.layers } : {}),
           textboxes: content.textboxes,
           images: content.images,
+          ...(content.noteData ? { noteData: content.noteData } : {}),
+          ...(content.slideData ? { slideData: content.slideData } : {}),
           pdfBackground: content.pdfBackground,
         });
       }
@@ -1132,6 +1223,7 @@ export class NotesRepository {
     initialStrokes?: Stroke[];
     initialTextboxes?: Textbox[];
     initialImages?: PageImage[];
+    initialSlideData?: SlideData | null;
     pdfBackground?: PdfPageBackground | null;
     thumbnailDataUrl?: string;
     afterPageId?: string;
@@ -1149,6 +1241,9 @@ export class NotesRepository {
       params.initialImages,
     );
     const pdfBackground = clonePdfBackground(params.pdfBackground);
+    const slideData = params.initialSlideData
+      ? structuredClone(params.initialSlideData)
+      : undefined;
 
     let dbPage: Page;
     let memoryPage: Page;
@@ -1158,7 +1253,13 @@ export class NotesRepository {
         throw new Error('Cannot add page to a locked notebook without the Master Key.');
       }
       const encryptedStrokes = await encryptJsonPayload(
-        { strokes, textboxes, images, pdfBackground },
+        {
+          strokes,
+          textboxes,
+          images,
+          ...(slideData ? { slideData } : {}),
+          pdfBackground,
+        },
         params.masterKey,
       );
       dbPage = {
@@ -1168,6 +1269,7 @@ export class NotesRepository {
         strokes: [],
         textboxes: [],
         images: [],
+        ...(slideData ? { slideData: null } : {}),
         pdfBackground: null,
         encryptedStrokes,
         thumbnailDataUrl: undefined,
@@ -1179,6 +1281,7 @@ export class NotesRepository {
         strokes,
         textboxes,
         images,
+        ...(slideData ? { slideData } : {}),
         pdfBackground,
       };
     } else {
@@ -1192,6 +1295,7 @@ export class NotesRepository {
         strokes,
         textboxes,
         images,
+        ...(slideData ? { slideData } : {}),
         pdfBackground,
         thumbnailDataUrl,
         createdAt: now,
@@ -1236,6 +1340,7 @@ export class NotesRepository {
     let initialStrokes = src.strokes;
     let initialTextboxes = src.textboxes ?? [];
     let initialImages = src.images ?? [];
+    let initialSlideData = src.slideData ? structuredClone(src.slideData) : null;
     let initialPdfBackground = clonePdfBackground(src.pdfBackground);
     if (notebook.isLocked) {
       if (!masterKey) {
@@ -1246,6 +1351,7 @@ export class NotesRepository {
         initialStrokes = content.strokes;
         initialTextboxes = content.textboxes;
         initialImages = content.images;
+        initialSlideData = content.slideData ? structuredClone(content.slideData) : null;
         initialPdfBackground = content.pdfBackground;
       }
     }
@@ -1256,6 +1362,14 @@ export class NotesRepository {
       initialStrokes,
       initialTextboxes,
       initialImages,
+      ...(initialSlideData
+        ? {
+            initialSlideData: {
+              ...initialSlideData,
+              elements: initialSlideData.elements.map((el) => ({ ...el, id: createId() })),
+            },
+          }
+        : {}),
       pdfBackground: initialPdfBackground,
       thumbnailDataUrl: initialPdfBackground ? src.thumbnailDataUrl : undefined,
       afterPageId: pageId,
@@ -1327,7 +1441,7 @@ export class NotesRepository {
     const needsExisting =
       textboxes === undefined ||
       images === undefined ||
-      (notebook?.isLocked && pdfBackground === undefined);
+      Boolean(notebook?.isLocked);
     const existingPage = needsExisting ? await this.database.pages.get(pageId) : undefined;
     let effectiveTextboxes = textboxes ?? existingPage?.textboxes ?? [];
     let effectiveImages = images ?? existingPage?.images ?? [];
@@ -1335,6 +1449,9 @@ export class NotesRepository {
       pdfBackground !== undefined
         ? clonePdfBackground(pdfBackground)
         : clonePdfBackground(existingPage?.pdfBackground);
+    let effectiveLayers = existingPage?.layers;
+    let effectiveNoteData = existingPage?.noteData;
+    let effectiveSlideData = existingPage?.slideData;
 
     const now = Date.now();
     let patch: Partial<Page>;
@@ -1343,27 +1460,31 @@ export class NotesRepository {
       if (!masterKey) {
         throw new Error('Cannot persist strokes for a locked notebook without Master Key.');
       }
-      if (
-        existingPage?.encryptedStrokes &&
-        (pdfBackground === undefined || textboxes === undefined || images === undefined)
-      ) {
+      if (existingPage?.encryptedStrokes) {
         const prev = await decryptPageContent(existingPage.encryptedStrokes, masterKey);
         if (textboxes === undefined) effectiveTextboxes = prev.textboxes;
         if (images === undefined) effectiveImages = prev.images;
         if (pdfBackground === undefined) effectivePdfBackground = prev.pdfBackground;
+        if (prev.layers) effectiveLayers = prev.layers;
+        if (prev.noteData !== undefined) effectiveNoteData = prev.noteData;
+        if (prev.slideData !== undefined) effectiveSlideData = prev.slideData;
       }
 
       const encryptedStrokes = await encryptJsonPayload(
         {
           strokes,
+          ...(effectiveLayers ? { layers: effectiveLayers } : {}),
           textboxes: effectiveTextboxes,
           images: effectiveImages,
+          ...(effectiveNoteData ? { noteData: effectiveNoteData } : {}),
+          ...(effectiveSlideData ? { slideData: effectiveSlideData } : {}),
           pdfBackground: effectivePdfBackground,
         },
         masterKey,
       );
       patch = {
         strokes: [],
+        layers: undefined,
         textboxes: [],
         images: [],
         pdfBackground: null,
@@ -1389,6 +1510,139 @@ export class NotesRepository {
       if (thumbnailDataUrl !== undefined) {
         patch.thumbnailDataUrl = thumbnailDataUrl;
       }
+    }
+
+    await this.database.transaction('rw', this.database.notebooks, this.database.pages, async () => {
+      await this.database.pages.update(pageId, patch);
+      await this.database.notebooks.update(notebookId, { updatedAt: now });
+    });
+  }
+
+  async savePageLayers(
+    notebookId: string,
+    pageId: string,
+    layers: DrawingLayer[],
+    strokes?: Stroke[],
+    masterKey?: CryptoKey | null,
+  ): Promise<void> {
+    const notebook = await this.database.notebooks.get(notebookId);
+    const now = Date.now();
+    let patch: Partial<Page>;
+
+    if (notebook?.isLocked) {
+      if (!masterKey) {
+        throw new Error('Cannot persist layers for a locked notebook without Master Key.');
+      }
+      const existingPage = await this.database.pages.get(pageId);
+      const prev = existingPage?.encryptedStrokes
+        ? await decryptPageContent(existingPage.encryptedStrokes, masterKey)
+        : {
+            strokes: existingPage?.strokes ?? [],
+            textboxes: existingPage?.textboxes ?? [],
+            images: existingPage?.images ?? [],
+            pdfBackground: clonePdfBackground(existingPage?.pdfBackground),
+          };
+      const encryptedStrokes = await encryptJsonPayload(
+        {
+          ...prev,
+          layers,
+          ...(strokes !== undefined ? { strokes } : {}),
+        },
+        masterKey,
+      );
+      patch = {
+        strokes: [],
+        layers: undefined,
+        encryptedStrokes,
+        updatedAt: now,
+      };
+    } else {
+      patch = {
+        layers,
+        ...(strokes !== undefined ? { strokes } : {}),
+        updatedAt: now,
+      };
+    }
+
+    await this.database.transaction('rw', this.database.notebooks, this.database.pages, async () => {
+      await this.database.pages.update(pageId, patch);
+      await this.database.notebooks.update(notebookId, { updatedAt: now });
+    });
+  }
+
+  async saveNoteDocument(
+    notebookId: string,
+    pageId: string,
+    noteData: NoteDocumentData,
+    masterKey?: CryptoKey | null,
+  ): Promise<void> {
+    const notebook = await this.database.notebooks.get(notebookId);
+    const now = Date.now();
+    let patch: Partial<Page>;
+    if (notebook?.isLocked) {
+      if (!masterKey) {
+        throw new Error('Cannot persist note document for a locked notebook without Master Key.');
+      }
+      const existingPage = await this.database.pages.get(pageId);
+      const prev = existingPage?.encryptedStrokes
+        ? await decryptPageContent(existingPage.encryptedStrokes, masterKey)
+        : { strokes: [], textboxes: [], images: [], pdfBackground: null };
+      const encryptedStrokes = await encryptJsonPayload(
+        { ...prev, noteData },
+        masterKey,
+      );
+      patch = {
+        noteData: null,
+        encryptedStrokes,
+        updatedAt: now,
+      };
+    } else {
+      patch = {
+        noteData,
+        updatedAt: now,
+      };
+    }
+
+    await this.database.transaction('rw', this.database.notebooks, this.database.pages, async () => {
+      await this.database.pages.update(pageId, patch);
+      await this.database.notebooks.update(notebookId, { updatedAt: now });
+    });
+  }
+
+  async saveSlidePage(
+    notebookId: string,
+    pageId: string,
+    slideData: SlideData,
+    paper?: PaperConfig,
+    masterKey?: CryptoKey | null,
+  ): Promise<void> {
+    const notebook = await this.database.notebooks.get(notebookId);
+    const now = Date.now();
+    let patch: Partial<Page>;
+    if (notebook?.isLocked) {
+      if (!masterKey) {
+        throw new Error('Cannot persist slide for a locked deck without Master Key.');
+      }
+      const existingPage = await this.database.pages.get(pageId);
+      const prev = existingPage?.encryptedStrokes
+        ? await decryptPageContent(existingPage.encryptedStrokes, masterKey)
+        : { strokes: [], textboxes: [], images: [], pdfBackground: null };
+      const encryptedStrokes = await encryptJsonPayload(
+        { ...prev, slideData },
+        masterKey,
+      );
+      patch = {
+        ...(paper ? { paper: clonePaper(paper) } : {}),
+        slideData: null,
+        encryptedStrokes,
+        updatedAt: now,
+      };
+    } else {
+      patch = {
+        ...(paper ? { paper: clonePaper(paper) } : {}),
+        slideData,
+        updatedAt: now,
+      };
     }
 
     await this.database.transaction('rw', this.database.notebooks, this.database.pages, async () => {
@@ -1562,7 +1816,11 @@ export class NotesRepository {
     });
 
     const importedMode: NotebookMode =
-      archive.notebook.mode === 'whiteboard' ? 'whiteboard' : 'notebook';
+      archive.notebook.mode === 'whiteboard' ||
+      archive.notebook.mode === 'notes' ||
+      archive.notebook.mode === 'slides'
+        ? archive.notebook.mode
+        : 'notebook';
     const isImportedWhiteboard = importedMode === 'whiteboard';
 
     const pages: Page[] = archive.pages.map((srcPage, idx) => {
@@ -1587,8 +1845,11 @@ export class NotesRepository {
         notebookId,
         paper,
         strokes,
+        ...(srcPage.layers ? { layers: srcPage.layers } : {}),
         textboxes,
         images,
+        ...(srcPage.noteData ? { noteData: srcPage.noteData } : {}),
+        ...(srcPage.slideData ? { slideData: srcPage.slideData } : {}),
         pdfBackground: mappedPdfBg,
         encryptedStrokes: null,
         thumbnailDataUrl,
@@ -1601,6 +1862,9 @@ export class NotesRepository {
       id: notebookId,
       title: archive.notebook.title.trim() || 'Imported Notebook',
       mode: importedMode,
+      ...(archive.notebook.slideSizePreset
+        ? { slideSizePreset: archive.notebook.slideSizePreset }
+        : {}),
       folderId: targetFolderId,
       cover: { ...archive.notebook.cover },
       defaultPaper: clonePaper(archive.notebook.defaultPaper ?? pages[0]?.paper ?? DEFAULT_PAPER_CONFIG),
@@ -1776,8 +2040,11 @@ export class NotesRepository {
           notebookId: nbId,
           paper,
           strokes,
+          ...(p.layers ? { layers: p.layers } : {}),
           textboxes,
           images,
+          ...(p.noteData ? { noteData: p.noteData } : {}),
+          ...(p.slideData ? { slideData: p.slideData } : {}),
           pdfBackground: mappedPdfBg,
           encryptedStrokes: null,
           thumbnailDataUrl:
@@ -1793,6 +2060,8 @@ export class NotesRepository {
       notebooksToInsert.push({
         id: nbId,
         title: nb.title.trim() || 'Untitled Notebook',
+        ...(nb.mode ? { mode: nb.mode } : {}),
+        ...(nb.slideSizePreset ? { slideSizePreset: nb.slideSizePreset } : {}),
         folderId: nb.folderId ? folderIdMap.get(nb.folderId) ?? null : null,
         cover: { ...nb.cover },
         defaultPaper: clonePaper(nb.defaultPaper ?? DEFAULT_PAPER_CONFIG),

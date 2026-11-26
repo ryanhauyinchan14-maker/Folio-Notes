@@ -154,7 +154,7 @@ export const KeyboardShortcutsModal: React.FC<KeyboardShortcutsModalProps> = ({
         aria-modal="true"
         aria-labelledby="shortcuts-modal-title"
         data-testid="keyboard-shortcuts-modal"
-        className="folio-modal-card flex max-h-[90vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl text-[var(--navy-900)]"
+        className="folio-modal-card flex max-h-full w-full max-w-2xl flex-col overflow-hidden rounded-2xl text-[var(--navy-900)]"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}

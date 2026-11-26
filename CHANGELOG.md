@@ -1,6 +1,47 @@
 # Changelog
 
-All notable changes to **Folio Notes** are documented in this file.
+All notable changes to **Folio Notes / Folio Studio** are documented in this file.
+
+## [2.0.0] - 2026-11-25
+
+### Added
+- **3-Mode Studio Architecture & Home Shelf Workspace Rail:**
+  - Reorganized the library with a left workspace switcher (`All`, `Drawing Board`, `Notes`, `Slides`), one-click mode creation cards, and distinct mode badges across all notebook covers.
+- **Google Docs-Inspired Notes Mode:**
+  - Full TipTap rich-text document studio with headings (`H1–H3`), formatting toolbar (font family, size, color, highlight, alignment, line spacing), checklists, tables, inline images, collapsible Callout blocks, KaTeX math blocks, `/` slash command menu, document Outline sidebar, live word/reading-time count, document AI assistant panel, and PDF/Markdown/HTML/Word export.
+- **Canva-Inspired Slides Mode (16:9 Default + Custom Size):**
+  - Widescreen `16:9` (`1920×1080`) default slide deck with Canva-style **Custom Size** modal (`16:9`, `4:3`, `1:1`, `9:16`, `A4`, custom `W × H`, aspect lock, proportional element scaling), 6-tab left rail (`Layouts`, `Elements`, `Text`, `Uploads`, `Backgrounds`, `Draw`), direct-manipulation canvas stage (drag, snap guides, 8 resize handles, rotation + 15° snap), bottom filmstrip + speaker notes, full-screen Present Mode with laser pointer, PDF export, and PNG ZIP export.
+- **Procreate-Inspired Drawing Board Mode Upgrades:**
+  - Added **Brush Studio** (`Technical Pen`, `Fountain Nib`, `Graphite Pencil`, `Soft Airbrush`, `Watercolor Wash`, `Studio Marker`, `Monoline`, `Highlighter`) with Size, Opacity, and Streamline stabilization plus collapsible left-edge quick sliders.
+  - Added **Layers Panel** with per-layer visibility, opacity, blend modes (`Normal`, `Multiply`, `Screen`, `Overlay`, `Darken`, `Lighten`), Lock, Alpha Lock, duplicate, reorder, merge down, clear, and AES-GCM Vault encryption persistence.
+  - Added **Color Studio** interactive HSB square + hue bar + harmonies + saved palettes + pixel **Eyedropper** (`I`), **ColorDrop Fill** (`G`), **Symmetry Guides** (`Vertical`, `Horizontal`, `Quadrant`, `Radial`), and **90° Rotate / Flip** transforms on selected strokes.
+
+### Changed
+- Removed Drawing Board Mode's `Text` dock tool, `T` shortcut, and accidental/printable-key textbox spawning so Drawing Board Mode behaves as a pure distraction-free illustration studio while keeping rich text in **Notes Mode** and **Slides Mode**.
+
+## [1.5.1] - 2026-11-25
+
+### Changed
+- **Hardware, Memory & GPU Optimization (Zero Behavioral Change):**
+  - **GPU / WebGL:** Immediately release the `canUseWebGL()` probe context via `WEBGL_lose_context`, pause offscreen hero WebGL shaders automatically via `IntersectionObserver`, and tuned shader `maxPixelCount` budgets (`800×450` hero, `240×480` nav capsule, `640×320` accent) while keeping identical visuals and `webgl` mode.
+  - **Canvas VRAM Virtualization:** Extended offscreen viewport culling (`IntersectionObserver`, `1000px` overscan) to all standard notebook pages so far-offscreen pages release their `staticCanvas` / `activeCanvas` backing stores until scrolled near, lazily allocate `activeCanvas` only while actively drawing/hovering/transforming, cap canvas backing DPR at `2`, and release canvas buffers on unmount.
+  - **CPU & RAM Hygiene:** Added bounded 48-entry LRU eviction + notebook-close cleanup to the decoded image element cache, eliminated per-frame `StrokePoint[]` array copies in `getFreehandStrokeOutline`, skipped unnecessary `Set`/`Array.sort` allocations on empty render passes, stabilized `onRecordCursorPoint`, and memoized `PageCanvas`, `PaperShaderBackdrop`, and `BookTiltCard`.
+  - **Faster Startup & Smaller Parse Footprint:** Switched `pdfjs-dist` to lazy on-demand dynamic loading and added Vite vendor chunk splitting (`vendor-pdfjs`, `vendor-pdflib`, `vendor-katex`, `vendor-genai`, `vendor-shaders`, `vendor-storage`, `vendor-react`).
+
+## [1.5.0] - 2026-11-25
+
+### Added
+- **Universal Cross-Platform Support (Windows, macOS, Linux, iOS, iPadOS, Android & Web):**
+  - Added full PWA support (`manifest.webmanifest`, offline Service Worker `sw.js`, iOS `apple-touch-icon` & safe-area viewport handling, and an in-app `Install App` prompt when installable on Chrome/Edge/Android).
+  - Added cross-platform desktop packaging targets in `package.json` and `.github/workflows/release.yml` for **macOS** (`.dmg` + `.zip` on Apple Silicon `arm64` & Intel `x64`), **Linux** (`.AppImage` + `.deb`), and **Windows** (`.exe` NSIS + Portable), plus GitHub Pages deployment (`.github/workflows/pages.yml`) and 3-OS CI verification (`windows-latest`, `macos-latest`, `ubuntu-latest`).
+  - Added macOS (`⌘`) application menu support and cross-platform OS font discovery (`fc-list` + font directory scanning on Linux and `/System/Library/Fonts` + `Library/Fonts` on macOS).
+  - Added mobile multi-touch gestures: two-finger pinch-to-zoom and pan on both Notebooks and Infinite Whiteboards, a two-finger touch palm/pinch guard to prevent stray strokes on tablets/phones, and responsive `< 400px` top bar layout.
+
+## [1.4.21] - 2026-11-25
+
+### Fixed
+- **Thinking-Model & Thin-Pen Live Handwriting Reliability:** Raised live OCR `maxTokens` (`2048`) and used `max_completion_tokens` for GPT-5/o-series models so reasoning models never return empty strings on short math chunks (`y = 5`, `50`), boosted thin-pen contrast on OCR snapshots without altering ink style, stripped accidental wrapper quotes/backticks, and tightened `EMPTY` criteria.
+- **Adjacent-Stroke Sweep, Serial Queue & Auto-Retry:** Added `expandClusterWithAdjacentUntidiedStrokes` to pull stranded same-line strokes (`y = 5` next to `00x²`) into the active flush, serialized live OCR requests with automatic single-retry backoff on transient failures, and prevented Hold-to-Snap from converting small pen glyphs mid-word.
 
 ## [1.4.20] - 2026-11-24
 

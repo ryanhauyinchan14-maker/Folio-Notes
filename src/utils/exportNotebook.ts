@@ -27,14 +27,18 @@ import { db } from '../db/database';
 import type {
   BoundingBox,
   CoverConfig,
+  DrawingLayer,
   Folder,
   Notebook,
   NotebookMode,
+  NoteDocumentData,
   Page,
   PageImage,
   PaperConfig,
   PaperTemplate,
   PdfPageBackground,
+  SlideData,
+  SlideSizePresetId,
   Stroke,
   Textbox,
 } from '../types/notes';
@@ -91,14 +95,18 @@ export interface FolioNotebookExport {
   notebook: {
     title: string;
     mode?: NotebookMode;
+    slideSizePreset?: SlideSizePresetId;
     cover: CoverConfig;
     defaultPaper: PaperConfig;
   };
   pages: Array<{
     paper: PaperConfig;
     strokes: Stroke[];
+    layers?: DrawingLayer[];
     textboxes: Textbox[];
     images: PageImage[];
+    noteData?: NoteDocumentData | null;
+    slideData?: SlideData | null;
     pdfBackground?: PdfPageBackground | null;
   }>;
   pdfAssets?: SerializedPdfAsset[];
@@ -1269,14 +1277,18 @@ export function buildFolioNotebookExport(
     notebook: {
       title: notebook.title,
       ...(notebook.mode ? { mode: notebook.mode } : {}),
+      ...(notebook.slideSizePreset ? { slideSizePreset: notebook.slideSizePreset } : {}),
       cover: { ...notebook.cover },
       defaultPaper: { ...notebook.defaultPaper },
     },
     pages: pages.map((p) => ({
       paper: { ...p.paper },
       strokes: p.strokes.map((s) => ({ ...s, points: [...s.points] })),
+      ...(p.layers ? { layers: p.layers.map((l) => ({ ...l })) } : {}),
       textboxes: (p.textboxes ?? []).map((tb) => ({ ...tb })),
       images: (p.images ?? []).map((im) => ({ ...im, crop: { ...im.crop } })),
+      ...(p.noteData ? { noteData: p.noteData } : {}),
+      ...(p.slideData ? { slideData: p.slideData } : {}),
       ...(p.pdfBackground ? { pdfBackground: { ...p.pdfBackground } } : {}),
     })),
   };

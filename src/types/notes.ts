@@ -54,6 +54,34 @@ export interface BoundingBox {
   maxY: number;
 }
 
+export type BrushPresetId =
+  | 'technical'
+  | 'fountain'
+  | 'pencil'
+  | 'airbrush'
+  | 'watercolor'
+  | 'marker'
+  | 'monoline'
+  | 'highlighter';
+
+export type LayerBlendMode =
+  | 'source-over'
+  | 'multiply'
+  | 'screen'
+  | 'overlay'
+  | 'darken'
+  | 'lighten';
+
+export interface DrawingLayer {
+  id: string;
+  name: string;
+  visible: boolean;
+  opacity: number;
+  blendMode: LayerBlendMode;
+  locked: boolean;
+  alphaLock: boolean;
+}
+
 export interface Stroke {
   id: string;
   tool: 'pen' | 'highlighter';
@@ -65,6 +93,8 @@ export interface Stroke {
   shape?: ShapeGeometry;
   bounds: BoundingBox;
   isTidied?: boolean;
+  layerId?: string;
+  brushId?: BrushPresetId;
   groupId?: string;
   locked?: boolean;
   createdAt: number;
@@ -139,12 +169,29 @@ export interface VaultMetadata {
   recoveryWrapped: WrappedKeyBlob;
 }
 
-export type NotebookMode = 'notebook' | 'whiteboard';
+export type NotebookMode = 'notebook' | 'whiteboard' | 'notes' | 'slides';
+
+export type WorkspaceCategory = 'drawing' | 'notes' | 'slides';
+
+export function getWorkspaceCategory(mode?: NotebookMode): WorkspaceCategory {
+  if (mode === 'notes') return 'notes';
+  if (mode === 'slides') return 'slides';
+  return 'drawing';
+}
+
+export type SlideSizePresetId =
+  | '16:9'
+  | '4:3'
+  | '1:1'
+  | '9:16'
+  | 'a4-landscape'
+  | 'custom';
 
 export interface Notebook {
   id: string;
   title: string;
   mode?: NotebookMode;
+  slideSizePreset?: SlideSizePresetId;
   folderId: string | null;
   cover: CoverConfig;
   defaultPaper: PaperConfig;
@@ -198,13 +245,115 @@ export interface PdfAsset {
   createdAt: number;
 }
 
+export type NotePageStyle = 'paginated' | 'pageless';
+export type NotePageMargins = 'narrow' | 'normal' | 'wide';
+
+export interface NoteDocumentData {
+  contentJson: Record<string, unknown>;
+  contentHtml: string;
+  plainText: string;
+  pageStyle: NotePageStyle;
+  pageMargins: NotePageMargins;
+  defaultFont: string;
+  headerText?: string;
+  footerText?: string;
+  showPageNumbers?: boolean;
+}
+
+export interface SlideBackground {
+  kind: 'solid' | 'gradient' | 'image';
+  color?: string;
+  gradient?: string;
+  imageDataUrl?: string;
+}
+
+export type SlideTransition = 'none' | 'fade' | 'slide' | 'zoom';
+
+export type SlideShapeKind =
+  | 'rect'
+  | 'rounded-rect'
+  | 'circle'
+  | 'triangle'
+  | 'arrow'
+  | 'line'
+  | 'star'
+  | 'pill'
+  | 'speech-bubble'
+  | 'divider';
+
+export interface SlideElementBase {
+  id: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  rotation: number;
+  opacity: number;
+  zIndex: number;
+  locked?: boolean;
+  groupId?: string;
+}
+
+export interface SlideTextElement extends SlideElementBase {
+  kind: 'text';
+  text: string;
+  fontFamily: string;
+  fontSize: number;
+  bold: boolean;
+  italic: boolean;
+  underline?: boolean;
+  strikethrough?: boolean;
+  color: string;
+  backgroundColor?: string;
+  align: 'left' | 'center' | 'right';
+  lineHeight: number;
+  padding: number;
+  borderRadius?: number;
+}
+
+export interface SlideShapeElement extends SlideElementBase {
+  kind: 'shape';
+  shape: SlideShapeKind;
+  fillColor: string;
+  strokeColor: string;
+  strokeWidth: number;
+  cornerRadius: number;
+  shadow?: boolean;
+}
+
+export interface SlideImageElement extends SlideElementBase {
+  kind: 'image';
+  dataUrl: string;
+  naturalWidth: number;
+  naturalHeight: number;
+  crop: ImageCropRect;
+  borderRadius: number;
+  flipX: boolean;
+  flipY: boolean;
+  objectFit: 'cover' | 'contain' | 'fill';
+  shadow?: boolean;
+}
+
+export type SlideElement = SlideTextElement | SlideShapeElement | SlideImageElement;
+
+export interface SlideData {
+  elements: SlideElement[];
+  background: SlideBackground;
+  speakerNotes: string;
+  transition: SlideTransition;
+  inkStrokes?: Stroke[];
+}
+
 export interface Page {
   id: string;
   notebookId: string;
   paper: PaperConfig;
   strokes: Stroke[];
+  layers?: DrawingLayer[];
   textboxes?: Textbox[];
   images?: PageImage[];
+  noteData?: NoteDocumentData | null;
+  slideData?: SlideData | null;
   pdfBackground?: PdfPageBackground | null;
   encryptedStrokes?: EncryptedPayload | null;
   thumbnailDataUrl?: string;
@@ -236,7 +385,15 @@ export interface PaperTemplate {
   updatedAt: number;
 }
 
-export type ToolType = 'pen' | 'highlighter' | 'eraser' | 'lasso' | 'text' | 'pan';
+export type ToolType =
+  | 'pen'
+  | 'highlighter'
+  | 'eraser'
+  | 'lasso'
+  | 'text'
+  | 'pan'
+  | 'fill'
+  | 'eyedropper';
 
 export interface BuiltInPaperVariant {
   id: string;

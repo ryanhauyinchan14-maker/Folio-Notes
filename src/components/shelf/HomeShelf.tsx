@@ -4,6 +4,7 @@ import {
   Copy,
   Download,
   Edit3,
+  FileText,
   FileUp,
   Folder as FolderIcon,
   FolderPlus,
@@ -12,6 +13,7 @@ import {
   Lock,
   LockOpen,
   MoreVertical,
+  Palette,
   Pencil,
   Plus,
   Presentation,
@@ -29,22 +31,30 @@ import { COVER_PRESETS } from '../../constants/covers';
 import {
   ALL_BUILT_IN_PAPER_VARIANTS,
   ALL_BUILT_IN_WHITEBOARD_VARIANTS,
+  DEFAULT_PAPER_CONFIG,
   formatPaperPatternLabel,
 } from '../../constants/papers';
 import { formatTrashTimeRemaining, repository } from '../../db/repository';
+import { DEFAULT_SLIDE_PAPER, DEFAULT_SLIDE_SIZE_PRESET } from '../../slides/slidePresets';
 import { useAppStore } from '../../store/useAppStore';
 import { useUpdaterStore } from '../../store/useUpdaterStore';
-import type {
-  Folder,
-  Notebook,
-  NotebookMode,
-  Page,
-  PageImage,
-  PaperConfig,
-  Stroke,
-  Textbox,
+import {
+  type Folder,
+  type Notebook,
+  type NotebookMode,
+  type Page,
+  type PageImage,
+  type PaperConfig,
+  type Stroke,
+  type Textbox,
+  getWorkspaceCategory,
 } from '../../types/notes';
 import { isPdfFile } from '../../utils/pdfEngine';
+import {
+  getCanInstallPwa,
+  subscribePwaInstall,
+  triggerPwaInstall,
+} from '../../utils/pwa';
 import { hasVaultSetup } from '../../utils/vaultCrypto';
 import { PaperShaderBackdrop } from '../common/PaperShaderBackdrop';
 import { CommandPaletteModal } from '../modals/CommandPaletteModal';
@@ -70,6 +80,8 @@ function formatRelativeDate(ts: number): string {
 
 export const HomeShelf: React.FC = () => {
   const currentFolderId = useAppStore((s) => s.currentFolderId);
+  const activeWorkspaceFilter = useAppStore((s) => s.activeWorkspaceFilter);
+  const setActiveWorkspaceFilter = useAppStore((s) => s.setActiveWorkspaceFilter);
   const folders = useAppStore((s) => s.folders);
   const notebooks = useAppStore((s) => s.notebooks);
   const breadcrumbs = useAppStore((s) => s.breadcrumbs);
@@ -127,6 +139,7 @@ export const HomeShelf: React.FC = () => {
   const shelfDragDepthRef = useRef(0);
   const openingNotebookRef = useRef(false);
   const [openingNotebookId, setOpeningNotebookId] = useState<string | null>(null);
+  const [canInstallPwa, setCanInstallPwa] = useState(() => getCanInstallPwa());
   const [shelfDropActive, setShelfDropActive] = useState(false);
   const [importNotice, setImportNotice] = useState<{
     kind: 'success' | 'error';
@@ -153,6 +166,11 @@ export const HomeShelf: React.FC = () => {
       active = false;
     };
   }, [folders, notebooks, commandPaletteOpen]);
+
+  useEffect(() => {
+    setCanInstallPwa(getCanInstallPwa());
+    return subscribePwaInstall(() => setCanInstallPwa(getCanInstallPwa()));
+  }, []);
 
   useEffect(() => {
     const onGlobalKeyDown = (e: KeyboardEvent) => {
@@ -441,6 +459,31 @@ export const HomeShelf: React.FC = () => {
     });
   };
 
+  const handleQuickCreateNote = async () => {
+    const presetCover = (COVER_PRESETS[1] ?? COVER_PRESETS[0]).cover;
+    await createNotebook({
+      title: 'Untitled Document',
+      mode: 'notes',
+      folderId: currentFolderId,
+      cover: { ...presetCover },
+      paper: { ...DEFAULT_PAPER_CONFIG },
+      openImmediately: true,
+    });
+  };
+
+  const handleQuickCreateSlides = async () => {
+    const presetCover = (COVER_PRESETS[2] ?? COVER_PRESETS[0]).cover;
+    await createNotebook({
+      title: 'Untitled Presentation',
+      mode: 'slides',
+      slideSizePreset: DEFAULT_SLIDE_SIZE_PRESET,
+      folderId: currentFolderId,
+      cover: { ...presetCover },
+      paper: { ...DEFAULT_SLIDE_PAPER },
+      openImmediately: true,
+    });
+  };
+
   const handleLaunchTemplate = async (
     title: string,
     paper: PaperConfig,
@@ -481,13 +524,17 @@ export const HomeShelf: React.FC = () => {
 
   const filteredNotebooks = useMemo(() => {
     const q = query.trim().toLowerCase();
-    const list = q ? notebooks.filter((n) => n.title.toLowerCase().includes(q)) : notebooks;
+    const byMode =
+      activeWorkspaceFilter === 'all'
+        ? notebooks
+        : notebooks.filter((n) => getWorkspaceCategory(n.mode) === activeWorkspaceFilter);
+    const list = q ? byMode.filter((n) => n.title.toLowerCase().includes(q)) : byMode;
     return [...list].sort((a, b) => {
       if (sortMode === 'title') return a.title.localeCompare(b.title);
       if (sortMode === 'created') return b.createdAt - a.createdAt;
       return b.updatedAt - a.updatedAt;
     });
-  }, [notebooks, query, sortMode]);
+  }, [activeWorkspaceFilter, notebooks, query, sortMode]);
 
   const filteredTrashedNotebooks = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -561,10 +608,11 @@ export const HomeShelf: React.FC = () => {
 
   const librarySummary = useMemo(() => {
     const source = allNotebooks.length > 0 ? allNotebooks : notebooks;
-    const whiteboardCount = source.filter((n) => n.mode === 'whiteboard').length;
-    const notebookCount = source.length - whiteboardCount;
+    const drawingCount = source.filter((n) => getWorkspaceCategory(n.mode) === 'drawing').length;
+    const notesCount = source.filter((n) => n.mode === 'notes').length;
+    const slidesCount = source.filter((n) => n.mode === 'slides').length;
     const totalPages = source.reduce((acc, n) => acc + Math.max(1, n.pageOrder.length), 0);
-    return { notebookCount, whiteboardCount, totalPages };
+    return { drawingCount, notesCount, slidesCount, totalPages };
   }, [allNotebooks, notebooks]);
 
   const anyModalOpen =
@@ -637,12 +685,13 @@ export const HomeShelf: React.FC = () => {
       <nav
         data-testid="home-icon-rail"
         aria-label="Primary workspace navigation"
-        className="folio-nav-capsule fixed bottom-3 left-1/2 z-30 flex max-w-[calc(100vw-24px)] -translate-x-1/2 items-center gap-1 overflow-hidden rounded-full px-3 py-1.5 text-[var(--navy-900)] md:bottom-auto md:left-4 md:top-1/2 md:w-[64px] md:-translate-y-1/2 md:translate-x-0 md:flex-col md:gap-2 md:rounded-[24px] md:p-2.5"
+        className="folio-nav-capsule fixed bottom-[calc(0.75rem+env(safe-area-inset-bottom,0px))] left-1/2 z-30 flex max-w-[calc(100vw-24px)] -translate-x-1/2 items-center gap-1 overflow-hidden rounded-full px-3 py-1.5 text-[var(--navy-900)] md:bottom-auto md:left-4 md:top-1/2 md:w-[64px] md:-translate-y-1/2 md:translate-x-0 md:flex-col md:gap-2 md:rounded-[24px] md:p-2.5"
         onClick={(e) => e.stopPropagation()}
       >
         <PaperShaderBackdrop
           variant="hero"
           paused={anyModalOpen}
+          maxPixelCount={240 * 480}
           data-testid="home-rail-shader"
         />
         <div
@@ -650,25 +699,79 @@ export const HomeShelf: React.FC = () => {
           className="folio-rail-scrim pointer-events-none absolute inset-0 z-[1]"
         />
 
-        {/* Home */}
+        {/* All */}
         <button
           type="button"
           data-testid="rail-nav-home"
-          aria-label="Home"
-          title="Home"
+          aria-label="All Workspaces"
+          title="All Workspaces"
           onClick={() => {
             setQuery('');
+            setActiveWorkspaceFilter('all');
             void navigateToFolder(null);
           }}
-          className={`folio-press relative z-10 flex flex-col items-center justify-center rounded-xl px-2.5 py-1.5 md:h-11 md:w-11 md:px-0 md:py-0 ${
-            currentFolderId === null
+          className={`folio-press relative z-10 flex flex-col items-center justify-center rounded-xl px-2 py-1.5 md:h-10 md:w-11 md:px-0 md:py-0 ${
+            activeWorkspaceFilter === 'all' && currentFolderId === null
               ? 'bg-white/88 text-[var(--navy-900)] shadow-xs ring-1 ring-white/85 backdrop-blur-sm'
               : 'text-[var(--navy-900)]/85 drop-shadow-[0_1px_1px_rgba(255,255,255,0.65)] hover:bg-white/70 hover:text-[var(--navy-900)]'
           }`}
         >
           <Home className="h-4.5 w-4.5" />
-          <span className="mt-0.5 text-[9px] font-semibold md:hidden">Home</span>
+          <span className="mt-0.5 text-[9px] font-semibold md:hidden">All</span>
         </button>
+
+        {/* Drawing Board Mode */}
+        <button
+          type="button"
+          data-testid="rail-nav-drawing"
+          aria-label="Drawing Board Mode"
+          title="Drawing Boards (Procreate-style)"
+          onClick={() => setActiveWorkspaceFilter('drawing')}
+          className={`folio-press relative z-10 flex flex-col items-center justify-center rounded-xl px-2 py-1.5 md:h-10 md:w-11 md:px-0 md:py-0 ${
+            activeWorkspaceFilter === 'drawing'
+              ? 'bg-white/88 text-[var(--navy-900)] shadow-xs ring-1 ring-white/85 backdrop-blur-sm'
+              : 'text-[var(--navy-900)]/85 drop-shadow-[0_1px_1px_rgba(255,255,255,0.65)] hover:bg-white/70 hover:text-[var(--navy-900)]'
+          }`}
+        >
+          <Palette className="h-4.5 w-4.5" />
+          <span className="mt-0.5 text-[9px] font-semibold md:hidden">Draw</span>
+        </button>
+
+        {/* Notes Mode */}
+        <button
+          type="button"
+          data-testid="rail-nav-notes"
+          aria-label="Notes Mode"
+          title="Notes Mode (Docs-style)"
+          onClick={() => setActiveWorkspaceFilter('notes')}
+          className={`folio-press relative z-10 flex flex-col items-center justify-center rounded-xl px-2 py-1.5 md:h-10 md:w-11 md:px-0 md:py-0 ${
+            activeWorkspaceFilter === 'notes'
+              ? 'bg-white/88 text-[var(--navy-900)] shadow-xs ring-1 ring-white/85 backdrop-blur-sm'
+              : 'text-[var(--navy-900)]/85 drop-shadow-[0_1px_1px_rgba(255,255,255,0.65)] hover:bg-white/70 hover:text-[var(--navy-900)]'
+          }`}
+        >
+          <FileText className="h-4.5 w-4.5" />
+          <span className="mt-0.5 text-[9px] font-semibold md:hidden">Notes</span>
+        </button>
+
+        {/* Slides Mode */}
+        <button
+          type="button"
+          data-testid="rail-nav-slides"
+          aria-label="Slides Mode"
+          title="Slides Mode (Canva-style)"
+          onClick={() => setActiveWorkspaceFilter('slides')}
+          className={`folio-press relative z-10 flex flex-col items-center justify-center rounded-xl px-2 py-1.5 md:h-10 md:w-11 md:px-0 md:py-0 ${
+            activeWorkspaceFilter === 'slides'
+              ? 'bg-white/88 text-[var(--navy-900)] shadow-xs ring-1 ring-white/85 backdrop-blur-sm'
+              : 'text-[var(--navy-900)]/85 drop-shadow-[0_1px_1px_rgba(255,255,255,0.65)] hover:bg-white/70 hover:text-[var(--navy-900)]'
+          }`}
+        >
+          <Presentation className="h-4.5 w-4.5" />
+          <span className="mt-0.5 text-[9px] font-semibold md:hidden">Slides</span>
+        </button>
+
+        <div className="relative z-10 h-5 w-px bg-white/60 md:h-px md:w-6" aria-hidden="true" />
 
         {/* Templates */}
         <button
@@ -816,10 +919,13 @@ export const HomeShelf: React.FC = () => {
               )}
 
               <p className="mt-1.5 text-xs font-medium text-[var(--navy-600)] tabular-nums">
-                {librarySummary.notebookCount} notebook
-                {librarySummary.notebookCount === 1 ? '' : 's'}
-                {librarySummary.whiteboardCount > 0
-                  ? ` · ${librarySummary.whiteboardCount} board${librarySummary.whiteboardCount === 1 ? '' : 's'}`
+                {librarySummary.drawingCount} drawing board
+                {librarySummary.drawingCount === 1 ? '' : 's'}
+                {librarySummary.notesCount > 0
+                  ? ` · ${librarySummary.notesCount} note${librarySummary.notesCount === 1 ? '' : 's'}`
+                  : ''}
+                {librarySummary.slidesCount > 0
+                  ? ` · ${librarySummary.slidesCount} deck${librarySummary.slidesCount === 1 ? '' : 's'}`
                   : ''}{' '}
                 · {librarySummary.totalPages} page{librarySummary.totalPages === 1 ? '' : 's'}
               </p>
@@ -839,7 +945,7 @@ export const HomeShelf: React.FC = () => {
                   className="folio-btn-crimson inline-flex items-center gap-1.5 rounded-xl px-4 py-2 text-xs font-bold"
                 >
                   <Plus className="h-4 w-4 stroke-[2.5]" />
-                  <span>New Notebook</span>
+                  <span>New Drawing Board</span>
                 </button>
 
                 <button
@@ -848,8 +954,28 @@ export const HomeShelf: React.FC = () => {
                   onClick={() => void handleQuickCreateWhiteboard()}
                   className="folio-press inline-flex items-center gap-1.5 rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-elevated)]/92 px-3.5 py-2 text-xs font-semibold text-[var(--navy-900)] shadow-2xs backdrop-blur-md hover:border-[var(--border-strong)] hover:bg-[var(--surface-elevated)]"
                 >
+                  <Palette className="h-3.5 w-3.5 text-[var(--crimson-500)]" />
+                  <span>Infinite Board</span>
+                </button>
+
+                <button
+                  type="button"
+                  data-testid="quick-create-note"
+                  onClick={() => void handleQuickCreateNote()}
+                  className="folio-press inline-flex items-center gap-1.5 rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-elevated)]/92 px-3.5 py-2 text-xs font-semibold text-[var(--navy-900)] shadow-2xs backdrop-blur-md hover:border-[var(--border-strong)] hover:bg-[var(--surface-elevated)]"
+                >
+                  <FileText className="h-3.5 w-3.5 text-[var(--crimson-500)]" />
+                  <span>New Note</span>
+                </button>
+
+                <button
+                  type="button"
+                  data-testid="quick-create-slides"
+                  onClick={() => void handleQuickCreateSlides()}
+                  className="folio-press inline-flex items-center gap-1.5 rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-elevated)]/92 px-3.5 py-2 text-xs font-semibold text-[var(--navy-900)] shadow-2xs backdrop-blur-md hover:border-[var(--border-strong)] hover:bg-[var(--surface-elevated)]"
+                >
                   <Presentation className="h-3.5 w-3.5 text-[var(--crimson-500)]" />
-                  <span>Whiteboard</span>
+                  <span>New Slides</span>
                 </button>
 
                 <button
@@ -871,6 +997,18 @@ export const HomeShelf: React.FC = () => {
                   <Upload className="h-3.5 w-3.5 text-[var(--navy-600)]" />
                   <span>Import .folio</span>
                 </button>
+
+                {canInstallPwa && (
+                  <button
+                    type="button"
+                    data-testid="pwa-install-btn"
+                    onClick={() => void triggerPwaInstall()}
+                    className="folio-press inline-flex items-center gap-1.5 rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-elevated)]/92 px-3.5 py-2 text-xs font-semibold text-[var(--navy-900)] shadow-2xs backdrop-blur-md hover:border-[var(--border-strong)] hover:bg-[var(--surface-elevated)]"
+                  >
+                    <Download className="h-3.5 w-3.5 text-[var(--crimson-500)]" />
+                    <span>Install App</span>
+                  </button>
+                )}
               </div>
             </div>
           </header>
@@ -1108,11 +1246,17 @@ export const HomeShelf: React.FC = () => {
                 </section>
               )}
 
-              {/* Notebooks Grid with 3D Specular Book Tilt Cards */}
+              {/* Grid Section Header */}
               <section>
                 <div className="mb-3.5 flex items-center justify-between gap-2">
                   <h2 className="folio-section-label tabular-nums">
-                    Notebooks ({filteredNotebooks.length})
+                    {activeWorkspaceFilter === 'drawing'
+                      ? `Drawing Boards (${filteredNotebooks.length})`
+                      : activeWorkspaceFilter === 'notes'
+                        ? `Notes (${filteredNotebooks.length})`
+                        : activeWorkspaceFilter === 'slides'
+                          ? `Slides (${filteredNotebooks.length})`
+                          : `Library (${filteredNotebooks.length})`}
                   </h2>
                 </div>
 
@@ -1304,7 +1448,7 @@ export const HomeShelf: React.FC = () => {
                               locked={Boolean(item.notebook.isLocked)}
                               className="h-full w-full opacity-80 transition duration-200 group-hover:opacity-100"
                             />
-                            <div className="pointer-events-none absolute inset-x-0 bottom-3 flex justify-center opacity-0 transition-opacity duration-150 group-hover:opacity-100">
+                            <div className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center pt-4 opacity-0 transition-opacity duration-150 group-hover:opacity-100 group-focus-visible:opacity-100">
                               <span className="folio-glass-badge inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-[11px] font-bold">
                                 <RotateCcw className="h-3 w-3" />
                                 <span>Restore</span>
@@ -1424,6 +1568,13 @@ export const HomeShelf: React.FC = () => {
       <NotebookModal
         open={notebookModalOpen}
         editingNotebook={editingNotebook}
+        initialMode={
+          activeWorkspaceFilter === 'notes'
+            ? 'notes'
+            : activeWorkspaceFilter === 'slides'
+              ? 'slides'
+              : 'notebook'
+        }
         defaultFolderId={currentFolderId}
         onClose={() => setNotebookModalOpen(false)}
       />

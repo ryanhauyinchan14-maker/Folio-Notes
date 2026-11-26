@@ -8,9 +8,12 @@ import {
   FilePlus,
   FilePlus2,
   FileUp,
+  FlipHorizontal2,
   HelpCircle,
+  Layers,
   LayoutGrid,
   Lock,
+  Paintbrush,
   PanelLeft,
   Printer,
   Redo2,
@@ -19,9 +22,13 @@ import {
   Sparkles,
   Undo2,
 } from 'lucide-react';
+import { getBrushPreset } from '../../canvas/brushEngine';
+import type { SymmetryMode } from '../../canvas/symmetry';
 import { useAppStore } from '../../store/useAppStore';
 import { formatShortcutCompact } from '../../utils/shortcuts';
 import { UpdateHeaderButton } from '../common/UpdatePill';
+
+export type StudioPopoverId = 'brush' | 'symmetry' | 'layers' | 'color' | null;
 
 interface TopHeaderBarProps {
   isWhiteboard?: boolean;
@@ -29,6 +36,9 @@ interface TopHeaderBarProps {
   onToggleDrawer: () => void;
   aiSidebarOpen?: boolean;
   onToggleAiSidebar?: () => void;
+  activeStudioPopover?: StudioPopoverId;
+  onToggleStudioPopover?: (id: Exclude<StudioPopoverId, null>) => void;
+  layerCount?: number;
   onQuickAddPage: () => void;
   onOpenTemplatePicker: () => void;
   onImportPdfPages: () => void;
@@ -46,6 +56,9 @@ export const TopHeaderBar: React.FC<TopHeaderBarProps> = ({
   onToggleDrawer,
   aiSidebarOpen = false,
   onToggleAiSidebar,
+  activeStudioPopover = null,
+  onToggleStudioPopover,
+  layerCount = 1,
   onQuickAddPage,
   onOpenTemplatePicker,
   onImportPdfPages,
@@ -67,6 +80,10 @@ export const TopHeaderBar: React.FC<TopHeaderBarProps> = ({
   const undo = useAppStore((s) => s.undo);
   const redo = useAppStore((s) => s.redo);
   const keyboardShortcuts = useAppStore((s) => s.keyboardShortcuts);
+  const activeBrushId = useAppStore((s) => s.activeBrushId);
+  const symmetryMode: SymmetryMode = useAppStore((s) => s.symmetryMode);
+  const inkColor = useAppStore((s) => s.inkColor);
+  const activeBrush = getBrushPreset(activeBrushId);
 
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleDraft, setTitleDraft] = useState('');
@@ -121,19 +138,19 @@ export const TopHeaderBar: React.FC<TopHeaderBarProps> = ({
   return (
     <header
       data-testid="top-header-bar"
-      className="pointer-events-none flex w-full items-center justify-between gap-2 text-[var(--navy-900)]"
+      className="pointer-events-none flex w-full flex-wrap items-center justify-between gap-1.5 text-[var(--navy-900)] min-[540px]:flex-nowrap min-[540px]:gap-2"
     >
       {/* Top-Left Detached Glass Island: Shelf Back + Inline Title + Page Menu + Pages Drawer */}
       <div
         data-testid="editor-top-left-island"
-        className="folio-glass-island pointer-events-auto flex min-w-0 items-center gap-1 rounded-2xl px-1.5 py-1 sm:gap-1.5"
+        className="folio-glass-island pointer-events-auto flex min-w-0 max-w-full items-center gap-1 rounded-2xl px-1.5 py-1 sm:gap-1.5"
       >
         <button
           type="button"
           title="Back to Home Shelf"
           aria-label="Back to Home Shelf"
           onClick={() => void closeNotebook()}
-          className="folio-press inline-flex h-8 items-center gap-1 rounded-xl px-2 text-xs font-semibold text-[var(--navy-900)]/85 hover:bg-[var(--surface-tint)] hover:text-[var(--navy-900)]"
+          className="folio-press inline-flex h-8 shrink-0 items-center gap-1 rounded-xl px-2 text-xs font-semibold text-[var(--navy-900)]/85 hover:bg-[var(--surface-tint)] hover:text-[var(--navy-900)]"
         >
           <ArrowLeft className="h-4 w-4" />
           <span className="hidden sm:inline">Shelf</span>
@@ -166,14 +183,21 @@ export const TopHeaderBar: React.FC<TopHeaderBarProps> = ({
             data-testid="inline-notebook-title"
             title="Click to rename notebook"
             onClick={startEditingTitle}
-            className="folio-press max-w-[82px] truncate rounded-xl px-2 py-1 text-left text-xs font-bold tracking-[-0.02em] text-[var(--navy-900)] hover:bg-[var(--surface-tint)] sm:max-w-[200px] sm:text-sm"
+            className="folio-press max-w-[64px] truncate rounded-xl px-1.5 py-1 text-left text-xs font-bold tracking-[-0.02em] text-[var(--navy-900)] hover:bg-[var(--surface-tint)] sm:max-w-[200px] sm:px-2 sm:text-sm"
           >
             {activeNotebook?.title ?? 'Notebook'}
           </button>
         )}
 
+        <span
+          data-testid="editor-mode-badge"
+          className="folio-glass-badge hidden shrink-0 rounded-full px-2 py-0.5 text-[10px] font-bold tracking-tight md:inline-flex"
+        >
+          {isWhiteboard ? 'Infinite Board' : 'Drawing Board'}
+        </span>
+
         {/* Single Page / Board Dropdown */}
-        <div ref={pageMenuRef} className="relative">
+        <div ref={pageMenuRef} className="relative shrink-0">
           <button
             type="button"
             data-testid="page-menu-button"
@@ -306,7 +330,7 @@ export const TopHeaderBar: React.FC<TopHeaderBarProps> = ({
             aria-label="Toggle Pages Drawer"
             aria-pressed={drawerOpen}
             onClick={onToggleDrawer}
-            className={`folio-press relative inline-flex h-8 items-center gap-1.5 rounded-xl px-2 text-xs font-semibold ${
+            className={`folio-press relative inline-flex h-8 shrink-0 items-center gap-1.5 rounded-xl px-2 text-xs font-semibold ${
               drawerOpen
                 ? 'folio-glass-active'
                 : 'text-[var(--navy-600)] hover:bg-[var(--surface-tint)] hover:text-[var(--navy-900)]'
@@ -327,7 +351,7 @@ export const TopHeaderBar: React.FC<TopHeaderBarProps> = ({
       {/* Top-Right Detached Glass Island: Undo/Redo, Saved Status, Lock, AI Study, Export, Shortcuts */}
       <div
         data-testid="editor-top-right-island"
-        className="folio-glass-island pointer-events-auto flex shrink-0 items-center gap-1 rounded-2xl px-1.5 py-1 sm:gap-1.5"
+        className="folio-glass-island pointer-events-auto ml-auto flex shrink-0 items-center gap-1 rounded-2xl px-1.5 py-1 sm:gap-1.5"
       >
         <div className="flex items-center gap-0.5 rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-elevated)]/90 p-0.5">
           <button
@@ -375,6 +399,81 @@ export const TopHeaderBar: React.FC<TopHeaderBarProps> = ({
           </button>
         )}
 
+        {onToggleStudioPopover && (
+          <div className="flex items-center gap-0.5 rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-elevated)]/90 p-0.5">
+            <button
+              type="button"
+              data-testid="studio-brush-btn"
+              title={`Brush Studio (${activeBrush.name})`}
+              aria-label="Brush Studio"
+              aria-pressed={activeStudioPopover === 'brush'}
+              onClick={() => onToggleStudioPopover('brush')}
+              className={`folio-press inline-flex h-7 items-center gap-1 rounded-lg px-2 text-xs font-semibold ${
+                activeStudioPopover === 'brush'
+                  ? 'folio-glass-active'
+                  : 'text-[var(--navy-900)] hover:bg-[var(--surface-tint)]'
+              }`}
+            >
+              <Paintbrush className="h-3.5 w-3.5" />
+              <span className="hidden xl:inline">{activeBrush.name.split(' ')[0]}</span>
+            </button>
+            <button
+              type="button"
+              data-testid="studio-symmetry-btn"
+              title={`Symmetry Guides (${symmetryMode})`}
+              aria-label="Symmetry Guides"
+              aria-pressed={activeStudioPopover === 'symmetry' || symmetryMode !== 'off'}
+              onClick={() => onToggleStudioPopover('symmetry')}
+              className={`folio-press inline-flex h-7 items-center gap-1 rounded-lg px-2 text-xs font-semibold ${
+                activeStudioPopover === 'symmetry' || symmetryMode !== 'off'
+                  ? 'folio-glass-active'
+                  : 'text-[var(--navy-900)] hover:bg-[var(--surface-tint)]'
+              }`}
+            >
+              <FlipHorizontal2 className="h-3.5 w-3.5" />
+              {symmetryMode !== 'off' && (
+                <span className="hidden xl:inline capitalize">{symmetryMode}</span>
+              )}
+            </button>
+            <button
+              type="button"
+              data-testid="studio-layers-btn"
+              title={`Layers (${layerCount})`}
+              aria-label="Layers"
+              aria-pressed={activeStudioPopover === 'layers'}
+              onClick={() => onToggleStudioPopover('layers')}
+              className={`folio-press inline-flex h-7 items-center gap-1 rounded-lg px-2 text-xs font-semibold ${
+                activeStudioPopover === 'layers'
+                  ? 'folio-glass-active'
+                  : 'text-[var(--navy-900)] hover:bg-[var(--surface-tint)]'
+              }`}
+            >
+              <Layers className="h-3.5 w-3.5" />
+              {layerCount > 1 && (
+                <span className="folio-mono text-[10px] font-bold">{layerCount}</span>
+              )}
+            </button>
+            <button
+              type="button"
+              data-testid="studio-color-btn"
+              title="Color Studio Wheel"
+              aria-label="Color Studio"
+              aria-pressed={activeStudioPopover === 'color'}
+              onClick={() => onToggleStudioPopover('color')}
+              className={`folio-press inline-flex h-7 w-7 items-center justify-center rounded-lg ${
+                activeStudioPopover === 'color'
+                  ? 'bg-[var(--crimson-soft)] ring-1 ring-[var(--crimson-500)]'
+                  : 'hover:bg-[var(--surface-tint)]'
+              }`}
+            >
+              <span
+                className="h-4.5 w-4.5 rounded-full border-2 border-white shadow-sm ring-1 ring-black/20"
+                style={{ backgroundColor: inkColor }}
+              />
+            </button>
+          </div>
+        )}
+
         {onToggleAiSidebar && (
           <button
             type="button"
@@ -400,7 +499,7 @@ export const TopHeaderBar: React.FC<TopHeaderBarProps> = ({
           title={`Keyboard Shortcuts (${formatShortcutCompact(keyboardShortcuts.showShortcuts)})`}
           aria-label="Keyboard Shortcuts"
           onClick={onOpenShortcuts}
-          className="folio-press inline-flex h-8 w-8 items-center justify-center rounded-xl text-[var(--navy-600)] hover:bg-[var(--surface-tint)] hover:text-[var(--navy-900)]"
+          className="folio-press hidden h-8 w-8 items-center justify-center rounded-xl text-[var(--navy-600)] hover:bg-[var(--surface-tint)] hover:text-[var(--navy-900)] sm:inline-flex"
         >
           <HelpCircle className="h-4 w-4" />
         </button>

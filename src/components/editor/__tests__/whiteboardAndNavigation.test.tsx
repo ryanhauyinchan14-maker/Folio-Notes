@@ -751,10 +751,10 @@ describe('v1.2.0 Context-Aware Ctrl+Scroll, Infinite Whiteboard & Kleki Middle-C
     });
     expect(useAppStore.getState().notebooks.find((n) => n.id === wbId)?.isLocked).toBe(true);
 
-    // HomeShelf renders "Whiteboard" badge for whiteboard cover
+    // HomeShelf renders "Infinite Board" badge for whiteboard cover
     const boardBadge = container.querySelector('[data-testid="whiteboard-cover-badge"]');
     expect(boardBadge).not.toBeNull();
-    expect(boardBadge?.textContent).toContain('Whiteboard');
+    expect(boardBadge?.textContent).toContain('Infinite Board');
 
     // Unlocking opens the whiteboard with all negative-coord elements intact
     await act(async () => {

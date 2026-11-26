@@ -415,7 +415,14 @@ export function buildOpenAiCompatibleRequest(
     messages,
   };
   if (params.maxTokens) {
-    payload.max_tokens = params.maxTokens;
+    if (
+      config.provider === 'openai' &&
+      /^(?:gpt-5|o[1-9])/i.test(config.model)
+    ) {
+      payload.max_completion_tokens = params.maxTokens;
+    } else {
+      payload.max_tokens = params.maxTokens;
+    }
   }
 
   return {
@@ -639,6 +646,40 @@ export async function askNotesWithAi(params: {
       'You are Folio Notes AI Study Assistant. Be concise, accurate, and directly reference the handwritten notes or PDF slides attached.',
     userPrompt: `${scopeNote}\n${historyLines}Student request: ${params.prompt}`,
     snapshots: params.snapshots,
+    guard: params.guard,
+  });
+
+  return { text };
+}
+
+export async function askDocumentNotesWithAi(params: {
+  config: ActiveAiConfig;
+  prompt: string;
+  documentText: string;
+  selectedText?: string;
+  history: ChatHistoryTurn[];
+  guard?: AiPrivacyGuard;
+}): Promise<{ text: string }> {
+  const historyLines =
+    params.history.length > 0
+      ? params.history
+          .slice(-8)
+          .map((m) => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.text}`)
+          .join('\n') + '\n\n'
+      : '';
+  const trimmedDoc = params.documentText.trim().slice(0, 24000);
+  const selBlock = params.selectedText?.trim()
+    ? `\n\nSelected excerpt:\n"""\n${params.selectedText.trim().slice(0, 6000)}\n"""`
+    : '';
+  const docBlock = trimmedDoc
+    ? `Document content:\n"""\n${trimmedDoc}\n"""${selBlock}`
+    : 'Document is currently empty.';
+
+  const text = await runMultimodalTextCompletion(params.config, {
+    systemPrompt:
+      'You are Folio Notes AI Writing & Study Assistant. Help summarize, polish, outline, explain, or expand the user’s rich document cleanly using concise Markdown.',
+    userPrompt: `${docBlock}\n\n${historyLines}Request: ${params.prompt}`,
+    snapshots: [],
     guard: params.guard,
   });
 

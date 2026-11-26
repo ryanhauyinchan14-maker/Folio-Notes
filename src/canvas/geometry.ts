@@ -618,3 +618,126 @@ export function scaleStroke(
     bounds: computeBoundsFromPoints(nextPoints, nextSize * 0.6, nextShape),
   };
 }
+
+/**
+ * Rotates a stroke by `angleRad` radians around `(cx, cy)`, returning a fresh Stroke
+ * with updated points, optional shape geometry, and recomputed bounding box.
+ */
+export function rotateStroke(
+  stroke: Stroke,
+  angleRad: number,
+  cx: number,
+  cy: number,
+): Stroke {
+  const cos = Math.cos(angleRad);
+  const sin = Math.sin(angleRad);
+  const rotatePt = (x: number, y: number) => {
+    const dx = x - cx;
+    const dy = y - cy;
+    return {
+      x: cx + dx * cos - dy * sin,
+      y: cy + dx * sin + dy * cos,
+    };
+  };
+
+  let nextShape: ShapeGeometry | undefined;
+  let nextPoints: StrokePoint[];
+
+  if (stroke.shape) {
+    if (stroke.shape.kind === 'line') {
+      const p1 = rotatePt(stroke.shape.x1, stroke.shape.y1);
+      const p2 = rotatePt(stroke.shape.x2, stroke.shape.y2);
+      nextShape = {
+        kind: 'line',
+        x1: p1.x,
+        y1: p1.y,
+        x2: p2.x,
+        y2: p2.y,
+      };
+      nextPoints = sampleShapePoints(nextShape, stroke.points[0]?.pressure ?? 0.5);
+    } else if (stroke.shape.kind === 'circle') {
+      const c = rotatePt(stroke.shape.cx, stroke.shape.cy);
+      nextShape = {
+        kind: 'circle',
+        cx: c.x,
+        cy: c.y,
+        r: stroke.shape.r,
+      };
+      nextPoints = sampleShapePoints(nextShape, stroke.points[0]?.pressure ?? 0.5);
+    } else {
+      const basePts =
+        stroke.points.length >= 4
+          ? stroke.points
+          : sampleShapePoints(stroke.shape, stroke.points[0]?.pressure ?? 0.5);
+      nextPoints = basePts.map((pt) => {
+        const r = rotatePt(pt.x, pt.y);
+        return { ...pt, x: r.x, y: r.y };
+      });
+      nextShape = undefined;
+    }
+  } else {
+    nextPoints = stroke.points.map((pt) => {
+      const r = rotatePt(pt.x, pt.y);
+      return { ...pt, x: r.x, y: r.y };
+    });
+  }
+
+  return {
+    ...stroke,
+    points: nextPoints,
+    shape: nextShape,
+    bounds: computeBoundsFromPoints(nextPoints, stroke.size * 0.6, nextShape),
+  };
+}
+
+/**
+ * Mirrors a stroke horizontally (`axis === 'x'`) across `x = cx` or vertically (`axis === 'y'`) across `y = cy`.
+ */
+export function flipStroke(
+  stroke: Stroke,
+  axis: 'x' | 'y',
+  cx: number,
+  cy: number,
+): Stroke {
+  const flipPt = (x: number, y: number) => ({
+    x: axis === 'x' ? 2 * cx - x : x,
+    y: axis === 'y' ? 2 * cy - y : y,
+  });
+
+  let nextShape: ShapeGeometry | undefined;
+  let nextPoints: StrokePoint[];
+
+  if (stroke.shape) {
+    if (stroke.shape.kind === 'line') {
+      const p1 = flipPt(stroke.shape.x1, stroke.shape.y1);
+      const p2 = flipPt(stroke.shape.x2, stroke.shape.y2);
+      nextShape = { kind: 'line', x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y };
+    } else if (stroke.shape.kind === 'circle') {
+      const c = flipPt(stroke.shape.cx, stroke.shape.cy);
+      nextShape = { kind: 'circle', cx: c.x, cy: c.y, r: stroke.shape.r };
+    } else {
+      const p1 = flipPt(stroke.shape.x, stroke.shape.y);
+      const p2 = flipPt(stroke.shape.x + stroke.shape.width, stroke.shape.y + stroke.shape.height);
+      nextShape = {
+        kind: 'rect',
+        x: Math.min(p1.x, p2.x),
+        y: Math.min(p1.y, p2.y),
+        width: Math.abs(p2.x - p1.x),
+        height: Math.abs(p2.y - p1.y),
+      };
+    }
+    nextPoints = sampleShapePoints(nextShape, stroke.points[0]?.pressure ?? 0.5);
+  } else {
+    nextPoints = stroke.points.map((pt) => {
+      const f = flipPt(pt.x, pt.y);
+      return { ...pt, x: f.x, y: f.y };
+    });
+  }
+
+  return {
+    ...stroke,
+    points: nextPoints,
+    shape: nextShape,
+    bounds: computeBoundsFromPoints(nextPoints, stroke.size * 0.6, nextShape),
+  };
+}

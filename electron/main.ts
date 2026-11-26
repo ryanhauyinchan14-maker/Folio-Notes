@@ -12,7 +12,11 @@ import {
   type FolioPrintResult,
   validatePrintSheetsRequest,
 } from './printCore';
-import { parseWindowsFontRegistryOutput } from './systemFontsCore';
+import {
+  parseFontconfigListOutput,
+  parseFontDirectoryFilenames,
+  parseWindowsFontRegistryOutput,
+} from './systemFontsCore';
 import { initHybridUpdater } from './updater';
 
 const execFileAsync = promisify(execFile);
@@ -198,36 +202,97 @@ function registerAiProxyIpc(): void {
   });
 }
 
+async function scanFontFilenamesInDirs(dirs: string[]): Promise<string[]> {
+  const filenames: string[] = [];
+  const queue = [...dirs];
+  let visited = 0;
+
+  while (queue.length > 0 && visited < 200) {
+    const current = queue.shift()!;
+    visited += 1;
+    try {
+      const entries = await fs.promises.readdir(current, { withFileTypes: true });
+      for (const entry of entries) {
+        if (entry.name.startsWith('.')) continue;
+        const full = path.join(current, entry.name);
+        if (entry.isDirectory()) {
+          queue.push(full);
+        } else if (entry.isFile()) {
+          filenames.push(entry.name);
+        }
+      }
+    } catch {
+      // Ignore missing or permission-restricted font directories
+    }
+  }
+
+  return parseFontDirectoryFilenames(filenames);
+}
+
 function registerFontsIpc(): void {
   let cachedSystemFonts: string[] | null = null;
 
   ipcMain.handle('fonts:list-system', async (): Promise<string[]> => {
     if (cachedSystemFonts) return cachedSystemFonts;
-    if (process.platform !== 'win32') {
-      cachedSystemFonts = [];
+
+    if (process.platform === 'win32') {
+      const keys = [
+        'HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Fonts',
+        'HKCU\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Fonts',
+      ];
+      const outputs: string[] = [];
+
+      for (const key of keys) {
+        try {
+          const { stdout } = await execFileAsync('reg', ['query', key], {
+            windowsHide: true,
+            timeout: 4000,
+            maxBuffer: 4 * 1024 * 1024,
+          });
+          if (stdout) outputs.push(stdout);
+        } catch {
+          // Ignore unavailable or empty per-user registry key
+        }
+      }
+
+      cachedSystemFonts = parseWindowsFontRegistryOutput(outputs);
       return cachedSystemFonts;
     }
 
-    const keys = [
-      'HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Fonts',
-      'HKCU\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Fonts',
-    ];
-    const outputs: string[] = [];
-
-    for (const key of keys) {
+    if (process.platform === 'linux') {
       try {
-        const { stdout } = await execFileAsync('reg', ['query', key], {
-          windowsHide: true,
+        const { stdout } = await execFileAsync('fc-list', [':', 'family'], {
           timeout: 4000,
           maxBuffer: 4 * 1024 * 1024,
         });
-        if (stdout) outputs.push(stdout);
+        const parsed = parseFontconfigListOutput(stdout || '');
+        if (parsed.length > 0) {
+          cachedSystemFonts = parsed;
+          return cachedSystemFonts;
+        }
       } catch {
-        // Ignore unavailable or empty per-user registry key
+        // Fallback to scanning standard Linux font directories below
       }
+
+      cachedSystemFonts = await scanFontFilenamesInDirs([
+        '/usr/share/fonts',
+        '/usr/local/share/fonts',
+        path.join(os.homedir(), '.local', 'share', 'fonts'),
+        path.join(os.homedir(), '.fonts'),
+      ]);
+      return cachedSystemFonts;
     }
 
-    cachedSystemFonts = parseWindowsFontRegistryOutput(outputs);
+    if (process.platform === 'darwin') {
+      cachedSystemFonts = await scanFontFilenamesInDirs([
+        '/System/Library/Fonts',
+        '/Library/Fonts',
+        path.join(os.homedir(), 'Library', 'Fonts'),
+      ]);
+      return cachedSystemFonts;
+    }
+
+    cachedSystemFonts = [];
     return cachedSystemFonts;
   });
 }
@@ -544,7 +609,45 @@ if (!gotSingleInstanceLock) {
     if (process.platform === 'win32') {
       app.setAppUserModelId('com.folionotes.desktop');
     }
-    if (process.platform !== 'darwin') {
+    if (process.platform === 'darwin') {
+      const macMenu = Menu.buildFromTemplate([
+        {
+          label: app.name,
+          submenu: [
+            { role: 'about' },
+            { type: 'separator' },
+            { role: 'services' },
+            { type: 'separator' },
+            { role: 'hide' },
+            { role: 'hideOthers' },
+            { role: 'unhide' },
+            { type: 'separator' },
+            { role: 'quit' },
+          ],
+        },
+        {
+          label: 'Edit',
+          submenu: [
+            { role: 'undo' },
+            { role: 'redo' },
+            { type: 'separator' },
+            { role: 'cut' },
+            { role: 'copy' },
+            { role: 'paste' },
+            { role: 'selectAll' },
+          ],
+        },
+        {
+          label: 'View',
+          submenu: [{ role: 'togglefullscreen' }],
+        },
+        {
+          label: 'Window',
+          submenu: [{ role: 'minimize' }, { role: 'zoom' }, { role: 'front' }],
+        },
+      ]);
+      Menu.setApplicationMenu(macMenu);
+    } else {
       Menu.setApplicationMenu(null);
     }
 
