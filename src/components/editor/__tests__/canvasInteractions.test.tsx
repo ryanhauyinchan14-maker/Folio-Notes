@@ -205,9 +205,13 @@ describe('Canva hitboxes, one-motion drag, photo insertion paths & single-undo s
     });
     await act(async () => {
       fileInput.dispatchEvent(new Event('change', { bubbles: true }));
-      await new Promise((r) => setTimeout(r, 40));
     });
-    expect(useAppStore.getState().pages[0].images).toHaveLength(1);
+    await vi.waitFor(
+      () => {
+        expect(useAppStore.getState().pages[0].images).toHaveLength(1);
+      },
+      { timeout: 3000 },
+    );
 
     // Path 2: Drag-and-drop image file onto page surface
     const file2 = makePngBlob();
@@ -222,9 +226,13 @@ describe('Canva hitboxes, one-motion drag, photo insertion paths & single-undo s
 
     await act(async () => {
       surface.dispatchEvent(dropEvent);
-      await new Promise((r) => setTimeout(r, 40));
     });
-    expect(useAppStore.getState().pages[0].images).toHaveLength(2);
+    await vi.waitFor(
+      () => {
+        expect(useAppStore.getState().pages[0].images).toHaveLength(2);
+      },
+      { timeout: 3000 },
+    );
 
     // Path 3: Clipboard paste event with image/png file
     const file3 = makePngBlob();
@@ -244,9 +252,13 @@ describe('Canva hitboxes, one-motion drag, photo insertion paths & single-undo s
 
     await act(async () => {
       window.dispatchEvent(pasteEvent);
-      await new Promise((r) => setTimeout(r, 40));
     });
-    expect(useAppStore.getState().pages[0].images).toHaveLength(3);
+    await vi.waitFor(
+      () => {
+        expect(useAppStore.getState().pages[0].images).toHaveLength(3);
+      },
+      { timeout: 3000 },
+    );
 
     // Contextual sub-bar must be in image mode & normal image has no small-element move handle
     const subbar = container.querySelector('[data-testid="contextual-subbar"]');
@@ -1158,9 +1170,13 @@ describe('Canva hitboxes, one-motion drag, photo insertion paths & single-undo s
       window.dispatchEvent(
         new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }),
       );
-      await new Promise((r) => setTimeout(r, 30));
     });
-    expect(useAppStore.getState().activeNotebook).toBeNull();
+    await vi.waitFor(
+      () => {
+        expect(useAppStore.getState().activeNotebook).toBeNull();
+      },
+      { timeout: 3000 },
+    );
   });
 
   it('renders a generously padded selection frame and handles around selected textboxes without overlapping glyphs', async () => {

@@ -17,6 +17,8 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    outputs:
+      pages_enabled: ${{ steps.check_pages.outputs.enabled }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -35,10 +37,28 @@ jobs:
           node scripts/generate-icon.mjs
           npm run build
 
+      - name: Check if GitHub Pages is configured for Actions
+        id: check_pages
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          STATUS=$(curl -s -o pages.json -w "%{http_code}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            "https://api.github.com/repos/${{ github.repository }}/pages")
+          if [ "$STATUS" = "200" ] && grep -q '"build_type":[[:space:]]*"workflow"' pages.json; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::GitHub Pages is not enabled for GitHub Actions yet (HTTP $STATUS). Enable it once under Settings -> Pages -> Source: GitHub Actions to publish the live Web PWA."
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Configure GitHub Pages
+        if: steps.check_pages.outputs.enabled == 'true'
         uses: actions/configure-pages@v5
 
       - name: Upload Pages artifact
+        if: steps.check_pages.outputs.enabled == 'true'
         uses: actions/upload-pages-artifact@v3
         with:
           path: dist
@@ -49,6 +69,7 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     runs-on: ubuntu-latest
     needs: build
+    if: needs.build.outputs.pages_enabled == 'true'
     steps:
       - name: Deploy to GitHub Pages
         id: deployment

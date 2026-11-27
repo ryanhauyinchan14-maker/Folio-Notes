@@ -568,10 +568,14 @@ describe('Seal & Crimson Canva-inspired HomeShelf', () => {
       openSurface.dispatchEvent(downEvt);
       openSurface.dispatchEvent(upEvt);
       openSurface.click();
-      await new Promise((r) => setTimeout(r, 30));
     });
 
-    expect(useAppStore.getState().activeNotebook?.id).toBe(createdId);
+    await vi.waitFor(
+      () => {
+        expect(useAppStore.getState().activeNotebook?.id).toBe(createdId);
+      },
+      { timeout: 3000 },
+    );
 
     // Return to shelf and verify clicking metadata / subtitle opens the notebook reliably
     await act(async () => {
@@ -584,9 +588,13 @@ describe('Seal & Crimson Canva-inspired HomeShelf', () => {
     )!;
     await act(async () => {
       metaAfterClose.click();
-      await new Promise((r) => setTimeout(r, 30));
     });
-    expect(useAppStore.getState().activeNotebook?.id).toBe(createdId);
+    await vi.waitFor(
+      () => {
+        expect(useAppStore.getState().activeNotebook?.id).toBe(createdId);
+      },
+      { timeout: 3000 },
+    );
 
     // Return to shelf, hover to tilt, open menu, and verify tilt resets cleanly to flat
     await act(async () => {
