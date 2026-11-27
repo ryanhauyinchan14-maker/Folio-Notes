@@ -1,13 +1,14 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowRight,
-  BookOpen,
   Command,
+  FileText,
   FileUp,
   Folder as FolderIcon,
   FolderPlus,
   Layers,
   Lock,
+  Palette,
   Presentation,
   Search,
   Settings,
@@ -18,15 +19,21 @@ import {
 import {
   ALL_BUILT_IN_PAPER_VARIANTS,
   ALL_BUILT_IN_WHITEBOARD_VARIANTS,
+  DEFAULT_PAPER_CONFIG,
   formatPaperPatternLabel,
 } from '../../constants/papers';
+import { BUILT_IN_NOTE_TEMPLATES } from '../../notes/noteTemplates';
+import { BUILT_IN_SLIDE_TEMPLATES } from '../../slides/slideTemplates';
 import type {
   Folder,
   Notebook,
   NotebookMode,
+  NoteDocumentData,
   PageImage,
   PaperConfig,
   PaperTemplate,
+  SlideData,
+  SlideSizePresetId,
   Stroke,
   Textbox,
 } from '../../types/notes';
@@ -47,8 +54,15 @@ interface CommandPaletteModalProps {
     textboxes?: Textbox[],
     images?: PageImage[],
     mode?: NotebookMode,
+    extra?: {
+      slideSizePreset?: SlideSizePresetId;
+      initialNoteData?: NoteDocumentData;
+      initialSlides?: SlideData[];
+    },
   ) => void;
   onNewNotebook: () => void;
+  onNewNote?: () => void;
+  onNewSlides?: () => void;
   onNewWhiteboard: () => void;
   onImportPdf: () => void;
   onImportFolio: () => void;
@@ -57,7 +71,7 @@ interface CommandPaletteModalProps {
   onOpenSettings: () => void;
 }
 
-type CommandGroup = 'Actions' | 'Notebooks' | 'Folders' | 'Templates';
+type CommandGroup = 'Actions' | 'Library' | 'Folders' | 'Templates';
 
 interface CommandEntry {
   id: string;
@@ -79,6 +93,8 @@ export const CommandPaletteModal: React.FC<CommandPaletteModalProps> = ({
   onSelectFolder,
   onLaunchTemplate,
   onNewNotebook,
+  onNewNote,
+  onNewSlides,
   onNewWhiteboard,
   onImportPdf,
   onImportFolio,
@@ -105,19 +121,54 @@ export const CommandPaletteModal: React.FC<CommandPaletteModalProps> = ({
       {
         id: 'act-new-notebook',
         group: 'Actions',
-        title: 'Create New Notebook',
-        subtitle: 'Choose cover art, folder, and paper template',
-        badge: 'Studio',
-        icon: <BookOpen className="h-4 w-4 text-[var(--crimson-500)]" />,
+        title: 'New Canvas (Drawing Board)',
+        subtitle: 'Choose cover art, folder, and paper or studio mode',
+        badge: 'Canvas',
+        icon: <Palette className="h-4 w-4 text-[var(--crimson-500)]" />,
         run: onNewNotebook,
       },
+      ...(onNewNote
+        ? [
+            {
+              id: 'act-new-note',
+              group: 'Actions' as const,
+              title: 'New Doc (Notes Mode)',
+              subtitle: 'Create a Google Docs-style rich document with outline & slash commands',
+              badge: 'Docs',
+              icon: <FileText className="h-4 w-4 text-[var(--crimson-500)]" />,
+              run: onNewNote,
+            },
+          ]
+        : []),
+      ...(onNewSlides
+        ? [
+            {
+              id: 'act-new-slides',
+              group: 'Actions' as const,
+              title: 'New Slides Deck',
+              subtitle: 'Create a Canva-style 16:9 presentation with layouts & present mode',
+              badge: 'Slides',
+              icon: <Presentation className="h-4 w-4 text-[var(--crimson-500)]" />,
+              run: onNewSlides,
+            },
+          ]
+        : []),
       {
         id: 'act-new-whiteboard',
         group: 'Actions',
-        title: 'New Whiteboard',
-        subtitle: 'Open canvas with zoom & pan',
-        icon: <Presentation className="h-4 w-4 text-[var(--crimson-500)]" />,
+        title: 'New Infinite Board',
+        subtitle: 'Open unbounded drawing canvas with smooth zoom & pan',
+        badge: 'Board',
+        icon: <Sparkles className="h-4 w-4 text-[var(--crimson-500)]" />,
         run: onNewWhiteboard,
+      },
+      {
+        id: 'act-templates',
+        group: 'Actions',
+        title: 'Browse Studio Template Gallery',
+        subtitle: 'Docs, Slide Decks, Infinite Boards, papers & saved templates',
+        icon: <Layers className="h-4 w-4" />,
+        run: onOpenTemplates,
       },
       {
         id: 'act-import-pdf',
@@ -128,18 +179,10 @@ export const CommandPaletteModal: React.FC<CommandPaletteModalProps> = ({
         run: onImportPdf,
       },
       {
-        id: 'act-templates',
-        group: 'Actions',
-        title: 'Browse Paper & Whiteboard Gallery',
-        subtitle: 'All built in papers, boards & saved templates',
-        icon: <Layers className="h-4 w-4" />,
-        run: onOpenTemplates,
-      },
-      {
         id: 'act-new-folder',
         group: 'Actions',
         title: 'Create New Folder',
-        subtitle: 'Organize notebooks with custom folder colors',
+        subtitle: 'Organize canvases, docs & decks with custom folder colors',
         icon: <FolderPlus className="h-4 w-4" />,
         run: onNewFolder,
       },
@@ -147,15 +190,15 @@ export const CommandPaletteModal: React.FC<CommandPaletteModalProps> = ({
         id: 'act-import-folio',
         group: 'Actions',
         title: 'Import .folio.json Archive',
-        subtitle: 'Restore a shared or backed-up notebook',
+        subtitle: 'Restore a shared or backed-up studio item',
         icon: <Upload className="h-4 w-4" />,
         run: onImportFolio,
       },
       {
         id: 'act-settings',
         group: 'Actions',
-        title: 'Open Preferences & Shortcuts',
-        subtitle: 'Appearance, UI micro-sounds, AI keys & backups',
+        title: 'Open Studio Preferences',
+        subtitle: 'Mode defaults, UI scale (up to 200%), AI keys & backups',
         icon: <Settings className="h-4 w-4" />,
         run: onOpenSettings,
       },
@@ -167,21 +210,37 @@ export const CommandPaletteModal: React.FC<CommandPaletteModalProps> = ({
       const folderName = nb.folderId ? folderMap.get(nb.folderId) : null;
       const countText =
         nb.mode === 'whiteboard'
-          ? 'Whiteboard'
-          : `${nb.pageOrder.length} page${nb.pageOrder.length === 1 ? '' : 's'}`;
+          ? 'Infinite Board'
+          : nb.mode === 'notes'
+            ? 'Doc'
+            : nb.mode === 'slides'
+              ? `${nb.pageOrder.length} slide${nb.pageOrder.length === 1 ? '' : 's'}`
+              : `${nb.pageOrder.length} page${nb.pageOrder.length === 1 ? '' : 's'}`;
+      const modeBadge = nb.isLocked
+        ? 'Locked'
+        : nb.mode === 'slides'
+          ? 'Slides'
+          : nb.mode === 'notes'
+            ? 'Doc'
+            : nb.mode === 'whiteboard'
+              ? 'Board'
+              : 'Canvas';
+      const icon = nb.isLocked ? (
+        <Lock className="h-4 w-4 text-[var(--state-warning)]" />
+      ) : nb.mode === 'slides' ? (
+        <Presentation className="h-4 w-4 text-[var(--crimson-500)]" />
+      ) : nb.mode === 'notes' ? (
+        <FileText className="h-4 w-4 text-[var(--crimson-500)]" />
+      ) : (
+        <Palette className="h-4 w-4" />
+      );
       return {
         id: `nb-${nb.id}`,
-        group: 'Notebooks',
+        group: 'Library',
         title: nb.title,
         subtitle: folderName ? `${folderName} · ${countText}` : countText,
-        badge: nb.isLocked ? 'Locked' : nb.mode === 'whiteboard' ? 'Whiteboard' : undefined,
-        icon: nb.isLocked ? (
-          <Lock className="h-4 w-4 text-[var(--state-warning)]" />
-        ) : nb.mode === 'whiteboard' ? (
-          <Presentation className="h-4 w-4 text-[var(--crimson-500)]" />
-        ) : (
-          <BookOpen className="h-4 w-4" />
-        ),
+        badge: modeBadge,
+        icon,
         run: () => onSelectNotebook(nb),
       };
     });
@@ -196,6 +255,33 @@ export const CommandPaletteModal: React.FC<CommandPaletteModalProps> = ({
     }));
 
     const templateEntries: CommandEntry[] = [
+      ...BUILT_IN_NOTE_TEMPLATES.map((tpl) => ({
+        id: `tpl-note-${tpl.id}`,
+        group: 'Templates' as const,
+        title: tpl.name,
+        subtitle: tpl.badge,
+        badge: 'Doc',
+        icon: <FileText className="h-4 w-4 text-[var(--crimson-500)]" />,
+        run: () =>
+          onLaunchTemplate(tpl.name, { ...DEFAULT_PAPER_CONFIG }, [], [], [], 'notes', {
+            initialNoteData: tpl.buildNoteData(),
+          }),
+      })),
+      ...BUILT_IN_SLIDE_TEMPLATES.map((tpl) => ({
+        id: `tpl-slide-${tpl.id}`,
+        group: 'Templates' as const,
+        title: tpl.name,
+        subtitle: tpl.aspectLabel,
+        badge: 'Slides',
+        icon: <Presentation className="h-4 w-4 text-[var(--crimson-500)]" />,
+        run: () => {
+          const built = tpl.buildDeck();
+          onLaunchTemplate(tpl.name, built.paper, [], [], [], 'slides', {
+            slideSizePreset: tpl.slideSizePreset,
+            initialSlides: built.slides,
+          });
+        },
+      })),
       ...customTemplates.map((t) => ({
         id: `tpl-custom-${t.id}`,
         group: 'Templates' as const,
@@ -205,7 +291,7 @@ export const CommandPaletteModal: React.FC<CommandPaletteModalProps> = ({
           t.mode === 'whiteboard'
             ? t.name.toLowerCase().includes('whiteboard')
               ? undefined
-              : 'Whiteboard'
+              : 'Board'
             : 'Custom',
         icon:
           t.mode === 'whiteboard' ? (
@@ -227,8 +313,8 @@ export const CommandPaletteModal: React.FC<CommandPaletteModalProps> = ({
         id: `tpl-wb-${b.id}`,
         group: 'Templates' as const,
         title: b.name,
-        subtitle: 'Whiteboard',
-        icon: <Presentation className="h-4 w-4 text-[var(--crimson-500)]" />,
+        subtitle: 'Infinite Board',
+        icon: <Palette className="h-4 w-4 text-[var(--crimson-500)]" />,
         run: () => onLaunchTemplate(b.name, b.paper, undefined, undefined, undefined, 'whiteboard'),
       })),
       ...ALL_BUILT_IN_PAPER_VARIANTS.map((b) => ({
@@ -247,6 +333,8 @@ export const CommandPaletteModal: React.FC<CommandPaletteModalProps> = ({
     folders,
     customTemplates,
     onNewNotebook,
+    onNewNote,
+    onNewSlides,
     onNewWhiteboard,
     onImportPdf,
     onOpenTemplates,
@@ -262,7 +350,7 @@ export const CommandPaletteModal: React.FC<CommandPaletteModalProps> = ({
     const q = query.trim().toLowerCase();
     if (!q) {
       const quickActions = allEntries.filter((e) => e.group === 'Actions');
-      const topNotebooks = allEntries.filter((e) => e.group === 'Notebooks').slice(0, 4);
+      const topNotebooks = allEntries.filter((e) => e.group === 'Library').slice(0, 4);
       const topFolders = allEntries.filter((e) => e.group === 'Folders').slice(0, 3);
       return [...quickActions, ...topNotebooks, ...topFolders];
     }
@@ -283,7 +371,7 @@ export const CommandPaletteModal: React.FC<CommandPaletteModalProps> = ({
 
   if (!open) return null;
 
-  const groupedOrder: CommandGroup[] = ['Actions', 'Notebooks', 'Folders', 'Templates'];
+  const groupedOrder: CommandGroup[] = ['Actions', 'Library', 'Folders', 'Templates'];
   const executeEntry = (entry: CommandEntry | undefined) => {
     if (!entry) return;
     onClose();
@@ -356,7 +444,7 @@ export const CommandPaletteModal: React.FC<CommandPaletteModalProps> = ({
             data-testid="command-palette-input"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="Jump to a notebook, folder, template, or studio action…"
+            placeholder="Jump to a canvas, doc, slide deck, folder, template, or action…"
             className="w-full bg-transparent text-sm font-medium text-[var(--navy-900)] placeholder:text-[var(--navy-600)]/70 outline-none"
           />
           {query && (
@@ -375,7 +463,7 @@ export const CommandPaletteModal: React.FC<CommandPaletteModalProps> = ({
         <div className="custom-scrollbar max-h-[54vh] overflow-y-auto p-2.5">
           {filteredEntries.length === 0 ? (
             <div className="py-12 text-center text-xs font-medium text-[var(--navy-600)]">
-              No notebooks, folders, templates, or actions match &ldquo;{query.trim()}&rdquo;.
+              No canvases, docs, slides, folders, or templates match &ldquo;{query.trim()}&rdquo;.
             </div>
           ) : (
             <div className="space-y-3">

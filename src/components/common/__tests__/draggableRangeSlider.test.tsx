@@ -153,7 +153,7 @@ describe('DraggableRangeSlider & Whole-App UI Scale dragging', () => {
       toJSON: () => ({}),
     });
 
-    // Click near 150% thumb and drag down toward 95% (center is 259 -> 115%, ~189 -> 95%)
+    // Click near upper half and drag smoothly across the expanded 75%-200% range (clientX=189 -> 110%)
     await act(async () => {
       dispatchPointer(slider, 'pointerdown', { clientX: 349, clientY: 312 });
     });
@@ -167,8 +167,8 @@ describe('DraggableRangeSlider & Whole-App UI Scale dragging', () => {
     // Live badge & input value track the drag smoothly while store zoom waits until release
     expect(
       container.querySelector('[data-testid="settings-ui-scale-value"]')?.textContent,
-    ).toBe('95%');
-    expect(slider.value).toBe('95');
+    ).toBe('110%');
+    expect(slider.value).toBe('110');
     expect(setUiScaleSpy).not.toHaveBeenCalled();
     expect(useAppStore.getState().uiScale).toBe(1.35);
 
@@ -177,10 +177,10 @@ describe('DraggableRangeSlider & Whole-App UI Scale dragging', () => {
     });
 
     expect(setUiScaleSpy).toHaveBeenCalledTimes(1);
-    expect(setUiScaleSpy).toHaveBeenCalledWith(0.95);
-    expect(useAppStore.getState().uiScale).toBe(0.95);
+    expect(setUiScaleSpy).toHaveBeenCalledWith(1.1);
+    expect(useAppStore.getState().uiScale).toBe(1.1);
     expect(
       container.querySelector('[data-testid="settings-ui-scale-value"]')?.textContent,
-    ).toBe('95%');
+    ).toBe('110%');
   });
 });

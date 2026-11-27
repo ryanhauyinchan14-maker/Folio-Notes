@@ -77,12 +77,13 @@ export const NotebookModal: React.FC<NotebookModalProps> = ({
   const createNotebook = useAppStore((s) => s.createNotebook);
   const updateNotebookMeta = useAppStore((s) => s.updateNotebookMeta);
   const defaultPaperPattern = useAppStore((s) => s.defaultPaperPattern);
+  const defaultSlideSizePreset = useAppStore((s) => s.defaultSlideSizePreset);
 
   const [title, setTitle] = useState('');
   const [mode, setMode] = useState<NotebookMode>(initialMode);
   const [boardPattern, setBoardPattern] = useState<'dotted' | 'grid' | 'blank'>('dotted');
   const [slideSizePreset, setSlideSizePreset] = useState<SlideSizePresetId>(
-    DEFAULT_SLIDE_SIZE_PRESET,
+    defaultSlideSizePreset || DEFAULT_SLIDE_SIZE_PRESET,
   );
   const [customSlideWidth, setCustomSlideWidth] = useState(1920);
   const [customSlideHeight, setCustomSlideHeight] = useState(1080);
@@ -116,7 +117,7 @@ export const NotebookModal: React.FC<NotebookModalProps> = ({
       setTitle('');
       setMode(initialMode);
       setBoardPattern('dotted');
-      setSlideSizePreset(DEFAULT_SLIDE_SIZE_PRESET);
+      setSlideSizePreset(defaultSlideSizePreset || DEFAULT_SLIDE_SIZE_PRESET);
       setCustomSlideWidth(1920);
       setCustomSlideHeight(1080);
       setFolderId(defaultFolderId);
@@ -124,7 +125,7 @@ export const NotebookModal: React.FC<NotebookModalProps> = ({
       setSelectedTemplateId(preferredPreset.id);
     }
     setSaving(false);
-  }, [open, editingNotebook, initialMode, defaultFolderId, defaultPaperPattern]);
+  }, [open, editingNotebook, initialMode, defaultFolderId, defaultPaperPattern, defaultSlideSizePreset]);
 
   if (!open) return null;
 
@@ -135,10 +136,11 @@ export const NotebookModal: React.FC<NotebookModalProps> = ({
       const dataUrl = await resizeImageToDataUrl(file);
       setCover({
         styleId: 'custom-image',
-        primaryColor: '#334155',
-        accentColor: '#94A3B8',
+        primaryColor: '#072D59',
+        accentColor: '#DBF2FC',
         pattern: 'solid',
         customImageDataUrl: dataUrl,
+        imagePresentation: 'inset',
       });
     } catch {
       // Ignore malformed image uploads
@@ -229,10 +231,18 @@ export const NotebookModal: React.FC<NotebookModalProps> = ({
             </div>
             <div>
               <h2 id="notebook-modal-title" className="text-base font-bold text-[var(--navy-900)]">
-                {editingNotebook ? 'Edit Notebook' : 'Create New Notebook'}
+                {editingNotebook
+                  ? 'Edit Cover & Details'
+                  : mode === 'slides'
+                    ? 'Create New Slides'
+                    : mode === 'notes'
+                      ? 'Create New Doc'
+                      : mode === 'whiteboard'
+                        ? 'Create Infinite Board'
+                        : 'Create New Canvas'}
               </h2>
               <p className="text-xs text-[var(--navy-600)]">
-                Choose a custom cover, folder, and starting paper template
+                Choose workspace mode, cover style, folder, and starting layout
               </p>
             </div>
           </div>
@@ -451,6 +461,51 @@ export const NotebookModal: React.FC<NotebookModalProps> = ({
                     </label>
                   </div>
                 </div>
+
+                {cover.styleId === 'custom-image' && cover.customImageDataUrl && (
+                  <div className="mb-2 flex items-center justify-between gap-2 rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-canvas)] px-2.5 py-1.5">
+                    <span className="text-[11px] font-semibold text-[var(--navy-600)]">
+                      Cover Image Framing
+                    </span>
+                    <div className="folio-segmented-track inline-flex rounded-lg p-0.5">
+                      <button
+                        type="button"
+                        data-testid="cover-framing-inset"
+                        onClick={() =>
+                          setCover((prev) => ({
+                            ...prev,
+                            primaryColor: prev.primaryColor || '#072D59',
+                            imagePresentation: 'inset',
+                          }))
+                        }
+                        className={`folio-press rounded-md px-2 py-0.5 text-[10px] font-bold ${
+                          cover.imagePresentation !== 'full'
+                            ? 'folio-glass-active'
+                            : 'text-[var(--navy-600)] hover:text-[var(--navy-900)]'
+                        }`}
+                      >
+                        Framed Inset
+                      </button>
+                      <button
+                        type="button"
+                        data-testid="cover-framing-full"
+                        onClick={() =>
+                          setCover((prev) => ({
+                            ...prev,
+                            imagePresentation: 'full',
+                          }))
+                        }
+                        className={`folio-press rounded-md px-2 py-0.5 text-[10px] font-bold ${
+                          cover.imagePresentation === 'full'
+                            ? 'folio-glass-active'
+                            : 'text-[var(--navy-600)] hover:text-[var(--navy-900)]'
+                        }`}
+                      >
+                        Full Bleed
+                      </button>
+                    </div>
+                  </div>
+                )}
 
                 <div className="grid grid-cols-4 gap-2">
                   {COVER_PRESETS.map((preset) => {

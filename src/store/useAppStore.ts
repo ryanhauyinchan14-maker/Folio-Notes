@@ -38,7 +38,8 @@ import {
   UNIFIED_INK_SWATCHES,
 } from '../constants/covers';
 import { db } from '../db/database';
-import { NOTEBOOK_UNDO_WINDOW_MS, repository } from '../db/repository';
+import { createDefaultNoteDocumentData, NOTEBOOK_UNDO_WINDOW_MS, repository } from '../db/repository';
+import { resolveSlidePaperConfig } from '../slides/slidePresets';
 import type {
   BoundingBox,
   BrushPresetId,
@@ -49,6 +50,7 @@ import type {
   Notebook,
   NotebookMode,
   NoteDocumentData,
+  NotePageStyle,
   Page,
   PageImage,
   PaperConfig,
@@ -409,6 +411,9 @@ interface AppState {
   defaultZoomMode: DefaultZoomMode;
   defaultTool: DefaultToolPreference;
   defaultPaperPattern: PaperPattern;
+  defaultBrushId: BrushPresetId;
+  defaultNotePageStyle: NotePageStyle;
+  defaultSlideSizePreset: Exclude<SlideSizePresetId, 'custom'>;
   activeAiProvider: AiProviderId;
   aiProviderKeys: Record<AiProviderId, string>;
   aiProviderModels: Record<AiProviderId, string>;
@@ -454,6 +459,8 @@ interface AppState {
     initialStrokes?: Stroke[];
     initialTextboxes?: Textbox[];
     initialImages?: PageImage[];
+    initialNoteData?: NoteDocumentData;
+    initialSlides?: SlideData[];
     openImmediately?: boolean;
   }) => Promise<Notebook>;
   updateNotebookMeta: (
@@ -576,6 +583,9 @@ interface AppState {
   setDefaultZoomMode: (mode: DefaultZoomMode) => void;
   setDefaultTool: (tool: DefaultToolPreference) => void;
   setDefaultPaperPattern: (pattern: PaperPattern) => void;
+  setDefaultBrushId: (brushId: BrushPresetId) => void;
+  setDefaultNotePageStyle: (style: NotePageStyle) => void;
+  setDefaultSlideSizePreset: (preset: Exclude<SlideSizePresetId, 'custom'>) => void;
   setActiveAiProvider: (provider: AiProviderId) => void;
   setAiProviderKey: (provider: AiProviderId, apiKey: string) => void;
   clearAiProviderKey: (provider: AiProviderId) => void;
@@ -869,6 +879,9 @@ function persistWorkspacePrefsSnapshot(state: AppState): void {
     defaultZoomMode: state.defaultZoomMode,
     defaultTool: state.defaultTool,
     defaultPaperPattern: state.defaultPaperPattern,
+    defaultBrushId: state.defaultBrushId,
+    defaultNotePageStyle: state.defaultNotePageStyle,
+    defaultSlideSizePreset: state.defaultSlideSizePreset,
     uiScale: state.uiScale,
     ctrlScrollBehavior: state.ctrlScrollBehavior,
     eraserMode: state.eraserMode,
@@ -1080,7 +1093,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   activePaneSide: 'left',
 
   activeTool: initialPrefs.defaultTool,
-  activeBrushId: 'technical',
+  activeBrushId: initialPrefs.defaultBrushId,
   brushOpacity: 1,
   brushStreamline: 0.45,
   symmetryMode: 'off',
@@ -1119,6 +1132,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   defaultZoomMode: initialPrefs.defaultZoomMode,
   defaultTool: initialPrefs.defaultTool,
   defaultPaperPattern: initialPrefs.defaultPaperPattern,
+  defaultBrushId: initialPrefs.defaultBrushId,
+  defaultNotePageStyle: initialPrefs.defaultNotePageStyle,
+  defaultSlideSizePreset: initialPrefs.defaultSlideSizePreset,
   activeAiProvider: initialPrefs.activeAiProvider,
   aiProviderKeys: getAllAiProviderKeys(),
   aiProviderModels: initialPrefs.aiProviderModels,
@@ -1241,18 +1257,37 @@ export const useAppStore = create<AppState>((set, get) => ({
     initialStrokes,
     initialTextboxes,
     initialImages,
+    initialNoteData,
+    initialSlides,
     openImmediately = true,
   }) => {
+    const state = get();
+    const resolvedSlidePreset =
+      mode === 'slides' ? slideSizePreset ?? state.defaultSlideSizePreset : undefined;
+    const resolvedPaper =
+      mode === 'slides' && !slideSizePreset && !paper.width
+        ? resolveSlidePaperConfig(resolvedSlidePreset)
+        : paper;
+    const resolvedNoteData =
+      mode === 'notes'
+        ? initialNoteData ?? {
+            ...createDefaultNoteDocumentData(),
+            pageStyle: state.defaultNotePageStyle,
+          }
+        : undefined;
+
     const { notebook } = await repository.createNotebook({
       title,
       mode,
-      slideSizePreset,
+      slideSizePreset: resolvedSlidePreset,
       folderId,
       cover,
-      paper,
+      paper: resolvedPaper,
       initialStrokes,
       initialTextboxes,
       initialImages,
+      initialNoteData: resolvedNoteData,
+      initialSlides,
     });
     await get().refreshShelf();
     if (openImmediately) {
@@ -1298,9 +1333,17 @@ export const useAppStore = create<AppState>((set, get) => ({
     const trashedRecord = await repository.deleteNotebook(id);
     if (trashedRecord) {
       recordDeletedNotebooksForUndo([trashedRecord], get, set);
+      set((state) => ({
+        trashedNotebooks: [
+          trashedRecord,
+          ...state.trashedNotebooks.filter((t) => t.id !== trashedRecord.id),
+        ],
+      }));
     }
-    await finalizeDeletedNotebookState(id, false, get, set);
-    await get().refreshTrash();
+    await Promise.all([
+      finalizeDeletedNotebookState(id, false, get, set),
+      get().refreshTrash(),
+    ]);
     playUiSound('delete');
   },
 
@@ -2554,6 +2597,21 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   setDefaultPaperPattern: (pattern) => {
     set({ defaultPaperPattern: pattern });
+    persistWorkspacePrefsSnapshot(get());
+  },
+
+  setDefaultBrushId: (brushId) => {
+    set({ defaultBrushId: brushId, activeBrushId: brushId });
+    persistWorkspacePrefsSnapshot(get());
+  },
+
+  setDefaultNotePageStyle: (style) => {
+    set({ defaultNotePageStyle: style });
+    persistWorkspacePrefsSnapshot(get());
+  },
+
+  setDefaultSlideSizePreset: (preset) => {
+    set({ defaultSlideSizePreset: preset });
     persistWorkspacePrefsSnapshot(get());
   },
 
@@ -5691,6 +5749,7 @@ export const useAppStore = create<AppState>((set, get) => ({
             accentColor: '#DBF2FC',
             pattern: 'solid',
             customImageDataUrl: extracted.coverDataUrl,
+            imagePresentation: 'inset',
           }
         : { ...baseCover };
 

@@ -235,6 +235,10 @@ export const DEFAULT_KEYBOARD_SHORTCUTS: KeyboardShortcutsMap = SHORTCUT_DEFINIT
 
 export const BUILT_IN_GESTURES: Array<{ keys: string; desc: string }> = [
   {
+    keys: 'G / I (Drawing Board)',
+    desc: 'ColorDrop Flood Fill (G) and Live Color Eyedropper (I)',
+  },
+  {
     keys: 'Hold Right Click (Pen / Select)',
     desc: 'Temporary Lasso mode (right click selected element for menu)',
   },
@@ -247,8 +251,12 @@ export const BUILT_IN_GESTURES: Array<{ keys: string; desc: string }> = [
     desc: 'Draw a straight horizontal or vertical line',
   },
   {
-    keys: 'Any other unbound key',
-    desc: 'Spawn airtight textbox & start typing',
+    keys: '/ (Docs / Notes Mode)',
+    desc: 'Open Slash Command menu (headings, checklists, callouts, tables)',
+  },
+  {
+    keys: 'F5 · L · N (Slides Mode)',
+    desc: 'Present deck (F5), toggle Laser pointer (L), toggle Speaker Notes (N)',
   },
   { keys: 'Drag Empty Paper (Select)', desc: 'Marquee drag-box multi-selection' },
   { keys: 'Shift + Click', desc: 'Add or remove element from selection' },
@@ -258,9 +266,12 @@ export const BUILT_IN_GESTURES: Array<{ keys: string; desc: string }> = [
   { keys: 'Double-click Photo', desc: 'Pan photo inside frame (Crop mode)' },
   { keys: 'Arrow Keys / Shift + Arrow', desc: 'Nudge selection by 1px / 10px' },
   { keys: 'Drag off paper edge', desc: 'Delete unlocked element or group (Undo reverts)' },
-  { keys: 'Ctrl / Cmd + Scroll', desc: 'Smart zoom: GUI on Home Shelf, Canvas in Editor' },
+  {
+    keys: 'Ctrl / Cmd + Scroll',
+    desc: 'Smart zoom: UI Scale up to 200% on Shelf, Doc/Slide zoom up to 200%, Canvas up to 400%',
+  },
   { keys: 'Alt + Scroll', desc: 'Zoom paper canvas' },
-  { keys: 'Esc', desc: 'Exit text edit / crop mode → Deselect' },
+  { keys: 'Esc', desc: 'Exit edit / crop / present mode → Deselect' },
 ];
 
 const STANDALONE_MODIFIER_KEYS = new Set([

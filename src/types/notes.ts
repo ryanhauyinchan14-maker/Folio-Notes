@@ -137,6 +137,7 @@ export interface CoverConfig {
   accentColor: string;
   pattern: 'solid' | 'spine-band' | 'dots' | 'grid' | 'gradient';
   customImageDataUrl?: string;
+  imagePresentation?: 'inset' | 'full';
 }
 
 export interface Folder {

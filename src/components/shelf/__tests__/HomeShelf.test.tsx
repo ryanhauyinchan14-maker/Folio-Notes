@@ -75,16 +75,23 @@ describe('Seal & Crimson Canva-inspired HomeShelf', () => {
     expect(hero).not.toBeNull();
     expect(hero.querySelector('[data-testid="home-hero-shader"]')).not.toBeNull();
     expect(hero.textContent).toContain('Your Notes, Ready.');
-    expect(hero.textContent).toContain('drawing board');
+    expect(hero.textContent).toContain('canvas');
     expect(hero.textContent).not.toContain('LOCAL-FIRST');
     expect(hero.textContent).not.toContain('Cover, folder & template');
 
-    expect(container.querySelector('[data-testid="hero-new-notebook-btn"]')?.textContent).toContain(
-      'New Drawing Board',
-    );
+    const newCanvasBtn = container.querySelector('[data-testid="hero-new-notebook-btn"]')!;
+    const newDocBtn = container.querySelector('[data-testid="quick-create-note"]')!;
+    const newSlidesBtn = container.querySelector('[data-testid="quick-create-slides"]')!;
+    expect(newCanvasBtn.textContent).toContain('New Canvas');
+    expect(newDocBtn.textContent).toContain('New Doc');
+    expect(newSlidesBtn.textContent).toContain('New Slides');
+    expect(newCanvasBtn.className).toContain('folio-btn-crimson');
+    expect(newDocBtn.className).toContain('folio-btn-crimson');
+    expect(newSlidesBtn.className).toContain('folio-btn-crimson');
+    expect(newCanvasBtn.className).toContain('rounded-full');
+    expect(newDocBtn.className).toContain('rounded-full');
+    expect(newSlidesBtn.className).toContain('rounded-full');
     expect(container.querySelector('[data-testid="quick-create-whiteboard"]')).not.toBeNull();
-    expect(container.querySelector('[data-testid="quick-create-note"]')).not.toBeNull();
-    expect(container.querySelector('[data-testid="quick-create-slides"]')).not.toBeNull();
     expect(container.querySelector('[data-testid="import-pdf-btn"]')?.textContent).toContain(
       'Import PDF',
     );
@@ -208,7 +215,13 @@ describe('Seal & Crimson Canva-inspired HomeShelf', () => {
       });
 
       expect(container.querySelector('[data-testid="template-tab-all"]')?.textContent).toContain(
-        'All (8)',
+        'All (16)',
+      );
+      expect(container.querySelector('[data-testid="template-tab-notes"]')?.textContent).toContain(
+        'Docs (4)',
+      );
+      expect(container.querySelector('[data-testid="template-tab-slides"]')?.textContent).toContain(
+        'Slides (4)',
       );
       expect(
         container.querySelector('[data-testid="template-tab-whiteboards"]')?.textContent,

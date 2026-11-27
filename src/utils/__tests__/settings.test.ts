@@ -139,8 +139,11 @@ describe('workspace preferences, multi-provider keys, UI scale & smart dark pape
     expect(corrupted.uiSoundsEnabled).toBe(false);
     expect(corrupted.dockPosition).toBe('bottom');
     expect(corrupted.heroHeadline).toBe(DEFAULT_HERO_HEADLINE);
-    expect(corrupted.uiScale).toBe(1.5);
+    expect(corrupted.uiScale).toBe(2);
     expect(corrupted.ctrlScrollBehavior).toBe('smart');
+    expect(corrupted.defaultBrushId).toBe('technical');
+    expect(corrupted.defaultNotePageStyle).toBe('paginated');
+    expect(corrupted.defaultSlideSizePreset).toBe('16:9');
     expect(corrupted.eraserMode).toBe('precision');
     expect(corrupted.activeAiProvider).toBe('gemini');
     expect(corrupted.geminiModelPreset).toBe('gemini-3-flash');
@@ -204,29 +207,32 @@ describe('workspace preferences, multi-provider keys, UI scale & smart dark pape
     expect(localOllamaNoKey.baseUrl).toBe('http://localhost:11434/v1');
   });
 
-  it('clamps UI zoom bounds to [0.75, 1.50] and uses Electron bridge when present or CSS fallback', () => {
+  it('clamps UI zoom bounds to [0.75, 2.00] and uses Electron bridge when present or CSS fallback', () => {
     expect(clampUiScale(0.2)).toBe(0.75);
-    expect(clampUiScale(2.5)).toBe(1.5);
+    expect(clampUiScale(1.75)).toBe(1.75);
+    expect(clampUiScale(2.0)).toBe(2.0);
+    expect(clampUiScale(2.5)).toBe(2.0);
     expect(clampUiScale(Number.NaN)).toBe(1.35);
     expect(stepUiScale(1, 0.1)).toBe(1.1);
+    expect(stepUiScale(1.95, 0.1)).toBe(2.0);
     expect(stepUiScale(0.75, -0.1)).toBe(0.75);
 
     // Browser CSS fallback mode
-    expect(applyUiScaleToRuntime(1.15)).toBe(1.15);
-    expect(document.documentElement.style.zoom).toBe('1.15');
-    expect(document.documentElement.dataset.uiScale).toBe('1.15');
+    expect(applyUiScaleToRuntime(1.8)).toBe(1.8);
+    expect(document.documentElement.style.zoom).toBe('1.8');
+    expect(document.documentElement.dataset.uiScale).toBe('1.8');
 
     // Electron webFrame bridge mode
-    const setUiZoomFactorMock = vi.fn((f: number) => Math.max(0.75, Math.min(1.5, f)));
+    const setUiZoomFactorMock = vi.fn((f: number) => Math.max(0.75, Math.min(2.0, f)));
     window.folioDesktop = {
       isElectron: true,
       platform: 'win32',
       setUiZoomFactor: setUiZoomFactorMock,
-      getUiZoomFactor: () => 1.25,
+      getUiZoomFactor: () => 1.85,
       aiFetch: vi.fn(),
     };
-    expect(applyUiScaleToRuntime(1.3)).toBe(1.3);
-    expect(setUiZoomFactorMock).toHaveBeenCalledWith(1.3);
+    expect(applyUiScaleToRuntime(1.85)).toBe(1.85);
+    expect(setUiZoomFactorMock).toHaveBeenCalledWith(1.85);
     expect(document.documentElement.style.zoom).toBe('');
   });
 

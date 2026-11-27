@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ChevronRight,
   Copy,
@@ -15,7 +15,6 @@ import {
   MoreVertical,
   Palette,
   Pencil,
-  Plus,
   Presentation,
   RefreshCw,
   RotateCcw,
@@ -35,16 +34,21 @@ import {
   formatPaperPatternLabel,
 } from '../../constants/papers';
 import { formatTrashTimeRemaining, repository } from '../../db/repository';
-import { DEFAULT_SLIDE_PAPER, DEFAULT_SLIDE_SIZE_PRESET } from '../../slides/slidePresets';
+import { BUILT_IN_NOTE_TEMPLATES } from '../../notes/noteTemplates';
+import { resolveSlidePaperConfig } from '../../slides/slidePresets';
+import { BUILT_IN_SLIDE_TEMPLATES } from '../../slides/slideTemplates';
 import { useAppStore } from '../../store/useAppStore';
 import { useUpdaterStore } from '../../store/useUpdaterStore';
 import {
   type Folder,
   type Notebook,
   type NotebookMode,
+  type NoteDocumentData,
   type Page,
   type PageImage,
   type PaperConfig,
+  type SlideData,
+  type SlideSizePresetId,
   type Stroke,
   type Textbox,
   getWorkspaceCategory,
@@ -88,6 +92,7 @@ export const HomeShelf: React.FC = () => {
   const customTemplates = useAppStore((s) => s.customTemplates);
   const shelfLoading = useAppStore((s) => s.shelfLoading);
   const heroHeadline = useAppStore((s) => s.heroHeadline);
+  const defaultSlideSizePreset = useAppStore((s) => s.defaultSlideSizePreset);
 
   const navigateToFolder = useAppStore((s) => s.navigateToFolder);
   const openNotebook = useAppStore((s) => s.openNotebook);
@@ -154,6 +159,11 @@ export const HomeShelf: React.FC = () => {
   }>({ open: false, notebook: null, pages: [] });
 
   useEffect(() => {
+    if (currentFolderId === null && folders.length === 0 && !commandPaletteOpen) {
+      setAllFolders([]);
+      setAllNotebooks(notebooks);
+      return;
+    }
     let active = true;
     void Promise.all([repository.getAllFolders(), repository.getAllNotebooks()]).then(
       ([folderList, nbList]) => {
@@ -165,7 +175,7 @@ export const HomeShelf: React.FC = () => {
     return () => {
       active = false;
     };
-  }, [folders, notebooks, commandPaletteOpen]);
+  }, [currentFolderId, folders, notebooks, commandPaletteOpen]);
 
   useEffect(() => {
     setCanInstallPwa(getCanInstallPwa());
@@ -392,27 +402,35 @@ export const HomeShelf: React.FC = () => {
     }
   };
 
-  const handleNotebookCardClick = async (notebook: Notebook) => {
-    setOpenMenuId(null);
-    if (notebook.isLocked) {
-      setUnlockModalState({ open: true, notebook, folder: null, mode: 'open' });
-      return;
-    }
-    if (openingNotebookRef.current) return;
-    openingNotebookRef.current = true;
-    setOpeningNotebookId(notebook.id);
-    try {
-      await openNotebook(notebook.id);
-    } catch (err) {
-      setImportNotice({
-        kind: 'error',
-        message: err instanceof Error ? err.message : 'Unable to open notebook.',
-      });
-    } finally {
-      openingNotebookRef.current = false;
-      setOpeningNotebookId(null);
-    }
-  };
+  const handleNotebookCardClick = useCallback(
+    async (notebook: Notebook) => {
+      setOpenMenuId(null);
+      if (notebook.isLocked) {
+        setUnlockModalState({ open: true, notebook, folder: null, mode: 'open' });
+        return;
+      }
+      if (openingNotebookRef.current) return;
+      openingNotebookRef.current = true;
+      setOpeningNotebookId(notebook.id);
+      try {
+        await openNotebook(notebook.id);
+      } catch (err) {
+        setImportNotice({
+          kind: 'error',
+          message: err instanceof Error ? err.message : 'Unable to open studio item.',
+        });
+      } finally {
+        openingNotebookRef.current = false;
+        setOpeningNotebookId(null);
+      }
+    },
+    [openNotebook],
+  );
+
+  const handleToggleNotebookMenu = useCallback((notebookId: string) => {
+    const key = `nb-${notebookId}`;
+    setOpenMenuId((prev) => (prev === key ? null : key));
+  }, []);
 
   const handleLockActionFromMenu = (notebook: Notebook) => {
     setOpenMenuId(null);
@@ -473,13 +491,14 @@ export const HomeShelf: React.FC = () => {
 
   const handleQuickCreateSlides = async () => {
     const presetCover = (COVER_PRESETS[2] ?? COVER_PRESETS[0]).cover;
+    const preset = defaultSlideSizePreset || '16:9';
     await createNotebook({
       title: 'Untitled Presentation',
       mode: 'slides',
-      slideSizePreset: DEFAULT_SLIDE_SIZE_PRESET,
+      slideSizePreset: preset,
       folderId: currentFolderId,
       cover: { ...presetCover },
-      paper: { ...DEFAULT_SLIDE_PAPER },
+      paper: resolveSlidePaperConfig(preset),
       openImmediately: true,
     });
   };
@@ -491,14 +510,24 @@ export const HomeShelf: React.FC = () => {
     textboxes?: Textbox[],
     images?: PageImage[],
     mode: NotebookMode = 'notebook',
+    extra?: {
+      slideSizePreset?: SlideSizePresetId;
+      initialNoteData?: NoteDocumentData;
+      initialSlides?: SlideData[];
+    },
   ) => {
     const defaultCover =
       mode === 'whiteboard'
         ? COVER_PRESETS[3]?.cover ?? COVER_PRESETS[0]?.cover
-        : COVER_PRESETS[0]?.cover;
+        : mode === 'slides'
+          ? COVER_PRESETS[2]?.cover ?? COVER_PRESETS[0]?.cover
+          : mode === 'notes'
+            ? COVER_PRESETS[1]?.cover ?? COVER_PRESETS[0]?.cover
+            : COVER_PRESETS[0]?.cover;
     await createNotebook({
       title,
       mode,
+      ...(extra?.slideSizePreset ? { slideSizePreset: extra.slideSizePreset } : {}),
       folderId: currentFolderId,
       cover: {
         ...(defaultCover ?? {
@@ -512,6 +541,8 @@ export const HomeShelf: React.FC = () => {
       initialStrokes: strokes,
       initialTextboxes: textboxes,
       initialImages: images,
+      ...(extra?.initialNoteData ? { initialNoteData: extra.initialNoteData } : {}),
+      ...(extra?.initialSlides ? { initialSlides: extra.initialSlides } : {}),
       openImmediately: true,
     });
   };
@@ -546,6 +577,46 @@ export const HomeShelf: React.FC = () => {
   const matchingTemplates = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return [];
+    const noteMatches = BUILT_IN_NOTE_TEMPLATES.filter(
+      (t) =>
+        t.name.toLowerCase().includes(q) ||
+        t.badge.toLowerCase().includes(q) ||
+        'doc'.includes(q) ||
+        'notes'.includes(q) ||
+        'document'.includes(q),
+    ).map((t) => ({
+      id: t.id,
+      name: t.name,
+      mode: 'notes' as NotebookMode,
+      subtitle: t.badge,
+      paper: { ...DEFAULT_PAPER_CONFIG },
+      strokes: [] as Stroke[],
+      textboxes: undefined,
+      images: undefined,
+      extra: { initialNoteData: t.buildNoteData() },
+    }));
+    const slideMatches = BUILT_IN_SLIDE_TEMPLATES.filter(
+      (t) =>
+        t.name.toLowerCase().includes(q) ||
+        t.aspectLabel.toLowerCase().includes(q) ||
+        'slide'.includes(q) ||
+        'slides'.includes(q) ||
+        'deck'.includes(q) ||
+        'presentation'.includes(q),
+    ).map((t) => {
+      const built = t.buildDeck();
+      return {
+        id: t.id,
+        name: t.name,
+        mode: 'slides' as NotebookMode,
+        subtitle: `Slides · ${t.aspectLabel}`,
+        paper: built.paper,
+        strokes: [] as Stroke[],
+        textboxes: undefined,
+        images: undefined,
+        extra: { slideSizePreset: t.slideSizePreset, initialSlides: built.slides },
+      };
+    });
     const customMatches = customTemplates
       .filter(
         (t) =>
@@ -563,6 +634,7 @@ export const HomeShelf: React.FC = () => {
         strokes: t.strokes,
         textboxes: t.textboxes,
         images: t.images,
+        extra: undefined,
       }));
     const whiteboardMatches = ALL_BUILT_IN_WHITEBOARD_VARIANTS.filter(
       (b) =>
@@ -577,11 +649,12 @@ export const HomeShelf: React.FC = () => {
       id: b.id,
       name: b.name,
       mode: 'whiteboard' as NotebookMode,
-      subtitle: 'Whiteboard',
+      subtitle: 'Infinite Board',
       paper: b.paper,
       strokes: [] as Stroke[],
       textboxes: undefined,
       images: undefined,
+      extra: undefined,
     }));
     const builtInMatches = ALL_BUILT_IN_PAPER_VARIANTS.filter(
       (b) =>
@@ -599,8 +672,9 @@ export const HomeShelf: React.FC = () => {
       strokes: [] as Stroke[],
       textboxes: undefined,
       images: undefined,
+      extra: undefined,
     }));
-    return [...customMatches, ...whiteboardMatches, ...builtInMatches];
+    return [...noteMatches, ...slideMatches, ...customMatches, ...whiteboardMatches, ...builtInMatches];
   }, [query, customTemplates]);
 
   const activeFolderName =
@@ -647,10 +721,10 @@ export const HomeShelf: React.FC = () => {
               <FileUp className="h-6 w-6 text-[var(--crimson-500)]" />
             </div>
             <p className="text-sm font-bold text-[var(--navy-900)]">
-              Drop PDF to create an annotated notebook
+              Drop PDF to create an annotated canvas
             </p>
             <p className="text-xs text-[var(--navy-600)]">
-              100% offline · Preserves page aspect ratios
+              100% offline · Preserves page aspect ratios &amp; crisp framed cover
             </p>
           </div>
         </div>
@@ -689,8 +763,7 @@ export const HomeShelf: React.FC = () => {
         onClick={(e) => e.stopPropagation()}
       >
         <PaperShaderBackdrop
-          variant="hero"
-          paused={anyModalOpen}
+          variant="static-accent"
           maxPixelCount={240 * 480}
           data-testid="home-rail-shader"
         />
@@ -919,21 +992,17 @@ export const HomeShelf: React.FC = () => {
               )}
 
               <p className="mt-1.5 text-xs font-medium text-[var(--navy-600)] tabular-nums">
-                {librarySummary.drawingCount} drawing board
-                {librarySummary.drawingCount === 1 ? '' : 's'}
-                {librarySummary.notesCount > 0
-                  ? ` · ${librarySummary.notesCount} note${librarySummary.notesCount === 1 ? '' : 's'}`
-                  : ''}
-                {librarySummary.slidesCount > 0
-                  ? ` · ${librarySummary.slidesCount} deck${librarySummary.slidesCount === 1 ? '' : 's'}`
-                  : ''}{' '}
-                · {librarySummary.totalPages} page{librarySummary.totalPages === 1 ? '' : 's'}
+                {librarySummary.drawingCount} canvas
+                {librarySummary.drawingCount === 1 ? '' : 'es'} · {librarySummary.notesCount} doc
+                {librarySummary.notesCount === 1 ? '' : 's'} · {librarySummary.slidesCount} deck
+                {librarySummary.slidesCount === 1 ? '' : 's'} · {librarySummary.totalPages} page
+                {librarySummary.totalPages === 1 ? '' : 's'}
               </p>
 
-              {/* Single Flat Action Bar (Zero Duplicates, Zero Nested Cards) */}
+              {/* Studio Action Bar: Primary 3-Mode Pink Pill Trio + Frosted Secondary Actions */}
               <div
                 data-testid="quick-create-row"
-                className="mt-4 flex flex-wrap items-center gap-2"
+                className="mt-4 flex flex-wrap items-center gap-1.5"
               >
                 <button
                   type="button"
@@ -942,47 +1011,52 @@ export const HomeShelf: React.FC = () => {
                     setEditingNotebook(null);
                     setNotebookModalOpen(true);
                   }}
-                  className="folio-btn-crimson inline-flex items-center gap-1.5 rounded-xl px-4 py-2 text-xs font-bold"
+                  className="folio-btn-crimson inline-flex items-center gap-1.5 rounded-full px-3.5 py-1.5 text-xs font-bold"
                 >
-                  <Plus className="h-4 w-4 stroke-[2.5]" />
-                  <span>New Drawing Board</span>
-                </button>
-
-                <button
-                  type="button"
-                  data-testid="quick-create-whiteboard"
-                  onClick={() => void handleQuickCreateWhiteboard()}
-                  className="folio-press inline-flex items-center gap-1.5 rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-elevated)]/92 px-3.5 py-2 text-xs font-semibold text-[var(--navy-900)] shadow-2xs backdrop-blur-md hover:border-[var(--border-strong)] hover:bg-[var(--surface-elevated)]"
-                >
-                  <Palette className="h-3.5 w-3.5 text-[var(--crimson-500)]" />
-                  <span>Infinite Board</span>
+                  <Palette className="h-3.5 w-3.5" />
+                  <span>New Canvas</span>
                 </button>
 
                 <button
                   type="button"
                   data-testid="quick-create-note"
                   onClick={() => void handleQuickCreateNote()}
-                  className="folio-press inline-flex items-center gap-1.5 rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-elevated)]/92 px-3.5 py-2 text-xs font-semibold text-[var(--navy-900)] shadow-2xs backdrop-blur-md hover:border-[var(--border-strong)] hover:bg-[var(--surface-elevated)]"
+                  className="folio-btn-crimson inline-flex items-center gap-1.5 rounded-full px-3.5 py-1.5 text-xs font-bold"
                 >
-                  <FileText className="h-3.5 w-3.5 text-[var(--crimson-500)]" />
-                  <span>New Note</span>
+                  <FileText className="h-3.5 w-3.5" />
+                  <span>New Doc</span>
                 </button>
 
                 <button
                   type="button"
                   data-testid="quick-create-slides"
                   onClick={() => void handleQuickCreateSlides()}
-                  className="folio-press inline-flex items-center gap-1.5 rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-elevated)]/92 px-3.5 py-2 text-xs font-semibold text-[var(--navy-900)] shadow-2xs backdrop-blur-md hover:border-[var(--border-strong)] hover:bg-[var(--surface-elevated)]"
+                  className="folio-btn-crimson inline-flex items-center gap-1.5 rounded-full px-3.5 py-1.5 text-xs font-bold"
                 >
-                  <Presentation className="h-3.5 w-3.5 text-[var(--crimson-500)]" />
+                  <Presentation className="h-3.5 w-3.5" />
                   <span>New Slides</span>
+                </button>
+
+                <span
+                  aria-hidden="true"
+                  className="mx-0.5 hidden h-5 w-px bg-[var(--navy-900)]/15 sm:inline-block"
+                />
+
+                <button
+                  type="button"
+                  data-testid="quick-create-whiteboard"
+                  onClick={() => void handleQuickCreateWhiteboard()}
+                  className="folio-press inline-flex items-center gap-1.5 rounded-full border border-[var(--border-subtle)] bg-[var(--surface-elevated)]/92 px-3 py-1.5 text-xs font-semibold text-[var(--navy-900)] shadow-2xs backdrop-blur-md hover:border-[var(--border-strong)] hover:bg-[var(--surface-elevated)]"
+                >
+                  <Sparkles className="h-3.5 w-3.5 text-[var(--crimson-500)]" />
+                  <span>Infinite Board</span>
                 </button>
 
                 <button
                   type="button"
                   data-testid="import-pdf-btn"
                   onClick={() => pdfInputRef.current?.click()}
-                  className="folio-press inline-flex items-center gap-1.5 rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-elevated)]/92 px-3.5 py-2 text-xs font-semibold text-[var(--navy-900)] shadow-2xs backdrop-blur-md hover:border-[var(--border-strong)] hover:bg-[var(--surface-elevated)]"
+                  className="folio-press inline-flex items-center gap-1.5 rounded-full border border-[var(--border-subtle)] bg-[var(--surface-elevated)]/92 px-3 py-1.5 text-xs font-semibold text-[var(--navy-900)] shadow-2xs backdrop-blur-md hover:border-[var(--border-strong)] hover:bg-[var(--surface-elevated)]"
                 >
                   <FileUp className="h-3.5 w-3.5 text-[var(--crimson-500)]" />
                   <span>Import PDF</span>
@@ -992,7 +1066,7 @@ export const HomeShelf: React.FC = () => {
                   type="button"
                   data-testid="import-folio-btn"
                   onClick={() => importInputRef.current?.click()}
-                  className="folio-press inline-flex items-center gap-1.5 rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-elevated)]/92 px-3.5 py-2 text-xs font-semibold text-[var(--navy-900)] shadow-2xs backdrop-blur-md hover:border-[var(--border-strong)] hover:bg-[var(--surface-elevated)]"
+                  className="folio-press inline-flex items-center gap-1.5 rounded-full border border-[var(--border-subtle)] bg-[var(--surface-elevated)]/92 px-3 py-1.5 text-xs font-semibold text-[var(--navy-900)] shadow-2xs backdrop-blur-md hover:border-[var(--border-strong)] hover:bg-[var(--surface-elevated)]"
                 >
                   <Upload className="h-3.5 w-3.5 text-[var(--navy-600)]" />
                   <span>Import .folio</span>
@@ -1003,7 +1077,7 @@ export const HomeShelf: React.FC = () => {
                     type="button"
                     data-testid="pwa-install-btn"
                     onClick={() => void triggerPwaInstall()}
-                    className="folio-press inline-flex items-center gap-1.5 rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-elevated)]/92 px-3.5 py-2 text-xs font-semibold text-[var(--navy-900)] shadow-2xs backdrop-blur-md hover:border-[var(--border-strong)] hover:bg-[var(--surface-elevated)]"
+                    className="folio-press inline-flex items-center gap-1.5 rounded-full border border-[var(--border-subtle)] bg-[var(--surface-elevated)]/92 px-3 py-1.5 text-xs font-semibold text-[var(--navy-900)] shadow-2xs backdrop-blur-md hover:border-[var(--border-strong)] hover:bg-[var(--surface-elevated)]"
                   >
                     <Download className="h-3.5 w-3.5 text-[var(--crimson-500)]" />
                     <span>Install App</span>
@@ -1025,7 +1099,7 @@ export const HomeShelf: React.FC = () => {
                 data-testid="shelf-search-input"
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
-                placeholder="Search notes, folders & templates…"
+                placeholder="Search canvases, docs, slides, folders & templates…"
                 className="w-full bg-transparent pl-2 pr-1 text-xs font-medium text-[var(--navy-900)] placeholder:text-[var(--navy-600)]/75 outline-none"
               />
               {query && (
@@ -1132,13 +1206,18 @@ export const HomeShelf: React.FC = () => {
                             tpl.textboxes,
                             tpl.images,
                             tpl.mode,
+                            tpl.extra,
                           )
                         }
                         className="folio-press flex items-center gap-3 rounded-[20px] border border-[var(--border-subtle)] bg-[var(--surface-elevated)] p-3.5 text-left shadow-[var(--shadow-ambient)] hover:-translate-y-0.5 hover:border-[var(--crimson-border)]"
                       >
                         <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[var(--surface-seal)] text-[var(--navy-900)]">
-                          {tpl.mode === 'whiteboard' ? (
+                          {tpl.mode === 'slides' ? (
                             <Presentation className="h-4.5 w-4.5 text-[var(--crimson-500)]" />
+                          ) : tpl.mode === 'notes' ? (
+                            <FileText className="h-4.5 w-4.5 text-[var(--crimson-500)]" />
+                          ) : tpl.mode === 'whiteboard' ? (
+                            <Palette className="h-4.5 w-4.5 text-[var(--crimson-500)]" />
                           ) : (
                             <Sparkles className="h-4.5 w-4.5 text-[var(--crimson-500)]" />
                           )}
@@ -1246,29 +1325,64 @@ export const HomeShelf: React.FC = () => {
                 </section>
               )}
 
-              {/* Grid Section Header */}
+              {/* Grid Section Header + Mode Filter Pills */}
               <section>
-                <div className="mb-3.5 flex items-center justify-between gap-2">
+                <div className="mb-3.5 flex flex-wrap items-center justify-between gap-2">
                   <h2 className="folio-section-label tabular-nums">
                     {activeWorkspaceFilter === 'drawing'
-                      ? `Drawing Boards (${filteredNotebooks.length})`
+                      ? `Canvases & Boards (${filteredNotebooks.length})`
                       : activeWorkspaceFilter === 'notes'
-                        ? `Notes (${filteredNotebooks.length})`
+                        ? `Docs (${filteredNotebooks.length})`
                         : activeWorkspaceFilter === 'slides'
-                          ? `Slides (${filteredNotebooks.length})`
+                          ? `Slide Decks (${filteredNotebooks.length})`
                           : `Library (${filteredNotebooks.length})`}
                   </h2>
+
+                  <div
+                    data-testid="shelf-mode-filter-pills"
+                    className="folio-segmented-track inline-flex items-center rounded-full p-0.5 text-[11px] font-semibold"
+                  >
+                    {(
+                      [
+                        { id: 'all', label: 'All' },
+                        { id: 'drawing', label: 'Canvases' },
+                        { id: 'notes', label: 'Docs' },
+                        { id: 'slides', label: 'Slides' },
+                      ] as const
+                    ).map((opt) => (
+                      <button
+                        key={opt.id}
+                        type="button"
+                        data-testid={`shelf-filter-pill-${opt.id}`}
+                        aria-pressed={activeWorkspaceFilter === opt.id}
+                        onClick={() => setActiveWorkspaceFilter(opt.id)}
+                        className={`folio-press rounded-full px-3 py-1 transition-colors ${
+                          activeWorkspaceFilter === opt.id
+                            ? 'folio-glass-active'
+                            : 'text-[var(--navy-600)] hover:text-[var(--navy-900)]'
+                        }`}
+                      >
+                        {opt.label}
+                      </button>
+                    ))}
+                  </div>
                 </div>
 
                 {filteredNotebooks.length === 0 ? (
                   <div className="flex flex-col items-center justify-center rounded-[20px] border border-[var(--border-subtle)] bg-[var(--surface-glass)] py-14 text-center shadow-[var(--specular-rim)]">
                     <p className="text-sm font-semibold text-[var(--navy-900)]">
                       {query.trim()
-                        ? `No notebooks match "${query.trim()}"`
-                        : 'No notebooks in this folder yet'}
+                        ? `Nothing matches "${query.trim()}"`
+                        : activeWorkspaceFilter === 'notes'
+                          ? 'No docs here yet'
+                          : activeWorkspaceFilter === 'slides'
+                            ? 'No slide decks here yet'
+                            : activeWorkspaceFilter === 'drawing'
+                              ? 'No canvases here yet'
+                              : 'No studio items in this folder yet'}
                     </p>
                     <p className="mt-1 text-xs text-[var(--navy-600)]">
-                      Use New Notebook or Templates to get started.
+                      Use New Canvas, New Doc, New Slides, or Studio Templates to get started.
                     </p>
                   </div>
                 ) : (
@@ -1286,10 +1400,8 @@ export const HomeShelf: React.FC = () => {
                           relativeUpdatedLabel={formatRelativeDate(notebook.updatedAt)}
                           menuOpen={menuOpen}
                           opening={openingNotebookId === notebook.id}
-                          onOpen={() => {
-                            void handleNotebookCardClick(notebook);
-                          }}
-                          onToggleMenu={() => setOpenMenuId(menuOpen ? null : `nb-${notebook.id}`)}
+                          onOpen={handleNotebookCardClick}
+                          onToggleMenu={handleToggleNotebookMenu}
                           menuNode={
                             menuOpen ? (
                               <div
@@ -1542,13 +1654,15 @@ export const HomeShelf: React.FC = () => {
         onClose={() => setCommandPaletteOpen(false)}
         onSelectNotebook={handleNotebookCardClick}
         onSelectFolder={(folder) => void navigateToFolder(folder.id)}
-        onLaunchTemplate={(name, paper, strokes, textboxes, images, mode) =>
-          void handleLaunchTemplate(name, paper, strokes, textboxes, images, mode)
+        onLaunchTemplate={(name, paper, strokes, textboxes, images, mode, extra) =>
+          void handleLaunchTemplate(name, paper, strokes, textboxes, images, mode, extra)
         }
         onNewNotebook={() => {
           setEditingNotebook(null);
           setNotebookModalOpen(true);
         }}
+        onNewNote={() => void handleQuickCreateNote()}
+        onNewSlides={() => void handleQuickCreateSlides()}
         onNewWhiteboard={() => void handleQuickCreateWhiteboard()}
         onImportPdf={() => pdfInputRef.current?.click()}
         onImportFolio={() => importInputRef.current?.click()}
@@ -1586,7 +1700,13 @@ export const HomeShelf: React.FC = () => {
           const resolvedMode = meta?.mode ?? 'notebook';
           const resolvedTitle =
             meta?.title ??
-            (resolvedMode === 'whiteboard' ? 'Untitled Whiteboard' : `Notes (${paper.pattern})`);
+            (resolvedMode === 'slides'
+              ? 'Untitled Presentation'
+              : resolvedMode === 'notes'
+                ? 'Untitled Document'
+                : resolvedMode === 'whiteboard'
+                  ? 'Untitled Whiteboard'
+                  : `Canvas (${paper.pattern})`);
           await handleLaunchTemplate(
             resolvedTitle,
             paper,
@@ -1594,6 +1714,11 @@ export const HomeShelf: React.FC = () => {
             textboxes,
             images,
             resolvedMode,
+            {
+              slideSizePreset: meta?.slideSizePreset,
+              initialNoteData: meta?.initialNoteData,
+              initialSlides: meta?.initialSlides,
+            },
           );
         }}
         onClose={() => setTemplatesOpen(false)}

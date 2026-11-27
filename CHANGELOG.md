@@ -2,6 +2,25 @@
 
 All notable changes to **Folio Notes / Folio Studio** are documented in this file.
 
+## [2.1.0] - 2026-11-26
+
+### Added
+- **3-Mode Studio Template Gallery (`TemplatePickerModal.tsx`):**
+  - Expanded Templates from Drawing-Board-only into a full 3-mode gallery with **Docs (4)** (`Meeting Notes`, `Lecture & Study Doc`, `Project Brief`, `Weekly Planner`) and **Slides (4)** (`Pitch Deck 16:9`, `Study Guide Deck 16:9`, `Creative Showcase 16:9`, `Square Carousel 1:1`) alongside Whiteboards, Built-in Papers, and My Templates.
+  - Added Doc and Slide templates directly into Home Shelf search and the `Ctrl+K` Command Palette.
+- **Studio Mode Defaults in Preferences (`SettingsModal.tsx`, `settings.ts`):**
+  - Added dedicated **General & Studio** mode defaults for Drawing Board default brush, Docs default page layout (`Paginated` / `Pageless`), and Slides default aspect ratio (`16:9`, `4:3`, `1:1`, `9:16`, `A4`), plus quick UI scale preset pills (`100%`–`200%`).
+- **Framed Inset Notebook Outline for Imported PDFs (`CoverPreview.tsx`, `NotebookModal.tsx`):**
+  - Imported PDFs (including already-imported worksheets) now display their page preview smaller and centered inside a crisp white mini-sheet frame within a navy bound notebook outline (left spine ridge, right paper-stack edge, clear top title header with zero text overlap, and `PDF` pill), with a `Framed Inset / Full Bleed` toggle in Cover Settings.
+
+### Changed
+- **200% Ctrl+Scroll & UI Scale Ceiling (`uiZoom.ts`, `electron/preload.ts`, `NotesEditor.tsx`, `SlideStageCanvas.tsx`):**
+  - Raised whole-app `Ctrl + Scroll` / UI Scale ceiling from `150%` to **`200%`** across Web, Electron (`webFrame.setZoomFactor`), and Settings, and added smooth `Ctrl + Scroll` zooming up to `200%` in both Notes Mode and Slides Mode.
+- **Modernized `"Your Notes, Ready."` Home Shelf & Command Studio (`HomeShelf.tsx`, `CommandPaletteModal.tsx`, `NotebookModal.tsx`, `shortcuts.ts`):**
+  - Redesigned the hero creation strip around 3 vibrant pink pill buttons (**New Canvas**, **New Doc**, **New Slides**) beside frosted secondary pills (`Infinite Board`, `Import PDF`, `Import .folio`), added inline mode filter pills (`All`, `Canvases`, `Docs`, `Slides`), and modernized copy and shortcuts across all studio modals.
+- **Performance & Lag Elimination:**
+  - Cached built-in Template Gallery thumbnails at module level (eliminating synchronous canvas generation stutter on modal open), switched the left nav capsule shader from a 2nd continuous 60fps WebGL loop to `static-accent`, batched `repository.getShelfItems` first-page queries via `bulkGet`, skipped redundant root IndexedDB library scans, memoized Settings font filtering during UI scale dragging, shared one `prefers-reduced-motion` listener across all `BookTiltCard` items with stable memoized callbacks, and updated Trash optimistically on delete.
+
 ## [2.0.0] - 2026-11-25
 
 ### Added

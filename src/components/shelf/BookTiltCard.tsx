@@ -3,14 +3,37 @@ import { MoreVertical } from 'lucide-react';
 import type { Notebook } from '../../types/notes';
 import { CoverPreview } from './CoverPreview';
 
+// Share a single prefers-reduced-motion MediaQueryList across all shelf cards
+const reducedMotionListeners = new Set<(val: boolean) => void>();
+let sharedReducedMotion: boolean | null = null;
+let sharedMqInitialized = false;
+
+function getSharedReducedMotion(): boolean {
+  if (sharedReducedMotion !== null) return sharedReducedMotion;
+  if (typeof window !== 'undefined' && typeof window.matchMedia === 'function') {
+    const mq = window.matchMedia('(prefers-reduced-motion: reduce)');
+    sharedReducedMotion = mq.matches;
+    if (!sharedMqInitialized) {
+      sharedMqInitialized = true;
+      mq.addEventListener?.('change', () => {
+        sharedReducedMotion = mq.matches;
+        reducedMotionListeners.forEach((cb) => cb(mq.matches));
+      });
+    }
+    return sharedReducedMotion;
+  }
+  sharedReducedMotion = false;
+  return false;
+}
+
 interface BookTiltCardProps {
   notebook: Notebook;
   index: number;
   relativeUpdatedLabel: string;
   menuOpen: boolean;
   opening?: boolean;
-  onOpen: () => void;
-  onToggleMenu: () => void;
+  onOpen: (notebook: Notebook) => void;
+  onToggleMenu: (notebookId: string) => void;
   menuNode?: React.ReactNode;
 }
 
@@ -24,11 +47,7 @@ const BookTiltCardInner: React.FC<BookTiltCardProps> = ({
   onToggleMenu,
   menuNode,
 }) => {
-  const [reducedMotion, setReducedMotion] = useState(() =>
-    typeof window !== 'undefined' && typeof window.matchMedia === 'function'
-      ? window.matchMedia('(prefers-reduced-motion: reduce)').matches
-      : false,
-  );
+  const [reducedMotion, setReducedMotion] = useState(getSharedReducedMotion);
 
   const tiltVisualRef = useRef<HTMLDivElement | null>(null);
   const sheenRef = useRef<HTMLDivElement | null>(null);
@@ -37,11 +56,10 @@ const BookTiltCardInner: React.FC<BookTiltCardProps> = ({
   const lastTiltRef = useRef({ rx: 0, ry: 0, mx: 50, my: 35, active: false });
 
   useEffect(() => {
-    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return;
-    const mq = window.matchMedia('(prefers-reduced-motion: reduce)');
-    const onChange = () => setReducedMotion(mq.matches);
-    mq.addEventListener?.('change', onChange);
-    return () => mq.removeEventListener?.('change', onChange);
+    reducedMotionListeners.add(setReducedMotion);
+    return () => {
+      reducedMotionListeners.delete(setReducedMotion);
+    };
   }, []);
 
   const writeVisualTransform = useCallback(
@@ -178,7 +196,7 @@ const BookTiltCardInner: React.FC<BookTiltCardProps> = ({
         onPointerUp={handlePointerUpOrCancel}
         onPointerCancel={handlePointerUpOrCancel}
         onPointerLeave={handlePointerLeave}
-        onClick={onOpen}
+        onClick={() => onOpen(notebook)}
         style={{ perspective: '920px' }}
         className="relative block aspect-[3/4] w-full cursor-pointer touch-manipulation select-none rounded-2xl text-left focus-visible:outline-2 focus-visible:outline-[var(--crimson-500)]"
       >
@@ -213,7 +231,7 @@ const BookTiltCardInner: React.FC<BookTiltCardProps> = ({
           type="button"
           draggable={false}
           data-testid={`book-card-meta-open-${notebook.id}`}
-          onClick={onOpen}
+          onClick={() => onOpen(notebook)}
           className="group/meta min-w-0 flex-1 cursor-pointer touch-manipulation select-none rounded-lg text-left focus-visible:outline-2 focus-visible:outline-[var(--crimson-500)]"
         >
           <div className="block w-full truncate text-sm font-bold text-[var(--navy-900)] transition duration-150 group-hover/meta:text-[var(--crimson-500)]">
@@ -225,7 +243,7 @@ const BookTiltCardInner: React.FC<BookTiltCardProps> = ({
               : notebook.mode === 'slides'
                 ? `${notebook.pageOrder.length} slide${notebook.pageOrder.length === 1 ? '' : 's'}`
                 : notebook.mode === 'notes'
-                  ? 'Notes Doc'
+                  ? 'Doc'
                   : `${notebook.pageOrder.length} page${notebook.pageOrder.length === 1 ? '' : 's'}`}{' '}
             · {relativeUpdatedLabel}
           </div>
@@ -237,7 +255,7 @@ const BookTiltCardInner: React.FC<BookTiltCardProps> = ({
           aria-expanded={menuOpen}
           onClick={(e) => {
             e.stopPropagation();
-            onToggleMenu();
+            onToggleMenu(notebook.id);
           }}
           className="folio-press rounded-lg p-1 text-[var(--navy-600)] opacity-85 hover:bg-[var(--surface-elevated)] hover:text-[var(--navy-900)] group-hover:opacity-100"
         >

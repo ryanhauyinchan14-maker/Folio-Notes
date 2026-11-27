@@ -7,7 +7,7 @@ import type {
 import type { AppUpdateStatus } from './updaterCore';
 
 const MIN_ZOOM = 0.75;
-const MAX_ZOOM = 1.5;
+const MAX_ZOOM = 2.0;
 const DEFAULT_ZOOM = 1.35;
 
 function clampZoomFactor(factor: number): number {

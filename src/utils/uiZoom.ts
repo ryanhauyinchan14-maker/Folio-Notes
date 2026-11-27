@@ -1,5 +1,5 @@
 export const MIN_UI_SCALE = 0.75;
-export const MAX_UI_SCALE = 1.5;
+export const MAX_UI_SCALE = 2.0;
 export const DEFAULT_UI_SCALE = 1.35;
 export const UI_SCALE_WHEEL_STEP = 0.05;
 export const UI_SCALE_KEY_STEP = 0.1;

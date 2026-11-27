@@ -27,9 +27,17 @@ export const CoverPreview: React.FC<CoverPreviewProps> = ({
   const isNotes = mode === 'notes';
   const isSlides = mode === 'slides';
   const hasImage = cover.styleId === 'custom-image' && Boolean(cover.customImageDataUrl);
-  const darkSurface = hasImage || isDarkColor(cover.primaryColor);
+  const isInsetImage =
+    hasImage &&
+    (cover.imagePresentation === 'inset' ||
+      (cover.imagePresentation === undefined &&
+        cover.primaryColor.toLowerCase() === '#072d59' &&
+        cover.accentColor.toLowerCase() === '#dbf2fc' &&
+        cover.pattern === 'solid'));
+  const isFullBleedImage = hasImage && !isInsetImage;
+  const darkSurface = isFullBleedImage || isDarkColor(cover.primaryColor);
 
-  const backgroundStyle: React.CSSProperties = hasImage
+  const backgroundStyle: React.CSSProperties = isFullBleedImage
     ? {
         backgroundImage: `url(${cover.customImageDataUrl})`,
         backgroundSize: 'cover',
@@ -45,6 +53,7 @@ export const CoverPreview: React.FC<CoverPreviewProps> = ({
 
   return (
     <div
+      data-cover-presentation={isInsetImage ? 'inset' : isFullBleedImage ? 'full' : 'standard'}
       className={`relative overflow-hidden rounded-r-2xl rounded-l-[5px] ring-1 ring-[var(--border-strong)] select-none transition-shadow duration-200 group-hover:shadow-[var(--shadow-card-hover)] ${className}`}
       style={{
         ...backgroundStyle,
@@ -55,16 +64,24 @@ export const CoverPreview: React.FC<CoverPreviewProps> = ({
       {/* Ambient Cover Light Falloff */}
       <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(135deg,rgba(255,255,255,0.20)_0%,transparent_44%,rgba(7,45,89,0.16)_100%)]" />
 
-      {/* Subtle Scrim over custom images so direct white ink remains high contrast */}
-      {hasImage && (
+      {/* Subtle Scrim over full-bleed custom images so direct white ink remains high contrast */}
+      {isFullBleedImage && (
         <div className="pointer-events-none absolute inset-0 bg-gradient-to-t from-[#072D59]/65 via-[#072D59]/25 to-[#072D59]/15" />
       )}
 
       {/* Subtle Cloth / Paperboard Grain */}
-      {!hasImage && (
+      {!isFullBleedImage && (
         <div
           className="pointer-events-none absolute inset-0 opacity-45 mix-blend-soft-light"
           style={{ backgroundImage: COVER_GRAIN_SVG }}
+        />
+      )}
+
+      {/* Subtle Debossed Notebook Outline Frame for Inset PDF / Document Previews */}
+      {isInsetImage && !compact && (
+        <div
+          aria-hidden="true"
+          className="pointer-events-none absolute inset-y-2.5 left-[18px] right-[9px] rounded-r-xl rounded-l-[3px] border border-white/16"
         />
       )}
 
@@ -114,6 +131,20 @@ export const CoverPreview: React.FC<CoverPreviewProps> = ({
         />
       )}
 
+      {/* Compact Inset Thumbnail Preview (when no title, e.g., swatch thumbnails) */}
+      {isInsetImage && title === undefined && (
+        <div className="pointer-events-none relative z-10 flex h-full w-full items-center justify-center pl-[14px] pr-[6px] py-2">
+          <div className="flex max-h-[72%] max-w-[74%] items-center justify-center rounded-[3px] bg-white p-[2px] shadow-md ring-1 ring-white/80">
+            <img
+              src={cover.customImageDataUrl}
+              alt=""
+              draggable={false}
+              className="max-h-full max-w-full rounded-[2px] object-contain"
+            />
+          </div>
+        </div>
+      )}
+
       {/* Vault-Locked Security Weave & Clean Frosted Glass Top-Right Lock Badge */}
       {locked && (
         <>
@@ -143,13 +174,17 @@ export const CoverPreview: React.FC<CoverPreviewProps> = ({
       {title !== undefined && (
         <div
           className={`relative z-20 flex h-full flex-col justify-between ${
-            compact ? 'p-2.5 pl-4' : 'px-4 py-4 pl-5 pr-4'
+            compact ? 'p-2.5 pl-4' : isInsetImage ? 'px-4 py-3.5 pl-6 pr-4' : 'px-4 py-4 pl-5 pr-4'
           }`}
         >
-          <div className={compact ? 'mt-0.5' : 'mt-1.5'}>
+          <div className={compact ? 'mt-0.5 shrink-0' : isInsetImage ? 'mt-0.5 shrink-0' : 'mt-1.5'}>
             <div
-              className={`line-clamp-3 font-bold tracking-[-0.02em] ${
-                compact ? 'text-[9px] leading-tight' : 'text-[14px] leading-snug'
+              className={`${isInsetImage ? 'line-clamp-2' : 'line-clamp-3'} font-bold tracking-[-0.02em] ${
+                compact
+                  ? 'text-[9px] leading-tight'
+                  : isInsetImage
+                    ? 'text-[12.5px] leading-snug'
+                    : 'text-[14px] leading-snug'
               } ${darkSurface ? 'text-[#F8FAFC]' : 'text-[#072D59]'}`}
               style={
                 darkSurface
@@ -157,19 +192,42 @@ export const CoverPreview: React.FC<CoverPreviewProps> = ({
                   : undefined
               }
             >
-              {title || 'Untitled Notebook'}
+              {title || 'Untitled Canvas'}
             </div>
             {!compact && (
               <div
-                className={`mt-2 h-px w-8 rounded-full ${
+                className={`${isInsetImage ? 'mt-1.5' : 'mt-2'} h-px w-8 rounded-full ${
                   darkSurface ? 'bg-white/35' : 'bg-[#072D59]/25'
                 }`}
               />
             )}
           </div>
 
+          {/* Smaller, Centered Framed Mini-Page Preview inside Notebook Cover Outline */}
+          {isInsetImage && (
+            <div
+              data-testid="pdf-inset-cover-preview"
+              className="flex min-h-0 flex-1 items-center justify-center py-2"
+            >
+              <div
+                className={`relative flex items-center justify-center overflow-hidden bg-white ${
+                  compact
+                    ? 'max-h-[34px] max-w-[78%] rounded-[3px] p-[2px] shadow-xs'
+                    : 'max-h-full max-w-[74%] rounded-[6px] p-[4px] shadow-[0_8px_18px_rgba(3,18,38,0.45),0_1px_3px_rgba(3,18,38,0.28)] ring-1 ring-white/85'
+                }`}
+              >
+                <img
+                  src={cover.customImageDataUrl}
+                  alt=""
+                  draggable={false}
+                  className="block max-h-[112px] w-auto max-w-full rounded-[3px] border border-[#072D59]/10 object-contain"
+                />
+              </div>
+            </div>
+          )}
+
           {!compact && (
-            <div className="flex items-center justify-between gap-2">
+            <div className="flex shrink-0 items-center justify-between gap-2">
               {isWhiteboard ? (
                 <span
                   data-testid="whiteboard-cover-badge"
@@ -192,7 +250,7 @@ export const CoverPreview: React.FC<CoverPreviewProps> = ({
                   }`}
                 >
                   <FileText className="h-3 w-3 text-[#FD6E88]" />
-                  <span>Notes</span>
+                  <span>Docs</span>
                 </span>
               ) : isSlides ? (
                 <span
@@ -219,6 +277,11 @@ export const CoverPreview: React.FC<CoverPreviewProps> = ({
                     <Palette className="h-3 w-3 text-[#FD6E88]" />
                     <span>Drawing</span>
                   </span>
+                  {isInsetImage && (
+                    <span className="rounded-full bg-[#DBF2FC]/22 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider text-[#DBF2FC] ring-1 ring-[#DBF2FC]/30">
+                      PDF
+                    </span>
+                  )}
                 </>
               )}
             </div>

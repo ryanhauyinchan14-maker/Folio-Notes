@@ -1,4 +1,9 @@
-import type { PaperPattern } from '../types/notes';
+import type {
+  BrushPresetId,
+  NotePageStyle,
+  PaperPattern,
+  SlideSizePresetId,
+} from '../types/notes';
 import {
   DEFAULT_KEYBOARD_SHORTCUTS,
   type KeyboardShortcutsMap,
@@ -156,6 +161,9 @@ export interface WorkspacePreferences {
   defaultZoomMode: DefaultZoomMode;
   defaultTool: DefaultToolPreference;
   defaultPaperPattern: PaperPattern;
+  defaultBrushId: BrushPresetId;
+  defaultNotePageStyle: NotePageStyle;
+  defaultSlideSizePreset: Exclude<SlideSizePresetId, 'custom'>;
   uiScale: number;
   ctrlScrollBehavior: CtrlScrollBehavior;
   eraserMode: EraserMode;
@@ -262,6 +270,9 @@ export const DEFAULT_WORKSPACE_PREFERENCES: WorkspacePreferences = {
   defaultZoomMode: '100',
   defaultTool: 'pen',
   defaultPaperPattern: 'ruled',
+  defaultBrushId: 'technical',
+  defaultNotePageStyle: 'paginated',
+  defaultSlideSizePreset: '16:9',
   uiScale: DEFAULT_UI_SCALE,
   ctrlScrollBehavior: 'smart',
   eraserMode: 'precision',
@@ -289,6 +300,22 @@ const VALID_PATTERNS = new Set<PaperPattern>([
   'grid',
   'dotted',
   'cornell',
+]);
+const VALID_BRUSH_IDS = new Set<BrushPresetId>([
+  'technical',
+  'fountain',
+  'pencil',
+  'airbrush',
+  'watercolor',
+  'marker',
+  'monoline',
+]);
+const VALID_SLIDE_SIZE_PRESETS = new Set<Exclude<SlideSizePresetId, 'custom'>>([
+  '16:9',
+  '4:3',
+  '1:1',
+  '9:16',
+  'a4-landscape',
 ]);
 const VALID_GEMINI_PRESETS = new Set<GeminiModelPresetId>([
   'gemini-3-flash',
@@ -466,6 +493,15 @@ export function sanitizeWorkspacePreferences(raw: unknown): WorkspacePreferences
   }
   if (obj.defaultPaperPattern && VALID_PATTERNS.has(obj.defaultPaperPattern)) {
     base.defaultPaperPattern = obj.defaultPaperPattern;
+  }
+  if (obj.defaultBrushId && VALID_BRUSH_IDS.has(obj.defaultBrushId)) {
+    base.defaultBrushId = obj.defaultBrushId;
+  }
+  if (obj.defaultNotePageStyle === 'paginated' || obj.defaultNotePageStyle === 'pageless') {
+    base.defaultNotePageStyle = obj.defaultNotePageStyle;
+  }
+  if (obj.defaultSlideSizePreset && VALID_SLIDE_SIZE_PRESETS.has(obj.defaultSlideSizePreset)) {
+    base.defaultSlideSizePreset = obj.defaultSlideSizePreset;
   }
   if (typeof obj.uiScale === 'number' && Number.isFinite(obj.uiScale)) {
     base.uiScale = clampUiScale(obj.uiScale);

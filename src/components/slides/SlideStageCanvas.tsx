@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { RotateCw } from 'lucide-react';
 import { getFreehandStrokeOutline, outlineToSvgPath } from '../../canvas/strokeRenderer';
+import { useAppStore } from '../../store/useAppStore';
 import type { SlideBackground, SlideData, SlideElement, Stroke, StrokePoint } from '../../types/notes';
 import { createId } from '../../utils/id';
 import { getCssFallbackZoomFactor } from '../../utils/uiZoom';
@@ -49,12 +50,30 @@ export const SlideStageCanvas: React.FC<SlideStageCanvasProps> = ({
 }) => {
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const [stageScale, setStageScale] = useState(0.5);
+  const [userZoom, setUserZoom] = useState(1);
   const [snapGuides, setSnapGuides] = useState<{ x?: number; y?: number }>({});
   const [liveAngle, setLiveAngle] = useState<number | null>(null);
   const [activePoints, setActivePoints] = useState<StrokePoint[] | null>(null);
   const dragCleanupRef = useRef<(() => void) | null>(null);
 
+  const effectiveScale = stageScale * userZoom;
+
   useEffect(() => () => dragCleanupRef.current?.(), []);
+
+  useEffect(() => {
+    const el = viewportRef.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
+      if (useAppStore.getState().ctrlScrollBehavior === 'gui-scale') return;
+      e.preventDefault();
+      if (e.deltaY === 0) return;
+      const step = e.deltaY < 0 ? 0.1 : -0.1;
+      setUserZoom((prev) => Math.max(0.5, Math.min(2.0, Math.round((prev + step) * 100) / 100)));
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  }, []);
 
   useEffect(() => {
     const el = viewportRef.current;
@@ -105,7 +124,7 @@ export const SlideStageCanvas: React.FC<SlideStageCanvasProps> = ({
     const startX = e.clientX;
     const startY = e.clientY;
     const zoomFactor = getCssFallbackZoomFactor();
-    const scale = Math.max(0.1, stageScale);
+    const scale = Math.max(0.1, effectiveScale);
     const initialMap = new Map(
       slideData.elements
         .filter((el) => activeSelection.includes(el.id) && !el.locked)
@@ -173,7 +192,7 @@ export const SlideStageCanvas: React.FC<SlideStageCanvasProps> = ({
     const startX = e.clientX;
     const startY = e.clientY;
     const zoomFactor = getCssFallbackZoomFactor();
-    const scale = Math.max(0.1, stageScale);
+    const scale = Math.max(0.1, effectiveScale);
     const orig = { x: el.x, y: el.y, w: el.width, h: el.height };
     let latestData = slideData;
 
@@ -233,8 +252,8 @@ export const SlideStageCanvas: React.FC<SlideStageCanvasProps> = ({
     const stageEl = viewportRef.current?.querySelector<HTMLElement>('[data-testid="slide-stage-surface"]');
     if (!stageEl) return;
     const rect = stageEl.getBoundingClientRect();
-    const cx = rect.left + (el.x + el.width / 2) * stageScale;
-    const cy = rect.top + (el.y + el.height / 2) * stageScale;
+    const cx = rect.left + (el.x + el.width / 2) * effectiveScale;
+    const cy = rect.top + (el.y + el.height / 2) * effectiveScale;
     const startAngle = Math.atan2(e.clientY - cy, e.clientX - cx);
     const origRot = el.rotation || 0;
     let latestData = slideData;
@@ -373,16 +392,19 @@ export const SlideStageCanvas: React.FC<SlideStageCanvasProps> = ({
   return (
     <div
       ref={viewportRef}
+      data-testid="slide-stage-viewport"
       onClick={() => {
         onSelectIds([]);
         onStartEditText(null);
       }}
-      className="flex min-h-0 flex-1 items-center justify-center overflow-hidden p-5"
+      className={`relative flex min-h-0 flex-1 items-center justify-center p-5 ${
+        userZoom > 1 ? 'overflow-auto' : 'overflow-hidden'
+      }`}
     >
       <div
         style={{
-          width: `${Math.round(slideWidth * stageScale)}px`,
-          height: `${Math.round(slideHeight * stageScale)}px`,
+          width: `${Math.round(slideWidth * effectiveScale)}px`,
+          height: `${Math.round(slideHeight * effectiveScale)}px`,
         }}
         className="relative shrink-0 shadow-[0_18px_48px_rgba(7,45,89,0.18)]"
       >
@@ -391,7 +413,7 @@ export const SlideStageCanvas: React.FC<SlideStageCanvasProps> = ({
           style={{
             width: `${slideWidth}px`,
             height: `${slideHeight}px`,
-            transform: `scale(${stageScale})`,
+            transform: `scale(${effectiveScale})`,
             transformOrigin: 'top left',
             ...resolveSlideBgStyle(slideData.background),
           }}
@@ -503,6 +525,24 @@ export const SlideStageCanvas: React.FC<SlideStageCanvasProps> = ({
           </svg>
         </div>
       </div>
+
+      {userZoom !== 1 && (
+        <div
+          data-testid="slide-stage-zoom-pill"
+          onClick={(e) => e.stopPropagation()}
+          className="folio-glass-island absolute bottom-3 right-3 z-30 flex items-center gap-2 rounded-full px-3 py-1 text-[11px] font-bold text-[var(--navy-900)]"
+        >
+          <span className="folio-mono tabular-nums">{Math.round(userZoom * 100)}%</span>
+          <button
+            type="button"
+            data-testid="slide-stage-zoom-reset"
+            onClick={() => setUserZoom(1)}
+            className="folio-btn-navy folio-press rounded-full px-2 py-0.5 text-[10px] font-bold"
+          >
+            Fit
+          </button>
+        </div>
+      )}
     </div>
   );
 };

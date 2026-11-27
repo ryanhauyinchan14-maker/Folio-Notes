@@ -80,9 +80,25 @@ export const NotesEditor: React.FC = () => {
 
   const exportMenuRef = useRef<HTMLDivElement | null>(null);
   const imageInputRef = useRef<HTMLInputElement | null>(null);
+  const scrollViewportRef = useRef<HTMLElement | null>(null);
   const editorContainerRef = useRef<HTMLDivElement | null>(null);
   const saveTimerRef = useRef<number | null>(null);
   const latestDataRef = useRef<NoteDocumentData>(initialNoteData);
+
+  useEffect(() => {
+    const el = scrollViewportRef.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
+      if (useAppStore.getState().ctrlScrollBehavior === 'gui-scale') return;
+      e.preventDefault();
+      if (e.deltaY === 0) return;
+      const step = e.deltaY < 0 ? 0.05 : -0.05;
+      setDocZoom((prev) => Math.max(0.75, Math.min(2.0, Math.round((prev + step) * 100) / 100)));
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  }, []);
 
   const extensions = useMemo(() => createNotesExtensions(), []);
 
@@ -479,7 +495,11 @@ export const NotesEditor: React.FC = () => {
             onTriggerImageUpload={() => imageInputRef.current?.click()}
           />
 
-          <main className="custom-scrollbar flex-1 overflow-y-auto px-4 pb-20 pt-4">
+          <main
+            ref={scrollViewportRef}
+            data-testid="notes-scroll-viewport"
+            className="custom-scrollbar flex-1 overflow-y-auto px-4 pb-20 pt-4"
+          >
             <div
               ref={editorContainerRef}
               onClick={() => editor?.commands.focus()}
@@ -526,14 +546,22 @@ export const NotesEditor: React.FC = () => {
             <span className="text-[var(--navy-600)]">·</span>
             <select
               aria-label="Document zoom"
+              data-testid="notes-zoom-select"
               value={String(docZoom)}
               onChange={(e) => setDocZoom(Number(e.target.value))}
               className="bg-transparent font-mono text-[11px] font-bold outline-none"
             >
+              {![0.75, 0.85, 1, 1.15, 1.3, 1.5, 1.75, 2].includes(docZoom) && (
+                <option value={String(docZoom)}>{Math.round(docZoom * 100)}%</option>
+              )}
+              <option value="0.75">75%</option>
               <option value="0.85">85%</option>
               <option value="1">100%</option>
               <option value="1.15">115%</option>
               <option value="1.3">130%</option>
+              <option value="1.5">150%</option>
+              <option value="1.75">175%</option>
+              <option value="2">200%</option>
             </select>
           </div>
 

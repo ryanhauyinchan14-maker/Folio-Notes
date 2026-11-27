@@ -31,10 +31,17 @@ import { DraggableRangeSlider } from '../common/DraggableRangeSlider';
 import { MorphingPill, useMorphingIndicator } from '../common/MorphingIndicator';
 import { PaperShaderBackdrop } from '../common/PaperShaderBackdrop';
 import { testAiConnection } from '../../ai/aiClient';
+import { BRUSH_PRESETS } from '../../canvas/brushEngine';
 import { type LocalStorageSummary, repository } from '../../db/repository';
+import { SLIDE_SIZE_PRESETS } from '../../slides/slidePresets';
 import { useAppStore } from '../../store/useAppStore';
 import { useUpdaterStore } from '../../store/useUpdaterStore';
-import type { PaperPattern } from '../../types/notes';
+import type {
+  BrushPresetId,
+  NotePageStyle,
+  PaperPattern,
+  SlideSizePresetId,
+} from '../../types/notes';
 import { triggerBlobDownload } from '../../utils/exportNotebook';
 import {
   AI_PROVIDER_META,
@@ -82,14 +89,14 @@ const SETTINGS_TABS: Array<{
 }> = [
   {
     id: 'general',
-    label: 'General & Editor',
-    desc: 'Defaults, tools & dock',
+    label: 'General & Studio',
+    desc: '3-mode defaults & dock',
     icon: <Sliders className="h-4 w-4" />,
   },
   {
     id: 'appearance',
     label: 'Appearance',
-    desc: 'Backdrop & UI scale',
+    desc: 'Fonts, backdrop & 200% scale',
     icon: <Palette className="h-4 w-4" />,
   },
   {
@@ -158,6 +165,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const setDefaultTool = useAppStore((s) => s.setDefaultTool);
   const defaultPaperPattern = useAppStore((s) => s.defaultPaperPattern);
   const setDefaultPaperPattern = useAppStore((s) => s.setDefaultPaperPattern);
+  const defaultBrushId = useAppStore((s) => s.defaultBrushId);
+  const setDefaultBrushId = useAppStore((s) => s.setDefaultBrushId);
+  const defaultNotePageStyle = useAppStore((s) => s.defaultNotePageStyle);
+  const setDefaultNotePageStyle = useAppStore((s) => s.setDefaultNotePageStyle);
+  const defaultSlideSizePreset = useAppStore((s) => s.defaultSlideSizePreset);
+  const setDefaultSlideSizePreset = useAppStore((s) => s.setDefaultSlideSizePreset);
   const resetPenSlots = useAppStore((s) => s.resetPenSlots);
   const exportWorkspaceBackup = useAppStore((s) => s.exportWorkspaceBackup);
   const importWorkspaceBackup = useAppStore((s) => s.importWorkspaceBackup);
@@ -339,6 +352,79 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     () => evaluatePasswordStrength(newPassword),
     [newPassword],
   );
+
+  // Memoize Appearance font filtering so dragging the UI scale slider never refilters font lists
+  const appearanceFontData = useMemo(() => {
+    const activeFontLabel = getActiveInterfaceFontLabel(
+      interfaceFontId,
+      interfaceCustomFont,
+      uploadedFonts,
+    );
+    const normalizedFontQuery = fontSearch.trim().toLowerCase();
+    const cleanedCustomCandidate = sanitizeCustomFontName(fontSearch);
+    const exactPresetMatch = INTERFACE_FONT_PRESETS.some(
+      (p) => p.name.toLowerCase() === cleanedCustomCandidate.toLowerCase(),
+    );
+    const matchingPresets = INTERFACE_FONT_PRESETS.filter((preset) => {
+      if (fontCategory !== 'all' && fontCategory !== preset.category) {
+        return false;
+      }
+      if (!normalizedFontQuery) return true;
+      return (
+        preset.name.toLowerCase().includes(normalizedFontQuery) ||
+        preset.subtitle.toLowerCase().includes(normalizedFontQuery)
+      );
+    });
+    const showUploaded = fontCategory === 'all' || fontCategory === 'imported';
+    const matchingUploaded = showUploaded
+      ? uploadedFonts.filter(
+          (f) =>
+            !normalizedFontQuery ||
+            f.name.toLowerCase().includes(normalizedFontQuery) ||
+            f.fileName.toLowerCase().includes(normalizedFontQuery),
+        )
+      : [];
+    const showSystemList =
+      systemFonts.length > 0 &&
+      (fontCategory === 'system' ||
+        (fontCategory === 'all' && normalizedFontQuery.length > 0));
+    const matchingSystem = showSystemList
+      ? systemFonts
+          .filter(
+            (name) =>
+              !normalizedFontQuery ||
+              name.toLowerCase().includes(normalizedFontQuery),
+          )
+          .slice(0, 60)
+      : [];
+
+    const categoryTabs: Array<{
+      id: 'all' | InterfaceFontCategory | 'system' | 'imported';
+      label: string;
+    }> = [
+      { id: 'all', label: 'All' },
+      { id: 'sans', label: 'Sans' },
+      { id: 'serif', label: 'Serif' },
+      { id: 'accessible', label: 'Accessible' },
+      { id: 'mono', label: 'Mono & Script' },
+      ...(systemFonts.length > 0
+        ? [{ id: 'system' as const, label: `System (${systemFonts.length})` }]
+        : []),
+      ...(uploadedFonts.length > 0
+        ? [{ id: 'imported' as const, label: `Imported (${uploadedFonts.length})` }]
+        : []),
+    ];
+
+    return {
+      activeFontLabel,
+      cleanedCustomCandidate,
+      exactPresetMatch,
+      matchingPresets,
+      matchingUploaded,
+      matchingSystem,
+      categoryTabs,
+    };
+  }, [interfaceFontId, interfaceCustomFont, uploadedFonts, fontSearch, fontCategory, systemFonts]);
 
   if (!open) return null;
 
@@ -597,10 +683,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           <div className="folio-modal-header flex shrink-0 items-center justify-between px-5 py-3.5">
             <div>
               <h2 id="settings-modal-title" className="text-base font-bold text-[var(--navy-900)]">
-                Preferences
+                Studio Preferences
               </h2>
               <p className="text-xs text-[var(--navy-600)]">
-                Workspace defaults, UI scale, multi provider AI &amp; local backups
+                Canvas, Docs &amp; Slides defaults, UI scale (up to 200%), multi-provider AI &amp; backups
               </p>
             </div>
             <button
@@ -682,7 +768,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   <span>100% Local First</span>
                 </div>
                 <p className="relative z-10 mt-1 leading-relaxed text-[10px] text-[var(--navy-600)]">
-                  All notebooks, PDFs &amp; ink live locally in IndexedDB with zero cloud accounts.
+                  All canvases, docs, decks &amp; PDFs live locally in IndexedDB with zero cloud accounts.
                 </p>
               </div>
             </nav>
@@ -693,13 +779,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               data-testid={`settings-panel-${activeTab}`}
               className="custom-scrollbar flex-1 overflow-y-auto p-5"
             >
-              {/* Tab 1: General & Editor */}
+              {/* Tab 1: General & Studio */}
               {activeTab === 'general' && (
                 <div data-testid="settings-defaults-section" className="space-y-4">
                   <div>
-                    <h3 className="text-sm font-bold text-[var(--navy-900)]">General &amp; Editor</h3>
+                    <h3 className="text-sm font-bold text-[var(--navy-900)]">General &amp; Studio</h3>
                     <p className="text-xs text-[var(--navy-600)]">
-                      Configure opening tool behavior, default templates, and workspace dock.
+                      Configure defaults across Drawing Board, Docs, and Slides modes.
                     </p>
                   </div>
 
@@ -794,7 +880,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                       htmlFor="settings-default-paper-select"
                       className="folio-section-label mb-1.5 block"
                     >
-                      Default Paper Pattern (New Notebooks)
+                      Default Paper Pattern (New Canvases)
                     </label>
                     <select
                       id="settings-default-paper-select"
@@ -809,6 +895,82 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                       <option value="dotted">Dotted</option>
                       <option value="cornell">Study Notes (Cornell)</option>
                     </select>
+                  </div>
+
+                  {/* Studio Mode Defaults (Drawing Brush, Docs Layout, Slides Aspect) */}
+                  <div
+                    data-testid="settings-studio-mode-defaults"
+                    className="grid gap-3 rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-canvas)] p-3.5 sm:grid-cols-3"
+                  >
+                    <div>
+                      <label
+                        htmlFor="settings-default-brush-select"
+                        className="folio-section-label mb-1.5 block"
+                      >
+                        Drawing Brush
+                      </label>
+                      <select
+                        id="settings-default-brush-select"
+                        data-testid="settings-default-brush-select"
+                        value={defaultBrushId}
+                        onChange={(e) => setDefaultBrushId(e.target.value as BrushPresetId)}
+                        className="folio-input w-full rounded-xl px-2.5 py-1.5 text-xs font-semibold"
+                      >
+                        {BRUSH_PRESETS.filter((b) => b.id !== 'highlighter').map((brush) => (
+                          <option key={brush.id} value={brush.id}>
+                            {brush.name}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div>
+                      <div className="folio-section-label mb-1.5">Docs Layout</div>
+                      <div className="folio-segmented-track flex rounded-xl p-0.5">
+                        {(['paginated', 'pageless'] as NotePageStyle[]).map((styleOpt) => (
+                          <button
+                            key={styleOpt}
+                            type="button"
+                            data-testid={`settings-default-note-style-${styleOpt}`}
+                            aria-pressed={defaultNotePageStyle === styleOpt}
+                            onClick={() => setDefaultNotePageStyle(styleOpt)}
+                            className={`folio-press flex-1 rounded-lg py-1 text-[11px] font-semibold capitalize ${
+                              defaultNotePageStyle === styleOpt
+                                ? 'folio-glass-active'
+                                : 'text-[var(--navy-600)] hover:text-[var(--navy-900)]'
+                            }`}
+                          >
+                            {styleOpt}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div>
+                      <label
+                        htmlFor="settings-default-slide-size-select"
+                        className="folio-section-label mb-1.5 block"
+                      >
+                        Slides Aspect
+                      </label>
+                      <select
+                        id="settings-default-slide-size-select"
+                        data-testid="settings-default-slide-size-select"
+                        value={defaultSlideSizePreset}
+                        onChange={(e) =>
+                          setDefaultSlideSizePreset(
+                            e.target.value as Exclude<SlideSizePresetId, 'custom'>,
+                          )
+                        }
+                        className="folio-input w-full rounded-xl px-2.5 py-1.5 text-xs font-semibold"
+                      >
+                        {SLIDE_SIZE_PRESETS.map((preset) => (
+                          <option key={preset.id} value={preset.id}>
+                            {preset.label}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
                   </div>
 
                   {/* Tool Dock Position */}
@@ -965,69 +1127,15 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
                   {/* Interface Font Picker */}
                   {(() => {
-                    const activeFontLabel = getActiveInterfaceFontLabel(
-                      interfaceFontId,
-                      interfaceCustomFont,
-                      uploadedFonts,
-                    );
-                    const normalizedFontQuery = fontSearch.trim().toLowerCase();
-                    const cleanedCustomCandidate = sanitizeCustomFontName(fontSearch);
-                    const exactPresetMatch = INTERFACE_FONT_PRESETS.some(
-                      (p) => p.name.toLowerCase() === cleanedCustomCandidate.toLowerCase(),
-                    );
-                    const matchingPresets = INTERFACE_FONT_PRESETS.filter((preset) => {
-                      if (
-                        fontCategory !== 'all' &&
-                        fontCategory !== preset.category
-                      ) {
-                        return false;
-                      }
-                      if (!normalizedFontQuery) return true;
-                      return (
-                        preset.name.toLowerCase().includes(normalizedFontQuery) ||
-                        preset.subtitle.toLowerCase().includes(normalizedFontQuery)
-                      );
-                    });
-                    const showUploaded =
-                      fontCategory === 'all' || fontCategory === 'imported';
-                    const matchingUploaded = showUploaded
-                      ? uploadedFonts.filter(
-                          (f) =>
-                            !normalizedFontQuery ||
-                            f.name.toLowerCase().includes(normalizedFontQuery) ||
-                            f.fileName.toLowerCase().includes(normalizedFontQuery),
-                        )
-                      : [];
-                    const showSystemList =
-                      systemFonts.length > 0 &&
-                      (fontCategory === 'system' ||
-                        (fontCategory === 'all' && normalizedFontQuery.length > 0));
-                    const matchingSystem = showSystemList
-                      ? systemFonts
-                          .filter(
-                            (name) =>
-                              !normalizedFontQuery ||
-                              name.toLowerCase().includes(normalizedFontQuery),
-                          )
-                          .slice(0, 60)
-                      : [];
-
-                    const categoryTabs: Array<{
-                      id: 'all' | InterfaceFontCategory | 'system' | 'imported';
-                      label: string;
-                    }> = [
-                      { id: 'all', label: 'All' },
-                      { id: 'sans', label: 'Sans' },
-                      { id: 'serif', label: 'Serif' },
-                      { id: 'accessible', label: 'Accessible' },
-                      { id: 'mono', label: 'Mono & Script' },
-                      ...(systemFonts.length > 0
-                        ? [{ id: 'system' as const, label: `System (${systemFonts.length})` }]
-                        : []),
-                      ...(uploadedFonts.length > 0
-                        ? [{ id: 'imported' as const, label: `Imported (${uploadedFonts.length})` }]
-                        : []),
-                    ];
+                    const {
+                      activeFontLabel,
+                      cleanedCustomCandidate,
+                      exactPresetMatch,
+                      matchingPresets,
+                      matchingUploaded,
+                      matchingSystem,
+                      categoryTabs,
+                    } = appearanceFontData;
 
                     const applyNamedCustomFont = (rawName: string, knownSystem = false) => {
                       const clean = sanitizeCustomFontName(rawName);
@@ -1324,16 +1432,17 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     );
                   })()}
 
-                  {/* UI Scale (75% - 150%) */}
+                  {/* UI Scale (75% - 200%) */}
                   {(() => {
                     const displayUiScalePct = uiScaleDraftPct ?? Math.round(uiScale * 100);
+                    const quickScalePresets = [100, 125, 135, 150, 175, 200];
                     return (
-                      <div className="space-y-2 rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-canvas)] px-4 py-3">
+                      <div className="space-y-2.5 rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-canvas)] px-4 py-3">
                         <div className="flex items-center justify-between gap-2">
                           <div className="flex items-center gap-2">
                             <ZoomIn className="h-4 w-4 text-[var(--navy-900)]" />
                             <div className="text-xs font-bold text-[var(--navy-900)]">
-                              Whole App UI Scale
+                              Whole App UI Scale (75% – 200%)
                             </div>
                           </div>
                           <div className="flex items-center gap-2">
@@ -1360,7 +1469,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                           testId="settings-ui-scale-slider"
                           ariaLabel="Whole App UI Scale"
                           min={75}
-                          max={150}
+                          max={200}
                           step={5}
                           value={displayUiScalePct}
                           onChange={(pct) => setUiScaleDraftPct(pct)}
@@ -1370,6 +1479,35 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                           }}
                           className="w-full"
                         />
+                        <div className="flex flex-wrap items-center justify-between gap-2 pt-0.5">
+                          <div className="flex flex-wrap items-center gap-1">
+                            {quickScalePresets.map((pct) => {
+                              const isCurrent = displayUiScalePct === pct;
+                              return (
+                                <button
+                                  key={pct}
+                                  type="button"
+                                  data-testid={`settings-ui-scale-preset-${pct}`}
+                                  aria-pressed={isCurrent}
+                                  onClick={() => {
+                                    setUiScaleDraftPct(null);
+                                    setUiScale(pct / 100);
+                                  }}
+                                  className={`folio-mono folio-press rounded-full px-2 py-0.5 text-[10px] font-bold tabular-nums ${
+                                    isCurrent
+                                      ? 'folio-glass-active'
+                                      : 'border border-[var(--border-subtle)] bg-[var(--surface-elevated)] text-[var(--navy-600)] hover:text-[var(--navy-900)]'
+                                  }`}
+                                >
+                                  {pct}%
+                                </button>
+                              );
+                            })}
+                          </div>
+                          <span className="text-[10px] text-[var(--navy-600)]">
+                            Tip: Hold Ctrl + Scroll to zoom up to 200%
+                          </span>
+                        </div>
                       </div>
                     );
                   })()}

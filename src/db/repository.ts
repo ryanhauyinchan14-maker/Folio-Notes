@@ -236,15 +236,23 @@ export class NotesRepository {
       .sort((a, b) => b.updatedAt - a.updatedAt);
 
     const coverThumbnails: Record<string, string | undefined> = {};
+    const unlockedFirstPageNotebooks: Array<{ nbId: string; pageId: string }> = [];
     for (const nb of notebooks) {
       if (nb.isLocked) {
         coverThumbnails[nb.id] = undefined;
         continue;
       }
       if (nb.pageOrder.length > 0) {
-        const firstPage = await this.database.pages.get(nb.pageOrder[0]);
-        coverThumbnails[nb.id] = firstPage?.thumbnailDataUrl;
+        unlockedFirstPageNotebooks.push({ nbId: nb.id, pageId: nb.pageOrder[0] });
       }
+    }
+    if (unlockedFirstPageNotebooks.length > 0) {
+      const firstPages = await this.database.pages.bulkGet(
+        unlockedFirstPageNotebooks.map((item) => item.pageId),
+      );
+      unlockedFirstPageNotebooks.forEach((item, idx) => {
+        coverThumbnails[item.nbId] = firstPages[idx]?.thumbnailDataUrl;
+      });
     }
 
     return { folders, notebooks, breadcrumbs, coverThumbnails };
@@ -409,10 +417,11 @@ export class NotesRepository {
     initialStrokes?: Stroke[];
     initialTextboxes?: Textbox[];
     initialImages?: PageImage[];
+    initialNoteData?: NoteDocumentData;
+    initialSlides?: SlideData[];
   }): Promise<{ notebook: Notebook; firstPage: Page }> {
     const now = Date.now();
     const notebookId = createId();
-    const pageId = createId();
     const mode: NotebookMode =
       params.mode === 'whiteboard' || params.mode === 'notes' || params.mode === 'slides'
         ? params.mode
@@ -442,11 +451,17 @@ export class NotesRepository {
         ? 'Untitled Document'
         : isWhiteboard
           ? 'Untitled Whiteboard'
-          : 'Untitled Board';
+          : 'Untitled Canvas';
     const resolvedTitle = params.title.trim() || defaultUntitled;
-    const noteData = isNotes ? createDefaultNoteDocumentData() : null;
-    const slideData = isSlides
-      ? createStarterSlideData(paper.width, paper.height, resolvedTitle)
+    const noteData = isNotes
+      ? params.initialNoteData
+        ? structuredClone(params.initialNoteData)
+        : createDefaultNoteDocumentData()
+      : null;
+    const slidesToCreate: SlideData[] | null = isSlides
+      ? params.initialSlides && params.initialSlides.length > 0
+        ? params.initialSlides.map((s) => structuredClone(s))
+        : [createStarterSlideData(paper.width, paper.height, resolvedTitle)]
       : null;
 
     const thumbnailDataUrl = generatePageThumbnail(
@@ -459,19 +474,36 @@ export class NotesRepository {
       isWhiteboard,
     );
 
-    const firstPage: Page = {
-      id: pageId,
-      notebookId,
-      paper,
-      strokes,
-      textboxes,
-      images,
-      ...(noteData ? { noteData } : {}),
-      ...(slideData ? { slideData } : {}),
-      thumbnailDataUrl,
-      createdAt: now,
-      updatedAt: now,
-    };
+    const createdPages: Page[] = slidesToCreate
+      ? slidesToCreate.map((slideData, idx) => ({
+          id: createId(),
+          notebookId,
+          paper: clonePaper(paper),
+          strokes: idx === 0 ? strokes : [],
+          textboxes: idx === 0 ? textboxes : [],
+          images: idx === 0 ? images : [],
+          slideData,
+          thumbnailDataUrl,
+          createdAt: now + idx,
+          updatedAt: now + idx,
+        }))
+      : [
+          {
+            id: createId(),
+            notebookId,
+            paper,
+            strokes,
+            textboxes,
+            images,
+            ...(noteData ? { noteData } : {}),
+            thumbnailDataUrl,
+            createdAt: now,
+            updatedAt: now,
+          },
+        ];
+
+    const firstPage = createdPages[0];
+    const pageOrder = createdPages.map((p) => p.id);
 
     const notebook: Notebook = {
       id: notebookId,
@@ -481,14 +513,18 @@ export class NotesRepository {
       folderId: params.folderId,
       cover: { ...params.cover },
       defaultPaper: clonePaper(paper),
-      pageOrder: [pageId],
-      lastOpenedPageId: pageId,
+      pageOrder,
+      lastOpenedPageId: firstPage.id,
       createdAt: now,
       updatedAt: now,
     };
 
     await this.database.transaction('rw', this.database.notebooks, this.database.pages, async () => {
-      await this.database.pages.add(firstPage);
+      if (createdPages.length === 1) {
+        await this.database.pages.add(firstPage);
+      } else {
+        await this.database.pages.bulkAdd(createdPages);
+      }
       await this.database.notebooks.add(notebook);
     });
 
